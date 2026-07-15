@@ -36,9 +36,12 @@
         android:theme="@style/Theme.EL15LoadControl"
         tools:targetApi="31">
 
+        <!-- uiMode is handled so a day/night flip can't destroy a live BLE
+             session or abort a running sweep; MainActivity recreates itself
+             for the new palette once the session is idle. -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:exported="true"
             android:label="@string/app_name">
             <intent-filter>

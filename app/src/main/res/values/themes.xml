@@ -19,6 +19,10 @@
         <item name="colorError">@color/value_red</item>
         <item name="android:statusBarColor">@color/header_top</item>
         <item name="android:navigationBarColor">@color/background</item>
+        <!-- Dark icons on the light theme's light system bars (and vice versa);
+             without this, light-theme status-bar icons are white-on-light. -->
+        <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">@bool/light_system_bars</item>
         <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
 
         <item name="shapeAppearanceSmallComponent">@style/Shape.None</item>

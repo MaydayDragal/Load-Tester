@@ -60,6 +60,12 @@ class CircuitResistanceTester(
     var settleMs: Long = 800L
     /** Sampling window per step (ms); readings arrive at the poll rate (~2 Hz). */
     var collectMs: Long = 1500L
+    /** Device poll interval; priming and step windows are stretched to cover it. */
+    var pollIntervalMs: Long = 500L
+
+    private val effectiveSettleMs: Long get() = maxOf(settleMs, pollIntervalMs + 100)
+    private val effectiveCollectMs: Long get() = maxOf(collectMs, 2 * pollIntervalMs + 200)
+    private val primeWaitMs: Long get() = maxOf(PRIME_MS, 2 * pollIntervalMs + 300)
 
     val running: Boolean get() = state != State.IDLE
 
@@ -99,7 +105,9 @@ class CircuitResistanceTester(
         ble.setMode(El15Protocol.MODE_CC)
         ble.setSetpoint(0f)
         ble.setLoad(false)
-        schedule({ finishPriming() }, PRIME_MS)
+        // Wait long enough to see at least two polls at the configured rate,
+        // so a slow poll interval can't falsely abort with "no reading".
+        schedule({ finishPriming() }, primeWaitMs)
     }
 
     /**
@@ -154,6 +162,10 @@ class CircuitResistanceTester(
     /** Feed a live device reading into the running test. */
     fun onStatus(status: El15Status) {
         if (!running) return
+        // Corrupt or truncated frames must not steer the sweep: a bit-flipped
+        // voltage would skew the regression, and corrupted status bits could
+        // fake a protection trip and abort a healthy run.
+        if (!status.valid) return
         if (status.warning.isNotEmpty()) {
             abort("Load protection tripped (${status.warning}). Test stopped.")
             return
@@ -184,8 +196,8 @@ class CircuitResistanceTester(
         schedule({
             stepBuffer.clear()
             state = State.COLLECTING
-            schedule({ endStep() }, collectMs)
-        }, settleMs)
+            schedule({ endStep() }, effectiveCollectMs)
+        }, effectiveSettleMs)
     }
 
     private fun endStep() {
@@ -204,6 +216,15 @@ class CircuitResistanceTester(
     }
 
     private fun complete() {
+        // A sweep that produced fewer than two usable points is a failure, not
+        // a result — the V–I slope needs at least two samples.
+        if (results.size < 2) {
+            abort(
+                "Test produced ${results.size} sample(s) — no readings arrived during the " +
+                    "sample windows. Increase the sample window or lower the poll interval."
+            )
+            return
+        }
         finishSafely()
         state = State.IDLE
         callback.onTestComplete(computeResult())

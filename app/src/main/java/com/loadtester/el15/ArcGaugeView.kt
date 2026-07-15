@@ -46,8 +46,12 @@ class ArcGaugeView @JvmOverloads constructor(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val w = MeasureSpec.getSize(widthMeasureSpec)
-        setMeasuredDimension(w, (w * 96f / 180f).toInt())
+        // Honour the MeasureSpec contract: resolve the width against the spec,
+        // then derive the 180:96 aspect height and resolve that too.
+        val w = resolveSize(suggestedMinimumWidth.coerceAtLeast(
+            MeasureSpec.getSize(widthMeasureSpec)), widthMeasureSpec)
+        val desiredH = (w * 96f / 180f).toInt()
+        setMeasuredDimension(w, resolveSize(desiredH, heightMeasureSpec))
     }
 
     override fun onDraw(canvas: Canvas) {

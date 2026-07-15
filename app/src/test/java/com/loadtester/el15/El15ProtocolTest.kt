@@ -139,11 +139,16 @@ class El15ProtocolTest {
         assertEquals("UVP", uvp.warning)
     }
 
-    @Test fun badCrcIsFlagged() {
+    @Test fun badCrcIsFlaggedAndGated() {
         val p = buildPacket(El15Protocol.MODE_CC, 12f, 1f)
         p[27] = (p[27] + 1).toByte()
         val s = El15Protocol.parseStatus(p)
         assertFalse(s.crcPass)
+        // Corrupt frames must never be marked valid — the resistance sweep and
+        // readouts gate on this flag.
+        assertFalse(s.valid)
+        // Raw hex stays populated for the packet inspector.
+        assertTrue(s.raw.startsWith("DF 07 03 08"))
     }
 
     @Test fun shortOrForeignPacketIsInvalid() {

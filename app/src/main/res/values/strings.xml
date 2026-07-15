@@ -3,16 +3,16 @@
     <string name="app_name_caps">EL15 LOAD CONTROL</string>
     <string name="app_kicker">ALIENTEK · Electronic Load</string>
     <string name="no_device">No device</string>
-    <string name="tab_monitor">Monitor</string>
-    <string name="tab_test">Resistance Test</string>
     <string name="settings">Settings</string>
     <string name="about">About</string>
     <string name="disconnected">Disconnected</string>
     <string name="waveform">Live waveform</string>
+    <string name="cd_wave_pause">Pause or resume the waveform</string>
+    <string name="cd_wave_record">Record waveform samples</string>
+    <string name="cd_wave_export">Export waveform as CSV</string>
     <string name="waveform_legend">● Voltage   ● Current</string>
     <string name="packet_inspector">Packet inspector</string>
-    <string name="rt_fuse_helper">Sweep peaks at 80%% of this, capped to the EL15\'s 12 A / 150 W.</string>
-    <string name="rt_ratings_note">Auto tests never exceed the EL15\'s ratings (12 A, 150 W, 0.1–60 V). Results open in a detailed, exportable report.</string>
+    <string name="rt_fuse_helper" formatted="false">Sweep peaks at 80% of this, capped to the EL15\'s 12 A / 150 W.</string>
     <string name="scan_connect">Scan &amp; Connect</string>
     <string name="disconnect">Disconnect</string>
     <string name="cancel">Cancel</string>
@@ -21,9 +21,8 @@
     <string name="lock">Lock Keypad</string>
     <string name="locked">Keypad Locked</string>
     <string name="set">Set</string>
-    <string name="set_mode">Set Mode</string>
     <string name="setpoint">Setpoint</string>
-    <string name="about_body">EL15 Load Control — an Android client for the ALIENTEK EL15 electronic load over Bluetooth Low Energy.\n\nVersion 1.0\n\nBLE protocol reverse-engineered from the DM40GUI desktop project (github.com/maj113/DM40GUI). Includes live monitoring, a waveform recorder with CSV export, and a fuse-aware circuit-resistance test with a detailed, exportable report.\n\nThis is an independent client and is not affiliated with ALIENTEK.</string>
+    <string name="about_body">EL15 Load Control — an Android client for the ALIENTEK EL15 electronic load over Bluetooth Low Energy.\n\nVersion %1$s\n\nBLE protocol reverse-engineered from the DM40GUI desktop project (github.com/maj113/DM40GUI). Includes live monitoring, a waveform recorder with CSV export, and a fuse-aware circuit-resistance test with a detailed, exportable report.\n\nThis is an independent client and is not affiliated with ALIENTEK.</string>
     <string name="voltage">Voltage</string>
     <string name="current">Current</string>
     <string name="power">Power</string>
@@ -31,11 +30,10 @@
     <string name="protection">⚠ PROTECTION: %1$s</string>
 
     <!-- Circuit resistance test -->
-    <string name="rt_title">Circuit Resistance Test</string>
     <string name="rt_hint">Fuse rating (A)</string>
     <string name="rt_start">Start Test</string>
     <string name="rt_stop">Stop</string>
-    <string name="rt_explain">Loads the circuit in steps up to 80%% of the fuse rating, then computes resistance from the V–I slope.</string>
+    <string name="rt_explain" formatted="false">Loads the circuit in steps up to 80% of the fuse rating, then computes resistance from the V–I slope.</string>
     <string name="rt_confirm_title">Start resistance test?</string>
     <string name="rt_confirm_msg">This will draw up to %1$.2f A — limited by %2$s. The sweep stays within the EL15\'s 12 A / 150 W ratings. Make sure your wiring and source can handle it, then keep clear.</string>
     <string name="rt_results_title">Resistance Test Results</string>

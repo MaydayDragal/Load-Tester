@@ -47,7 +47,7 @@
                     android:id="@+id/connButton"
                     style="@style/BtnPrimary"
                     android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:minHeight="0dp" android:paddingHorizontal="14dp"
+                    android:minHeight="0dp" android:paddingStart="14dp" android:paddingEnd="14dp"
                     android:text="@string/scan_connect" />
             </LinearLayout>
         </com.loadtester.el15.BlueprintFrame>
@@ -57,12 +57,12 @@
             android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="11dp" android:orientation="horizontal"
             android:gravity="center_vertical" android:padding="10dp"
-            android:background="#3A1416" android:visibility="gone">
+            android:background="@drawable/protection_banner" android:visibility="gone">
             <ImageView android:layout_width="16dp" android:layout_height="16dp"
-                android:src="@drawable/ic_warning" app:tint="#FF9A9C" />
+                android:src="@drawable/ic_warning" app:tint="@color/protection_fg" />
             <TextView android:id="@+id/warningText"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginStart="8dp" android:textColor="#FF9A9C"
+                android:layout_marginStart="8dp" android:textColor="@color/protection_fg"
                 android:textStyle="bold" android:textSize="13sp" android:text="@string/protection" />
         </LinearLayout>
 
@@ -70,7 +70,7 @@
         <com.loadtester.el15.BlueprintFrame
             android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="11dp" android:background="@color/surface"
-            android:paddingHorizontal="15dp" android:paddingVertical="14dp">
+            android:paddingStart="15dp" android:paddingEnd="15dp" android:paddingTop="14dp" android:paddingBottom="14dp">
 
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:orientation="vertical">
@@ -269,12 +269,15 @@
                         android:text="@string/waveform" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/wavePauseButton"
                         style="@style/IconBtn" android:layout_width="32dp" android:layout_height="32dp"
+                        android:contentDescription="@string/cd_wave_pause"
                         app:icon="@drawable/ic_pause" app:iconGravity="textStart" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/waveRecordButton"
                         style="@style/IconBtn" android:layout_width="32dp" android:layout_height="32dp"
+                        android:contentDescription="@string/cd_wave_record"
                         android:layout_marginStart="4dp" app:icon="@drawable/ic_record" app:iconTint="@null" />
                     <com.google.android.material.button.MaterialButton android:id="@+id/waveExportButton"
                         style="@style/IconBtn" android:layout_width="32dp" android:layout_height="32dp"
+                        android:contentDescription="@string/cd_wave_export"
                         android:layout_marginStart="4dp" app:icon="@drawable/ic_download" />
                 </LinearLayout>
 
@@ -308,7 +311,7 @@
                     <TextView android:id="@+id/packetCrc"
                         android:layout_width="wrap_content" android:layout_height="wrap_content"
                         android:fontFamily="monospace" android:textStyle="bold" android:textSize="11sp"
-                        android:paddingHorizontal="8dp" android:paddingVertical="2dp"
+                        android:paddingStart="8dp" android:paddingEnd="8dp" android:paddingTop="2dp" android:paddingBottom="2dp"
                         android:text="CRC —" android:textColor="@color/muted" />
                 </LinearLayout>
                 <TextView android:id="@+id/packetHex"

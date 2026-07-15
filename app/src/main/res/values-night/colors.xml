@@ -26,4 +26,9 @@
 
     <color name="header_top">#0F1721</color>
     <color name="header_bottom">#0B1016</color>
+
+    <!-- Protection banner -->
+    <color name="protection_bg">#3A1416</color>
+    <color name="protection_border">#EF5350</color>
+    <color name="protection_fg">#FF9A9C</color>
 </resources>

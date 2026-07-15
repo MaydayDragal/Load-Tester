@@ -27,21 +27,24 @@ Light/dark follow the theme setting; the dark treatment is the hero.
 
 ## Interface (features)
 
-A Material 3 app with a top app bar and two tabs — **Monitor** and **Resistance
-Test** — plus a **Settings** screen (gear icon) and an About dialog.
+A single **Monitor** screen (no tabs) with a custom top app bar, plus a
+**Settings** screen (gear icon) and an About dialog.
 
-- **Monitor**: connection status, large voltage/current/power/mode readouts,
-  a six-mode selector (CC/CV/CR/CP/CAP/DCR), setpoint entry, load ON/OFF, keypad
-  lock, a **live scrolling waveform** (voltage + current) with pause, recording,
-  CSV export and min/avg/max statistics, and a **raw packet inspector** (hex +
-  CRC pass/fail) — mirroring the original DM40GUI EL15 feature set.
-- **Resistance Test**: fuse-driven sweep with per-run options (see below).
-- **Settings**: theme (system/light/dark), six accent colours, poll interval,
+- **Monitor**: connection status, arc-gauge voltage/current readouts with power
+  bar and mode, a seven-chip mode selector (CC/CV/CR/CP/CAP/DCR/**R-TEST** —
+  the resistance test lives in place of a tab), setpoint entry, load ON/OFF,
+  keypad lock, a **live scrolling waveform** (voltage + current) with pause,
+  recording, CSV export and min/avg/max statistics, and a **raw packet
+  inspector** (hex + CRC pass/fail) — mirroring the original DM40GUI EL15
+  feature set.
+- **Settings**: theme (system/light/dark; fixed steel accent), poll interval,
   resistance-test defaults, demo-circuit defaults, keep-screen-on, and About.
 
 ## Features
 
-- **Scan & connect** to the EL15 over BLE (filters on the FFF0 service).
+- **Scan & connect** to the EL15 over BLE (unfiltered scan of named devices;
+  the FFF0 service is verified after connecting, and the app negotiates a
+  larger MTU for the 28-byte status frames).
 - **Live readouts**, updated ~2×/sec: voltage, current, power, active mode,
   runtime, temperature, fan speed.
 - **Mode switching**: CC, CV, CR, CP, CAP (capacity), DCR (internal resistance).

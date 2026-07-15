@@ -13,8 +13,8 @@
         android:background="@drawable/header_bg"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingHorizontal="13dp"
-        android:paddingVertical="9dp"
+        android:paddingStart="13dp" android:paddingEnd="13dp"
+        android:paddingTop="9dp" android:paddingBottom="9dp"
         android:fitsSystemWindows="true">
 
         <FrameLayout

@@ -41,6 +41,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     private var maxVoltageSeen = 0f
 
     private var simulator: El15Simulator? = null
+    private var pendingThemeRecreate = false
     private var demoEmf = 12.6f
     private var demoSeriesR = 0.35f
 
@@ -103,23 +104,46 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         super.onResume()
         val poll = Prefs.pollMs(this)
         ble.pollIntervalMs = poll; simulator?.pollIntervalMs = poll
+        tester.pollIntervalMs = poll
         tester.safetyFactor = Prefs.safetyFactor(this)
+        // Demo circuit may have been edited in Settings; apply it live.
+        val newEmf = Prefs.demoEmf(this); val newR = Prefs.demoR(this)
+        if (newEmf != demoEmf || newR != demoSeriesR) {
+            demoEmf = newEmf; demoSeriesR = newR
+            simulator?.let { it.emf = demoEmf; it.seriesR = demoSeriesR; updateDemoStatusText() }
+        }
         if (Prefs.keepScreenOn(this)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // uiMode is in configChanges so a day/night flip cannot destroy a live
+        // BLE session or abort a running sweep. Restyle by recreating, but only
+        // when idle; otherwise keep the stale palette until the session ends.
+        if (!isConnected() && !tester.running) {
+            recreate()
+        } else {
+            pendingThemeRecreate = true
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        if (tester.running) tester.stop()
+        val wasTesting = tester.running
+        if (wasTesting) tester.stop()
         simulator?.stop()
-        ble.disconnect()
+        // shutdownAndDisconnect writes LOAD_OFF directly on the GATT before
+        // teardown — the queued writes from tester.stop() would otherwise be
+        // cleared by a plain disconnect and the load left sinking current.
+        if (wasTesting) ble.shutdownAndDisconnect() else ble.disconnect()
     }
 
     private fun color(res: Int) = ContextCompat.getColor(this, res)
 
     private fun showAbout() = MaterialAlertDialogBuilder(this)
         .setTitle(getString(R.string.app_name))
-        .setMessage(getString(R.string.about_body))
+        .setMessage(getString(R.string.about_body, BuildConfig.VERSION_NAME))
         .setPositiveButton(android.R.string.ok, null).show()
 
     // ---- Controls ---------------------------------------------------------
@@ -153,6 +177,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         }
         chipRtest.setOnClickListener {
             if (updatingChips) return@setOnClickListener
+            if (rtestActive && !chipRtest.isChecked) {
+                // Re-tap on the active chip: keep it selected, panel stays.
+                updatingChips = true; chipRtest.isChecked = true; updatingChips = false
+                return@setOnClickListener
+            }
             rtestActive = true
             deviceControls.visibility = View.GONE
             rtestPanel.visibility = View.VISIBLE
@@ -236,8 +265,8 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         val est = (tester.steps * (tester.settleMs + tester.collectMs) / 1000.0).toInt()
         testProgressText.text = "Priming… (~${est}s)"
         startTestButton.setText(R.string.rt_stop)
+        tester.start(fuse) // start FIRST so tester.running locks the controls below
         updateControlsEnabled(true)
-        tester.start(fuse)
     }
 
     private fun onTestFinishedUi(message: String?) = with(binding.monitor) {
@@ -328,6 +357,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     private fun stopSimulator() {
         if (tester.running) tester.stop()
         simulator?.stop(); simulator = null
+        if (pendingThemeRecreate) { pendingThemeRecreate = false; recreate(); return }
         binding.monitor.connStatusText.text = getString(R.string.disconnected)
         binding.monitor.connStatusSub.text = getString(R.string.no_device)
         binding.monitor.connButton.text = getString(R.string.scan_connect)
@@ -339,7 +369,20 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         binding.monitor.connStatusSub.text = "%.1f V · %.3f Ω · tap to edit circuit".format(demoEmf, demoSeriesR)
     }
 
-    private fun disconnectAll() { if (simulator != null) stopSimulator() else ble.disconnect() }
+    private fun disconnectAll() {
+        if (simulator != null) {
+            stopSimulator()
+            return
+        }
+        // Stop the tester BEFORE tearing BLE down, and use the safe shutdown
+        // path so the final LOAD_OFF is written even mid-sweep.
+        val wasTesting = tester.running
+        if (wasTesting) {
+            tester.stop()
+            onTestFinishedUi("Test stopped")
+        }
+        if (wasTesting) ble.shutdownAndDisconnect() else ble.disconnect()
+    }
 
     private fun showDemoConfigDialog(applyLive: Boolean, onDone: (() -> Unit)?) {
         val view = layoutInflater.inflate(R.layout.dialog_demo_circuit, null)
@@ -371,7 +414,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
                 val sb = StringBuilder("time_ms,elapsed_s,voltage_V,current_A,power_W,temp_C,fan\n")
                 val t0 = rows.first().tMs
                 for (r in rows) sb.append("%d,%.3f,%.4f,%.4f,%.4f,%.2f,%d\n".format(
-                    r.tMs, (r.tMs - t0) / 1000.0, r.v, r.i, r.p, r.temp, r.fan))
+                    java.util.Locale.US, r.tMs, (r.tMs - t0) / 1000.0, r.v, r.i, r.p, r.temp, r.fan))
                 out.write(sb.toString().toByteArray())
             }
             val uri: Uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
@@ -390,6 +433,10 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     }
 
     private fun clearReadouts() = with(binding.monitor) {
+        loadToggle.setText(R.string.load_on)
+        loadToggle.backgroundTintList =
+            android.content.res.ColorStateList.valueOf(color(R.color.value_green))
+        lockButton.setText(R.string.lock)
         gaugeVoltage.set(0f, 20f, 2, "VOLTS · 0–20V", false)
         gaugeCurrent.set(0f, 12f, 3, "AMPS · 0–12A", false)
         powerValue.text = "—"; powerBar.progress = 0; modeValue.text = "—"; extraValue.text = ""
@@ -420,6 +467,10 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         updateControlsEnabled(connected)
         if (state != El15BleManager.State.SCANNING) deviceDialog?.dismiss()
         if (!connected) { maxVoltageSeen = 0f; clearReadouts() }
+        if (!connected && pendingThemeRecreate && !tester.running) {
+            pendingThemeRecreate = false
+            recreate()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -432,7 +483,13 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     override fun onStatus(status: El15Status) = handleIncomingStatus(status)
 
-    private fun handleIncomingStatus(status: El15Status) = with(binding.monitor) {
+    private fun handleIncomingStatus(status: El15Status): Unit = with(binding.monitor) {
+        // Packet inspector shows every frame, including corrupt ones…
+        packetHex.text = status.raw.ifEmpty { "— no packets —" }
+        packetCrc.text = "CRC ${if (status.crcPass) "✓" else "✗"}"
+        packetCrc.setTextColor(color(if (status.crcPass) R.color.value_green else R.color.value_red))
+        // …but nothing else may consume a corrupt/truncated frame's values.
+        if (!status.valid) return
         lastStatus = status
         if (tester.running) tester.onStatus(status)
 
@@ -465,12 +522,10 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
         setpointLayout.hint = "${status.setpointLabel} (${status.setpointUnit})"
         if (!userEditingSetpoint && status.setpointInPacket) {
-            setpointInput.setText("%.${status.setpointDecimals}f".format(status.setpoint))
+            // Locale.US: this text is re-parsed by toFloatOrNull on SET, which
+            // rejects comma decimals.
+            setpointInput.setText("%.${status.setpointDecimals}f".format(java.util.Locale.US, status.setpoint))
         }
-
-        packetHex.text = status.raw.ifEmpty { "— no packets —" }
-        packetCrc.text = "CRC ${if (status.crcPass) "✓" else "✗"}"
-        packetCrc.setTextColor(color(if (status.crcPass) R.color.value_green else R.color.value_red))
 
         waveformView.add(status.voltage, curr, status.power, status.temperature, status.fanSpeed, System.currentTimeMillis())
         waveStats.text = waveformView.statsText()
@@ -505,9 +560,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         chipRtest.isEnabled = idle
         setpointInput.isEnabled = deviceMode; setSetpointButton.isEnabled = deviceMode
         lockButton.isEnabled = deviceMode
-        loadToggle.isEnabled = connected && !tester.running
+        // Enabled while disconnected on purpose: tapping it opens the scan
+        // dialog (see the click handler). Only a running sweep locks it.
+        loadToggle.isEnabled = !tester.running
         fuseInput.isEnabled = idle; stepsInput.isEnabled = idle; settleInput.isEnabled = idle; sampleInput.isEnabled = idle
-        startTestButton.isEnabled = connected
+        startTestButton.isEnabled = !tester.running || connected
     }
 
     private fun toast(msg: String) = android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()

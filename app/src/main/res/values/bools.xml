@@ -1,0 +1,4 @@
+<resources>
+    <!-- Light theme: dark system-bar icons on the light header/background. -->
+    <bool name="light_system_bars">true</bool>
+</resources>

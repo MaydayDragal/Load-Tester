@@ -65,9 +65,9 @@
     </PreferenceCategory>
 
     <PreferenceCategory app:title="About">
+        <!-- Summary is set at runtime from BuildConfig.VERSION_NAME. -->
         <Preference
             app:key="pref_about"
-            app:title="EL15 Load Control"
-            app:summary="Version 1.0 · tap for details" />
+            app:title="EL15 Load Control" />
     </PreferenceCategory>
 </PreferenceScreen>

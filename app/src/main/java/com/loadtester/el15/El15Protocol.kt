@@ -120,7 +120,9 @@ object El15Protocol {
         val s = El15Status()
         s.raw = data.joinToString(" ") { "%02X".format(it) }
         s.crcPass = (data.sumOf { it.toInt() and 0xFF } and 0xFF) == 0
-        if (data.size < 28 || !isStatusPacket(data)) {
+        // Corrupt frames stay valid=false so nothing downstream consumes their
+        // values; raw/crcPass remain populated for the packet inspector.
+        if (data.size < 28 || !isStatusPacket(data) || !s.crcPass) {
             return s
         }
 

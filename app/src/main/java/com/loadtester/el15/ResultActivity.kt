@@ -333,15 +333,15 @@ class ResultActivity : BaseActivity() {
                 val sb = StringBuilder()
                 sb.append("# EL15 circuit resistance test\n")
                 sb.append("# ").append(buildMetadata().replace("\n", "\n# ")).append("\n")
-                sb.append("# resistance_ohm,%.6f\n".format(resistance))
-                sb.append("# open_circuit_v,%.4f\n".format(vOc))
-                sb.append("# r_squared,%.6f\n".format(rSquared))
+                sb.append("# resistance_ohm,%.6f\n".format(Locale.US, resistance))
+                sb.append("# open_circuit_v,%.4f\n".format(Locale.US, vOc))
+                sb.append("# r_squared,%.6f\n".format(Locale.US, rSquared))
                 if (notesText().isNotEmpty()) sb.append("# notes,").append(notesText().replace("\n", " ")).append("\n")
                 sb.append("step,current_A,voltage_V,power_W,temp_C,fan,resistance_at_point_ohm\n")
                 samples.forEachIndexed { idx, s ->
                     val rPt = if (s.current > 1e-4f && vOc > 0f) (vOc - s.voltage) / s.current else 0f
                     sb.append("%d,%.4f,%.4f,%.4f,%.2f,%d,%.4f\n".format(
-                        idx + 1, s.current, s.voltage, s.power, s.temperature, s.fanSpeed, rPt))
+                        Locale.US, idx + 1, s.current, s.voltage, s.power, s.temperature, s.fanSpeed, rPt))
                 }
                 out.write(sb.toString().toByteArray())
             }

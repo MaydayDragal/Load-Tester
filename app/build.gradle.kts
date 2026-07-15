@@ -22,6 +22,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Debug-signed so assembleRelease produces an installable APK for
+            // sideloading. Replace with a real signing config for store release.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -34,6 +37,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 

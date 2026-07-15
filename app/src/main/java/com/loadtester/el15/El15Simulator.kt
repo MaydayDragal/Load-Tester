@@ -36,6 +36,10 @@ class El15Simulator(
     private var lockOn: Boolean = false
     private var runtimeSec: Int = 0
     private var ticks: Int = 0
+    private var runMsAcc: Long = 0
+
+    /** Series resistance floored at 1 mOhm so the circuit math can never divide by zero. */
+    private val rEff: Float get() = max(seriesR, 0.001f)
     private var rngState: Int = 0x2545F491
 
     // Accumulators for CAP mode.
@@ -49,7 +53,7 @@ class El15Simulator(
 
     fun start() {
         stop()
-        runtimeSec = 0; ticks = 0; energyWh = 0f; capacityAh = 0f
+        runtimeSec = 0; ticks = 0; runMsAcc = 0; energyWh = 0f; capacityAh = 0f
         val r = object : Runnable {
             override fun run() {
                 tick()
@@ -69,14 +73,14 @@ class El15Simulator(
     override fun setMode(mode: Int) {
         this.mode = mode
         // Reset accumulators when entering CAP/leaving, mirroring device behaviour.
-        energyWh = 0f; capacityAh = 0f; runtimeSec = 0
+        energyWh = 0f; capacityAh = 0f; runtimeSec = 0; runMsAcc = 0
     }
 
     override fun setSetpoint(value: Float) { setpoint = max(value, 0f) }
 
     override fun setLoad(on: Boolean) {
         loadOn = on
-        if (!on) runtimeSec = 0
+        if (!on) { runtimeSec = 0; runMsAcc = 0 }
     }
 
     override fun setLock() { lockOn = !lockOn }
@@ -86,7 +90,8 @@ class El15Simulator(
         ticks++
         val (voltage, current, warn) = solveClamped()
         if (loadOn && current > 0.001f) {
-            if (ticks % 2 == 0) runtimeSec += 1 // ~1s per two ticks
+            runMsAcc += pollIntervalMs
+            runtimeSec = (runMsAcc / 1000L).toInt()
             val dtHours = pollIntervalMs / 3_600_000f
             energyWh += voltage * current * dtHours
             capacityAh += current * dtHours
@@ -128,7 +133,7 @@ class El15Simulator(
             El15Protocol.MODE_DCR -> {
                 putF32(pkt, 15, current)          // I1
                 putF32(pkt, 19, current * 0.5f)   // I2
-                putF32(pkt, 23, seriesR * 1000f)  // mΩ
+                putF32(pkt, 23, rEff * 1000f)  // mΩ
             }
             else -> {
                 putI32(pkt, 15, runtimeSec)
@@ -166,14 +171,14 @@ class El15Simulator(
     private fun solveClamped(): Triple<Float, Float, String> {
         val (vRaw, iRaw) = solve()
         var i = min(iRaw, El15Protocol.MAX_CURRENT_A)
-        var v = if (loadOn) max(emf - i * seriesR, 0f) else vRaw
+        var v = if (loadOn) max(emf - i * rEff, 0f) else vRaw
         var warn = ""
         // Over-power protection (with a small tolerance, like real OPP).
         if (loadOn && v * i > El15Protocol.MAX_POWER_W * 1.02f) {
-            val disc = emf * emf - 4 * seriesR * El15Protocol.MAX_POWER_W
-            i = if (disc > 0f) (emf - sqrt(disc)) / (2 * seriesR)
+            val disc = emf * emf - 4 * rEff * El15Protocol.MAX_POWER_W
+            i = if (disc > 0f) (emf - sqrt(disc)) / (2 * rEff)
                 else El15Protocol.MAX_POWER_W / max(v, 0.1f)
-            v = max(emf - i * seriesR, 0f)
+            v = max(emf - i * rEff, 0f)
             warn = "OPP"
         } else if (loadOn && iRaw > El15Protocol.MAX_CURRENT_A * 1.001f) {
             warn = "OCP"
@@ -185,28 +190,28 @@ class El15Simulator(
     private fun solve(): Pair<Float, Float> {
         if (!loadOn) return emf to 0f
         // Physical ceiling: terminal voltage cannot fall below ~0.3 V.
-        val iCeil = (emf - 0.3f) / seriesR
+        val iCeil = (emf - 0.3f) / rEff
         val i = when (mode) {
             El15Protocol.MODE_CC, El15Protocol.MODE_CAP, El15Protocol.MODE_DCR ->
                 min(setpoint, iCeil)
             El15Protocol.MODE_CV -> {
                 val vSet = min(setpoint, emf)
-                max((emf - vSet) / seriesR, 0f)
+                max((emf - vSet) / rEff, 0f)
             }
             El15Protocol.MODE_CR -> {
                 val rLoad = max(setpoint, 0.01f)
-                emf / (seriesR + rLoad)
+                emf / (rEff + rLoad)
             }
             El15Protocol.MODE_CP -> {
                 // Solve V*I = P with V = emf - I*R  ->  R*I^2 - emf*I + P = 0
                 val p = setpoint
-                val disc = emf * emf - 4 * seriesR * p
-                if (disc <= 0f) iCeil else min((emf - sqrt(disc)) / (2 * seriesR), iCeil)
+                val disc = emf * emf - 4 * rEff * p
+                if (disc <= 0f) iCeil else min((emf - sqrt(disc)) / (2 * rEff), iCeil)
             }
             else -> min(setpoint, iCeil)
         }
         val current = max(i, 0f)
-        val voltage = max(emf - current * seriesR, 0f)
+        val voltage = max(emf - current * rEff, 0f)
         return voltage to current
     }
 
@@ -245,7 +250,7 @@ class El15Simulator(
                 s.setpointInPacket = false
             }
             El15Protocol.MODE_DCR -> {
-                s.dcrMilliOhm = seriesR * 1000f
+                s.dcrMilliOhm = rEff * 1000f
                 s.dcrI1 = current
                 s.dcrI2 = current * 0.5f
                 s.current = 0f

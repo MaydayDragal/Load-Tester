@@ -59,9 +59,9 @@ class ResistanceChartView @JvmOverloads constructor(
         val axis = if (light) Color.parseColor("#455A64") else Color.parseColor("#8B98A5")
         val label = if (light) Color.parseColor("#102027") else Color.parseColor("#E6EDF3")
         val grid = if (light) Color.parseColor("#DDDDDD") else Color.parseColor("#2A3441")
-        val vColor = Color.parseColor("#4CAF50")
-        val iColor = Color.parseColor("#FFB300")
-        val fit = Color.parseColor("#7BA1C9")
+        val vColor = Color.parseColor(if (light) "#2E7D32" else "#4CAF50")
+        val iColor = Color.parseColor(if (light) "#B26A00" else "#FFB300")
+        val fit = Color.parseColor(if (light) "#3C6188" else "#7BA1C9")
 
         val padL = dpToPx(44f); val padR = dpToPx(16f)
         // Trend mode needs headroom for a multi-series legend.
@@ -83,7 +83,7 @@ class ResistanceChartView @JvmOverloads constructor(
         canvas.drawLine(plot.left, plot.bottom, plot.right, plot.bottom, paint)
 
         if (mode == MODE_VI) drawVi(canvas, plot, grid, vColor, fit, label)
-        else drawTrend(canvas, plot, grid, label)
+        else drawTrend(canvas, plot, grid, label, light)
     }
 
     private fun drawVi(canvas: Canvas, plot: RectF, grid: Int, pointColor: Int, fit: Int, label: Int) {
@@ -120,14 +120,14 @@ class ResistanceChartView @JvmOverloads constructor(
     /** One trace on the normalized trend plot. */
     private class Trace(val name: String, val unit: String, val color: Int, val values: List<Float>)
 
-    private fun drawTrend(canvas: Canvas, plot: RectF, grid: Int, label: Int) {
+    private fun drawTrend(canvas: Canvas, plot: RectF, grid: Int, label: Int, light: Boolean) {
         val n = samples.size
         val traces = listOf(
-            Trace("V", "V", Color.parseColor("#4CAF50"), samples.map { it.voltage }),
-            Trace("I", "A", Color.parseColor("#FFB300"), samples.map { it.current }),
-            Trace("P", "W", Color.parseColor("#7BA1C9"), samples.map { it.power }),
-            Trace("T", "°C", Color.parseColor("#EF5350"), samples.map { it.temperature }),
-            Trace("Fan", "", Color.parseColor("#AB47BC"), samples.map { it.fanSpeed.toFloat() }),
+            Trace("V", "V", Color.parseColor(if (light) "#2E7D32" else "#4CAF50"), samples.map { it.voltage }),
+            Trace("I", "A", Color.parseColor(if (light) "#B26A00" else "#FFB300"), samples.map { it.current }),
+            Trace("P", "W", Color.parseColor(if (light) "#3C6188" else "#7BA1C9"), samples.map { it.power }),
+            Trace("T", "°C", Color.parseColor(if (light) "#C62828" else "#EF5350"), samples.map { it.temperature }),
+            Trace("Fan", "", Color.parseColor(if (light) "#6A1B9A" else "#AB47BC"), samples.map { it.fanSpeed.toFloat() }),
         )
 
         fun x(idx: Int) = plot.left + idx.toFloat() / (n - 1) * plot.width()
