@@ -47,6 +47,17 @@ the step size scales with the rating: a 2 A circuit is probed in tens of mA, a
 exact peak current it will draw. It aborts immediately if the load trips a
 protection (REV/UVP/OVP), and always turns the load off when finished.
 
+**Configurable sweep** — the test card exposes three tunables:
+
+| Option | Range | Default | Effect |
+|--------|-------|---------|--------|
+| **Steps** | 3–20 | 8 | number of current levels in the ladder |
+| **Settle ms** | 100–5000 | 800 | wait after each setpoint change before sampling |
+| **Sample ms** | 200–8000 | 1500 | averaging window per step |
+
+More steps + a longer sample window give a tighter fit at the cost of runtime
+(the card shows the estimated duration when you start).
+
 **Results** — when the sweep completes you get:
 
 - the computed **circuit resistance** (auto Ω / mΩ) and open-circuit voltage,
@@ -104,6 +115,19 @@ Mode IDs: CC `0x01`, CAP `0x02`, CV `0x09`, DCR `0x0A`, CR `0x11`, CP `0x19`.
 
 The full port lives in
 [`El15Protocol.kt`](app/src/main/java/com/loadtester/el15/El15Protocol.kt).
+
+## Demo device (no hardware needed)
+
+Tap **Scan & Connect** and pick **🧪 EL15 Demo (Simulator)** at the top of the
+device list. This connects to a built-in fake load that models a virtual circuit
+(≈12.6 V source behind ≈0.35 Ω) and behaves like a real EL15 — it honours
+mode/setpoint/load commands and streams live readings, so every feature,
+including the circuit-resistance test, works end-to-end. A resistance test
+against the demo recovers ≈0.35 Ω / ≈12.6 V. Implemented in
+[`El15Simulator.kt`](app/src/main/java/com/loadtester/el15/El15Simulator.kt);
+the real transport and the demo share the
+[`El15Controller`](app/src/main/java/com/loadtester/el15/El15Controller.kt)
+interface so the rest of the app is unaware which one it is driving.
 
 ## Building
 

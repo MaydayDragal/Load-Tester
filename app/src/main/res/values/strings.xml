@@ -29,4 +29,12 @@
     <string name="rt_print">Print</string>
     <string name="rt_share">Share</string>
     <string name="rt_low_confidence">⚠ Low-confidence fit — voltage barely changed under load. Check connections, or use a lower-impedance path / higher current.</string>
+    <string name="rt_options">Sweep options</string>
+    <string name="rt_steps">Steps</string>
+    <string name="rt_settle">Settle ms</string>
+    <string name="rt_sample">Sample ms</string>
+
+    <!-- Demo / simulator device -->
+    <string name="demo_device">🧪 EL15 Demo (Simulator)\nTap to try without hardware</string>
+    <string name="demo_connected">Connected — Demo device (simulated ~0.35 Ω circuit)</string>
 </resources>

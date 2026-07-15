@@ -23,7 +23,7 @@ import kotlin.math.min
  * a test is running.
  */
 class CircuitResistanceTester(
-    private val ble: El15BleManager,
+    private val ble: El15Controller,
     private val callback: Callback,
 ) {
     interface Callback {

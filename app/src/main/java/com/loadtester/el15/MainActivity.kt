@@ -3,11 +3,9 @@ package com.loadtester.el15
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.view.View
 import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,13 +27,30 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
     private var selectedMode: Int = El15Protocol.MODE_CC
     private var userEditingSetpoint = false
 
+    /** Non-null while the demo device is "connected". */
+    private var simulator: El15Simulator? = null
+
+    /** The load currently being driven: the demo device if active, else BLE. */
+    private val controller: El15Controller get() = simulator ?: ble
+
+    /** Stable handle for the tester that always forwards to the active controller. */
+    private val activeController = object : El15Controller {
+        override fun setMode(mode: Int) = controller.setMode(mode)
+        override fun setSetpoint(value: Float) = controller.setSetpoint(value)
+        override fun setLoad(on: Boolean) = controller.setLoad(on)
+        override fun setLock() = controller.setLock()
+    }
+
+    private fun isConnected(): Boolean =
+        simulator != null || ble.state == El15BleManager.State.CONNECTED
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
         if (result.values.all { it }) {
-            beginScan()
+            startBleScan()
         } else {
-            toast("Bluetooth permissions are required to connect")
+            toast("Bluetooth permission denied — the demo device is still available")
         }
     }
 
@@ -45,7 +60,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
         setContentView(binding.root)
 
         ble = El15BleManager(this).also { it.listener = this }
-        tester = CircuitResistanceTester(ble, this)
+        tester = CircuitResistanceTester(activeController, this)
 
         setupModeSpinner()
         setupControls()
@@ -56,6 +71,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
     override fun onDestroy() {
         super.onDestroy()
         if (tester.running) tester.stop()
+        simulator?.stop()
         ble.disconnect()
     }
 
@@ -69,17 +85,17 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
             val idx = binding.modeSpinner.selectedItemPosition
             val mode = El15Protocol.SELECTABLE_MODES[idx]
             selectedMode = mode
-            ble.setMode(mode)
+            controller.setMode(mode)
             toast("Mode → ${El15Protocol.MODE_NAMES[mode]}")
         }
     }
 
     private fun setupControls() {
         binding.connectButton.setOnClickListener {
-            when (ble.state) {
-                El15BleManager.State.CONNECTED,
-                El15BleManager.State.CONNECTING -> ble.disconnect()
-                else -> requestScan()
+            if (isConnected() || ble.state == El15BleManager.State.CONNECTING) {
+                disconnectAll()
+            } else {
+                requestScan()
             }
         }
 
@@ -92,7 +108,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
             if (value == null) {
                 toast("Enter a valid number")
             } else {
-                ble.setSetpoint(value)
+                controller.setSetpoint(value)
                 binding.setpointInput.clearFocus()
                 toast("Setpoint → $value")
             }
@@ -100,22 +116,27 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
 
         binding.loadToggle.setOnClickListener {
             val on = lastStatus?.loadOn ?: false
-            ble.setLoad(!on)
+            controller.setLoad(!on)
         }
 
-        binding.lockButton.setOnClickListener { ble.setLock() }
+        binding.lockButton.setOnClickListener { controller.setLock() }
     }
 
     // ---- Circuit resistance test -----------------------------------------
     private fun setupResistanceTest() {
+        // Prefill sweep options with the engine defaults.
+        if (binding.stepsInput.text.isNullOrBlank()) binding.stepsInput.setText(tester.steps.toString())
+        if (binding.settleInput.text.isNullOrBlank()) binding.settleInput.setText(tester.settleMs.toString())
+        if (binding.sampleInput.text.isNullOrBlank()) binding.sampleInput.setText(tester.collectMs.toString())
+
         binding.startTestButton.setOnClickListener {
             if (tester.running) {
                 tester.stop()
                 onTestFinishedUi("Test stopped")
                 return@setOnClickListener
             }
-            if (ble.state != El15BleManager.State.CONNECTED) {
-                toast("Connect to the EL15 first")
+            if (!isConnected()) {
+                toast("Connect to the EL15 (or the demo device) first")
                 return@setOnClickListener
             }
             val fuse = binding.fuseInput.text.toString().trim().toFloatOrNull()
@@ -127,6 +148,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
                 toast("Fuse rating too high (max ${CircuitResistanceTester.ABS_MAX_CURRENT} A test current)")
                 return@setOnClickListener
             }
+            if (!applyTestOptions()) return@setOnClickListener
             val maxI = fuse * tester.safetyFactor
             MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.rt_confirm_title)
@@ -137,10 +159,29 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
         }
     }
 
+    /** Read the user-configurable sweep options; returns false and toasts if invalid. */
+    private fun applyTestOptions(): Boolean {
+        val steps = binding.stepsInput.text.toString().trim().toIntOrNull() ?: DEFAULT_STEPS
+        val settle = binding.settleInput.text.toString().trim().toLongOrNull() ?: DEFAULT_SETTLE_MS
+        val sample = binding.sampleInput.text.toString().trim().toLongOrNull() ?: DEFAULT_SAMPLE_MS
+        if (steps !in 3..20) { toast("Steps must be between 3 and 20"); return false }
+        if (settle !in 100..5000) { toast("Settle time must be 100–5000 ms"); return false }
+        if (sample !in 200..8000) { toast("Sample window must be 200–8000 ms"); return false }
+        tester.steps = steps
+        tester.settleMs = settle
+        tester.collectMs = sample
+        // Reflect any clamping back into the fields.
+        binding.stepsInput.setText(steps.toString())
+        binding.settleInput.setText(settle.toString())
+        binding.sampleInput.setText(sample.toString())
+        return true
+    }
+
     private fun startTest(fuse: Float) {
         binding.fuseInput.clearFocus()
         binding.testProgressText.visibility = View.VISIBLE
-        binding.testProgressText.text = "Priming…"
+        val est = (tester.steps * (tester.settleMs + tester.collectMs) / 1000.0).toInt()
+        binding.testProgressText.text = "Priming… (~${est}s)"
         binding.startTestButton.setText(R.string.rt_stop)
         updateControlsEnabled(true) // refresh: disables manual controls while testing
         tester.start(fuse)
@@ -149,7 +190,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
     private fun onTestFinishedUi(message: String?) {
         binding.startTestButton.setText(R.string.rt_start)
         message?.let { binding.testProgressText.text = it }
-        updateControlsEnabled(ble.state == El15BleManager.State.CONNECTED)
+        updateControlsEnabled(isConnected())
     }
 
     override fun onTestProgress(step: Int, totalSteps: Int, targetCurrent: Float, voltage: Float, current: Float) {
@@ -191,24 +232,21 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
     }
 
     private fun requestScan() {
-        if (!ble.isBluetoothOn) {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Bluetooth is off")
-                .setMessage("Enable Bluetooth to scan for the EL15 load.")
-                .setPositiveButton("Settings") { _, _ ->
-                    startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
+        // The picker always offers the demo device; real scanning is added when
+        // Bluetooth is on and permitted.
+        showDevicePicker()
+        when {
+            !ble.isBluetoothOn ->
+                toast("Bluetooth is off — the demo device is still available")
+            hasPermissions() -> startBleScan()
+            else -> permissionLauncher.launch(requiredPermissions())
         }
-        if (hasPermissions()) beginScan() else permissionLauncher.launch(requiredPermissions())
     }
 
-    private fun beginScan() {
+    private fun startBleScan() {
+        if (deviceDialog?.isShowing != true) return
         foundDevices.clear()
         ble.startScan()
-        showDevicePicker()
     }
 
     private var deviceDialog: AlertDialog? = null
@@ -216,20 +254,63 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
 
     @SuppressLint("MissingPermission")
     private fun showDevicePicker() {
+        foundDevices.clear()
         deviceListAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1)
+        deviceListAdapter.add(getString(R.string.demo_device)) // always position 0
         deviceDialog = MaterialAlertDialogBuilder(this)
-            .setTitle("Select EL15 device")
+            .setTitle("Select device")
             .setAdapter(deviceListAdapter) { _, which ->
-                val device = foundDevices.values.toList().getOrNull(which)
-                if (device != null) ble.connect(device)
+                if (which == 0) {
+                    startSimulator()
+                } else {
+                    val device = foundDevices.values.toList().getOrNull(which - 1)
+                    if (device != null) ble.connect(device)
+                }
             }
             .setNegativeButton("Cancel") { _, _ -> ble.stopScan() }
             .setOnDismissListener { ble.stopScan() }
             .show()
     }
 
+    // ---- Demo device ------------------------------------------------------
+    private fun startSimulator() {
+        ble.stopScan()
+        deviceDialog?.dismiss()
+        val sim = El15Simulator({ status -> runOnUiThread { handleIncomingStatus(status) } })
+        simulator = sim
+        sim.start()
+        binding.statusText.text = getString(R.string.demo_connected)
+        binding.connectButton.text = getString(R.string.disconnect)
+        clearReadouts()
+        updateControlsEnabled(true)
+    }
+
+    private fun stopSimulator() {
+        if (tester.running) tester.stop()
+        simulator?.stop()
+        simulator = null
+        binding.statusText.text = "Disconnected"
+        binding.connectButton.text = getString(R.string.scan_connect)
+        updateControlsEnabled(false)
+        clearReadouts()
+    }
+
+    private fun disconnectAll() {
+        if (simulator != null) stopSimulator() else ble.disconnect()
+    }
+
+    private fun clearReadouts() {
+        binding.voltageValue.text = "—"
+        binding.currentValue.text = "—"
+        binding.powerValue.text = "—"
+        binding.modeValue.text = "—"
+        binding.extraValue.text = ""
+        binding.warningText.visibility = View.GONE
+    }
+
     // ---- BLE listener callbacks ------------------------------------------
     override fun onStateChanged(state: El15BleManager.State, info: String) {
+        if (simulator != null) return // demo device active; ignore BLE state
         binding.statusText.text = info
         val connected = state == El15BleManager.State.CONNECTED
         if (!connected && tester.running) {
@@ -243,14 +324,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
         }
         updateControlsEnabled(connected)
         if (state != El15BleManager.State.SCANNING) deviceDialog?.dismiss()
-        if (!connected) {
-            binding.voltageValue.text = "—"
-            binding.currentValue.text = "—"
-            binding.powerValue.text = "—"
-            binding.modeValue.text = "—"
-            binding.extraValue.text = ""
-            binding.warningText.visibility = View.GONE
-        }
+        if (!connected) clearReadouts()
     }
 
     @SuppressLint("MissingPermission")
@@ -261,7 +335,10 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
         }
     }
 
-    override fun onStatus(status: El15Status) {
+    override fun onStatus(status: El15Status) = handleIncomingStatus(status)
+
+    /** Shared handler for status updates from either BLE or the demo device. */
+    private fun handleIncomingStatus(status: El15Status) {
         lastStatus = status
         if (tester.running) tester.onStatus(status)
         binding.voltageValue.text = "%.3f V".format(status.voltage)
@@ -347,5 +424,11 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
 
     private fun toast(msg: String) {
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        private const val DEFAULT_STEPS = 8
+        private const val DEFAULT_SETTLE_MS = 800L
+        private const val DEFAULT_SAMPLE_MS = 1500L
     }
 }

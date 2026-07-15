@@ -28,7 +28,7 @@ import java.util.ArrayDeque
  * Callbacks are delivered on the main thread.
  */
 @SuppressLint("MissingPermission")
-class El15BleManager(private val context: Context) {
+class El15BleManager(private val context: Context) : El15Controller {
 
     enum class State { IDLE, SCANNING, CONNECTING, CONNECTED }
 
@@ -236,10 +236,10 @@ class El15BleManager(private val context: Context) {
         }
     }
 
-    fun setLoad(on: Boolean) = sendCommand(if (on) El15Protocol.LOAD_ON else El15Protocol.LOAD_OFF)
-    fun setLock() = sendCommand(El15Protocol.LOCK)
-    fun setMode(mode: Int) = sendCommand(El15Protocol.modeCommand(mode))
-    fun setSetpoint(value: Float) = sendCommand(El15Protocol.setpointCommand(value))
+    override fun setLoad(on: Boolean) = sendCommand(if (on) El15Protocol.LOAD_ON else El15Protocol.LOAD_OFF)
+    override fun setLock() = sendCommand(El15Protocol.LOCK)
+    override fun setMode(mode: Int) = sendCommand(El15Protocol.modeCommand(mode))
+    override fun setSetpoint(value: Float) = sendCommand(El15Protocol.setpointCommand(value))
 
     // ---- Op queue ---------------------------------------------------------
     private fun enqueue(op: () -> Unit) {
