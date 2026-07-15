@@ -58,6 +58,9 @@ class El15BleManager(private val context: Context) : El15Controller {
     var state: State = State.IDLE
         private set
 
+    /** Status poll interval in ms; configurable from Settings. */
+    var pollIntervalMs: Long = 500L
+
     val isBluetoothOn: Boolean get() = adapter?.isEnabled == true
 
     // ---- Scanning ---------------------------------------------------------
@@ -274,7 +277,7 @@ class El15BleManager(private val context: Context) : El15Controller {
             override fun run() {
                 if (state == State.CONNECTED) {
                     sendCommand(El15Protocol.POLL)
-                    main.postDelayed(this, POLL_INTERVAL_MS)
+                    main.postDelayed(this, pollIntervalMs)
                 }
             }
         }
@@ -295,6 +298,5 @@ class El15BleManager(private val context: Context) : El15Controller {
     companion object {
         private const val SCAN_TIMEOUT_MS = 12_000L
         private const val OP_TIMEOUT_MS = 2_000L
-        private const val POLL_INTERVAL_MS = 500L
     }
 }

@@ -1,0 +1,29 @@
+<resources>
+    <string-array name="theme_entries">
+        <item>Follow system</item>
+        <item>Light</item>
+        <item>Dark</item>
+    </string-array>
+    <string-array name="theme_values">
+        <item>system</item>
+        <item>light</item>
+        <item>dark</item>
+    </string-array>
+
+    <string-array name="accent_entries">
+        <item>Blue</item>
+        <item>Teal</item>
+        <item>Indigo</item>
+        <item>Violet</item>
+        <item>Emerald</item>
+        <item>Crimson</item>
+    </string-array>
+    <string-array name="accent_values">
+        <item>blue</item>
+        <item>teal</item>
+        <item>indigo</item>
+        <item>violet</item>
+        <item>emerald</item>
+        <item>crimson</item>
+    </string-array>
+</resources>

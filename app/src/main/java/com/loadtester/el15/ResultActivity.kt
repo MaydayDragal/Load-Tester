@@ -27,7 +27,7 @@ import java.util.Locale
  * the raw data table. A "Report contents" checklist selects which of these are
  * rendered into the Print / Share report (a white-background bitmap).
  */
-class ResultActivity : AppCompatActivity() {
+class ResultActivity : BaseActivity() {
 
     private lateinit var binding: ActivityResultBinding
     private var samples: List<CircuitResistanceTester.Sample> = emptyList()
@@ -43,6 +43,14 @@ class ResultActivity : AppCompatActivity() {
     private var maxTemp = 0f
     private var maxFan = 0
 
+    // Test metadata
+    private var steps = 0
+    private var settleMs = 0L
+    private var sampleMs = 0L
+    private var safetyPct = 80
+    private var deviceLabel = ""
+    private var timestampMs = 0L
+
     /** Report sections the user can include/exclude (key, label, default-on). */
     private data class ReportItem(val key: String, val label: String, val default: Boolean)
 
@@ -57,6 +65,8 @@ class ResultActivity : AppCompatActivity() {
         ReportItem(KEY_VI, "Voltage–Current graph", true),
         ReportItem(KEY_TREND, "Voltage & Current trend graph", true),
         ReportItem(KEY_TABLE, "Data table", true),
+        ReportItem(KEY_META, "Test details", true),
+        ReportItem(KEY_NOTES, "Notes", true),
     )
     private val selected = linkedSetOf<String>()
 
@@ -64,8 +74,14 @@ class ResultActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityResultBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        title = getString(R.string.rt_results_title)
+        binding.toolbar.setNavigationOnClickListener { finish() }
+
+        steps = intent.getIntExtra(EXTRA_STEPS, 0)
+        settleMs = intent.getLongExtra(EXTRA_SETTLE, 0)
+        sampleMs = intent.getLongExtra(EXTRA_SAMPLE, 0)
+        safetyPct = intent.getIntExtra(EXTRA_SAFETY, 80)
+        deviceLabel = intent.getStringExtra(EXTRA_DEVICE) ?: "EL15"
+        timestampMs = intent.getLongExtra(EXTRA_TIME, 0L)
 
         val currents = intent.getFloatArrayExtra(EXTRA_CURRENTS) ?: FloatArray(0)
         val voltages = intent.getFloatArrayExtra(EXTRA_VOLTAGES) ?: FloatArray(0)
@@ -95,11 +111,7 @@ class ResultActivity : AppCompatActivity() {
         buildReportChecklist()
         binding.printButton.setOnClickListener { printReport() }
         binding.shareButton.setOnClickListener { shareReport() }
-    }
-
-    override fun onSupportNavigateUp(): Boolean {
-        finish()
-        return true
+        binding.csvButton.setOnClickListener { exportCsv() }
     }
 
     private fun bind() {
@@ -125,7 +137,25 @@ class ResultActivity : AppCompatActivity() {
         binding.trendChart.setData(samples, resistance, vOc)
 
         binding.dataTable.text = buildTable()
+        binding.metadataText.text = buildMetadata()
     }
+
+    private fun buildMetadata(): String {
+        val when_ = if (timestampMs > 0)
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(timestampMs))
+        else "—"
+        val durS = steps * (settleMs + sampleMs) / 1000.0
+        return listOf(
+            "Time      : $when_",
+            "Device    : $deviceLabel",
+            "Fuse      : %.1f A   (safety %d%%)".format(fuse, safetyPct),
+            "Peak test : %.2f A".format(maxCurrent),
+            "Sweep     : %d steps, %d ms settle, %d ms sample".format(steps, settleMs, sampleMs),
+            "Duration  : ~%.0f s".format(durS),
+        ).joinToString("\n")
+    }
+
+    private fun notesText(): String = binding.notesInput.text?.toString()?.trim().orEmpty()
 
     private fun buildReportChecklist() {
         val container = binding.reportItemsContainer
@@ -232,6 +262,14 @@ class ResultActivity : AppCompatActivity() {
         if (sel(KEY_FIT)) sections.add(line(
             "Points: %d      Fit R²: %.4f%s".format(
                 samples.size, rSquared, if (!reliable) "  (low confidence)" else "")))
+        if (sel(KEY_META)) {
+            val lines = buildMetadata().split("\n")
+            sections.add((44f + lines.size * 30f) to { c, top ->
+                c.drawText("Test details", margin, top + 28f, caption)
+                var ty = top + 60f
+                for (l in lines) { c.drawText(l, margin, ty, mono); ty += 30f }
+            })
+        }
         if (sel(KEY_VI)) sections.add((chartH + 44f) to { c, top ->
             c.drawText("Voltage vs Current (slope = resistance)", margin, top + 28f, caption)
             binding.viChart.drawChart(c, margin, top + 40f, chartW, chartH, light = true)
@@ -249,6 +287,14 @@ class ResultActivity : AppCompatActivity() {
                 for (l in lines) { c.drawText(l, margin, ty, mono); ty += 32f }
             })
         }
+        if (sel(KEY_NOTES) && notesText().isNotEmpty()) {
+            val wrapped = wrapText(notesText(), body, chartW)
+            sections.add((44f + wrapped.size * 34f) to { c, top ->
+                c.drawText("Notes", margin, top + 28f, caption)
+                var ty = top + 60f
+                for (l in wrapped) { c.drawText(l, margin, ty, body); ty += 34f }
+            })
+        }
 
         val totalH = (margin * 2 + sections.sumOf { it.first.toDouble() } +
             gap * (sections.size - 1).coerceAtLeast(0)).toInt().coerceAtLeast(200)
@@ -263,6 +309,57 @@ class ResultActivity : AppCompatActivity() {
         }
         return bmp
     }
+
+    private fun wrapText(text: String, paint: Paint, maxW: Float): List<String> {
+        val out = ArrayList<String>()
+        for (para in text.split("\n")) {
+            var line = ""
+            for (word in para.split(" ")) {
+                val trial = if (line.isEmpty()) word else "$line $word"
+                if (paint.measureText(trial) > maxW && line.isNotEmpty()) {
+                    out.add(line); line = word
+                } else line = trial
+            }
+            out.add(line)
+        }
+        return out
+    }
+
+    private fun exportCsv() {
+        try {
+            val dir = File(cacheDir, "shared").apply { mkdirs() }
+            val file = File(dir, "resistance-test.csv")
+            FileOutputStream(file).use { out ->
+                val sb = StringBuilder()
+                sb.append("# EL15 circuit resistance test\n")
+                sb.append("# ").append(buildMetadata().replace("\n", "\n# ")).append("\n")
+                sb.append("# resistance_ohm,%.6f\n".format(resistance))
+                sb.append("# open_circuit_v,%.4f\n".format(vOc))
+                sb.append("# r_squared,%.6f\n".format(rSquared))
+                if (notesText().isNotEmpty()) sb.append("# notes,").append(notesText().replace("\n", " ")).append("\n")
+                sb.append("step,current_A,voltage_V,power_W,temp_C,fan,resistance_at_point_ohm\n")
+                samples.forEachIndexed { idx, s ->
+                    val rPt = if (s.current > 1e-4f && vOc > 0f) (vOc - s.voltage) / s.current else 0f
+                    sb.append("%d,%.4f,%.4f,%.4f,%.2f,%d,%.4f\n".format(
+                        idx + 1, s.current, s.voltage, s.power, s.temperature, s.fanSpeed, rPt))
+                }
+                out.write(sb.toString().toByteArray())
+            }
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/csv"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "EL15 resistance test data")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(send, getString(R.string.rt_csv)))
+        } catch (e: Exception) {
+            toast("Export failed: ${e.message}")
+        }
+    }
+
+    private fun toast(m: String) =
+        android.widget.Toast.makeText(this, m, android.widget.Toast.LENGTH_LONG).show()
 
     private fun printReport() {
         val helper = PrintHelper(this).apply { scaleMode = PrintHelper.SCALE_MODE_FIT }
@@ -298,6 +395,12 @@ class ResultActivity : AppCompatActivity() {
         const val EXTRA_FUSE = "fuse"
         const val EXTRA_MAXI = "maxi"
         const val EXTRA_RELIABLE = "reliable"
+        const val EXTRA_STEPS = "steps"
+        const val EXTRA_SETTLE = "settle"
+        const val EXTRA_SAMPLE = "sample"
+        const val EXTRA_SAFETY = "safety"
+        const val EXTRA_DEVICE = "device"
+        const val EXTRA_TIME = "time"
 
         private const val KEY_RESISTANCE = "resistance"
         private const val KEY_VOC = "voc"
@@ -309,8 +412,19 @@ class ResultActivity : AppCompatActivity() {
         private const val KEY_VI = "vi"
         private const val KEY_TREND = "trend"
         private const val KEY_TABLE = "table"
+        private const val KEY_META = "meta"
+        private const val KEY_NOTES = "notes"
 
-        fun start(from: AppCompatActivity, result: CircuitResistanceTester.ResistanceResult) {
+        fun start(
+            from: AppCompatActivity,
+            result: CircuitResistanceTester.ResistanceResult,
+            steps: Int,
+            settleMs: Long,
+            sampleMs: Long,
+            safetyPct: Int,
+            deviceLabel: String,
+            timestampMs: Long,
+        ) {
             val s = result.samples
             val i = Intent(from, ResultActivity::class.java).apply {
                 putExtra(EXTRA_CURRENTS, FloatArray(s.size) { s[it].current })
@@ -323,6 +437,12 @@ class ResultActivity : AppCompatActivity() {
                 putExtra(EXTRA_FUSE, result.fuseRating)
                 putExtra(EXTRA_MAXI, result.maxTestCurrent)
                 putExtra(EXTRA_RELIABLE, result.reliable)
+                putExtra(EXTRA_STEPS, steps)
+                putExtra(EXTRA_SETTLE, settleMs)
+                putExtra(EXTRA_SAMPLE, sampleMs)
+                putExtra(EXTRA_SAFETY, safetyPct)
+                putExtra(EXTRA_DEVICE, deviceLabel)
+                putExtra(EXTRA_TIME, timestampMs)
             }
             from.startActivity(i)
         }

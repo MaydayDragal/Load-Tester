@@ -8,6 +8,20 @@ It re-implements the BLE protocol used by the desktop
 [Device Support](https://github.com/maj113/DM40GUI/blob/master/README.md#device-support)
 section — the EL15 is the electronic load). No PC required.
 
+## Interface
+
+A Material 3 app with a top app bar and two tabs — **Monitor** and **Resistance
+Test** — plus a **Settings** screen (gear icon) and an About dialog.
+
+- **Monitor**: connection status, large voltage/current/power/mode readouts,
+  a six-mode selector (CC/CV/CR/CP/CAP/DCR), setpoint entry, load ON/OFF, keypad
+  lock, a **live scrolling waveform** (voltage + current) with pause, recording,
+  CSV export and min/avg/max statistics, and a **raw packet inspector** (hex +
+  CRC pass/fail) — mirroring the original DM40GUI EL15 feature set.
+- **Resistance Test**: fuse-driven sweep with per-run options (see below).
+- **Settings**: theme (system/light/dark), six accent colours, poll interval,
+  resistance-test defaults, demo-circuit defaults, keep-screen-on, and About.
+
 ## Features
 
 - **Scan & connect** to the EL15 over BLE (filters on the FFF0 service).

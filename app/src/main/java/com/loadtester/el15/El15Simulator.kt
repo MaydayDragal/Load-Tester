@@ -44,13 +44,16 @@ class El15Simulator(
 
     private var poll: Runnable? = null
 
+    /** Status emit interval in ms; configurable from Settings. */
+    var pollIntervalMs: Long = 500L
+
     fun start() {
         stop()
         runtimeSec = 0; ticks = 0; energyWh = 0f; capacityAh = 0f
         val r = object : Runnable {
             override fun run() {
                 tick()
-                main.postDelayed(this, POLL_MS)
+                main.postDelayed(this, pollIntervalMs)
             }
         }
         poll = r
@@ -83,13 +86,75 @@ class El15Simulator(
         ticks++
         val (voltage, current, warn) = solveClamped()
         if (loadOn && current > 0.001f) {
-            runtimeSec += (POLL_MS / 1000.0).toInt().coerceAtLeast(0)
-            if (ticks % 2 == 0) runtimeSec += 1 // ~1s per two 500ms ticks
-            val dtHours = POLL_MS / 3_600_000f
+            if (ticks % 2 == 0) runtimeSec += 1 // ~1s per two ticks
+            val dtHours = pollIntervalMs / 3_600_000f
             energyWh += voltage * current * dtHours
             capacityAh += current * dtHours
         }
-        onStatus(buildStatus(voltage, current, warn))
+        // For normal operation, encode a real 28-byte packet and decode it
+        // through the production parser — the demo then exercises the exact same
+        // path as hardware, and the packet inspector shows a genuine frame.
+        // Protection states are delivered directly (not encoded).
+        val status = if (warn.isEmpty()) {
+            El15Protocol.parseStatus(encodePacket(voltage, current))
+        } else {
+            buildStatus(voltage, current, warn)
+        }
+        onStatus(status)
+    }
+
+    private fun fanFor(current: Float): Int = when {
+        current > 8f -> El15Protocol.FAN_SPEED_MAX
+        current > 4f -> 3
+        current > 1f -> 1
+        else -> 0
+    }
+
+    /** Encode the current state into a 28-byte EL15 status frame (inverse of parseStatus). */
+    private fun encodePacket(voltage: Float, current: Float): ByteArray {
+        val pkt = ByteArray(28)
+        pkt[0] = 0xDF.toByte(); pkt[1] = 0x07; pkt[2] = 0x03; pkt[3] = 0x08
+        val fan = fanFor(current)
+        pkt[5] = ((mode and 0x1F) or ((fan and 0x03) shl 6)).toByte()
+        pkt[6] = (((if (loadOn) 0x02 else 0)) or (if (lockOn) 0x04 else 0) or ((fan shr 2) and 0x01)).toByte()
+        putF32(pkt, 7, voltage)
+        putF32(pkt, 11, current)
+        when (mode) {
+            El15Protocol.MODE_CAP -> {
+                putI32(pkt, 15, runtimeSec)
+                putF32(pkt, 19, energyWh * 1000f)
+                putF32(pkt, 23, capacityAh * 1000f)
+            }
+            El15Protocol.MODE_DCR -> {
+                putF32(pkt, 15, current)          // I1
+                putF32(pkt, 19, current * 0.5f)   // I2
+                putF32(pkt, 23, seriesR * 1000f)  // mΩ
+            }
+            else -> {
+                putI32(pkt, 15, runtimeSec)
+                putF32(pkt, 19, 24.5f + current * 0.9f) // temperature
+                putF32(pkt, 23, setpoint)
+            }
+        }
+        var sum = 0
+        for (k in 0..26) sum += pkt[k].toInt() and 0xFF
+        pkt[27] = ((-sum) and 0xFF).toByte()
+        return pkt
+    }
+
+    private fun putF32(a: ByteArray, off: Int, v: Float) {
+        val bits = java.lang.Float.floatToIntBits(v)
+        a[off] = bits.toByte()
+        a[off + 1] = (bits ushr 8).toByte()
+        a[off + 2] = (bits ushr 16).toByte()
+        a[off + 3] = (bits ushr 24).toByte()
+    }
+
+    private fun putI32(a: ByteArray, off: Int, v: Int) {
+        a[off] = v.toByte()
+        a[off + 1] = (v ushr 8).toByte()
+        a[off + 2] = (v ushr 16).toByte()
+        a[off + 3] = (v ushr 24).toByte()
     }
 
     /**
@@ -202,9 +267,5 @@ class El15Simulator(
         rngState = rngState xor (rngState shl 5)
         val unit = (abs(rngState % 1000) / 1000f) * 2f - 1f // -1..1
         return this * (1f + unit * frac)
-    }
-
-    companion object {
-        private const val POLL_MS = 500L
     }
 }

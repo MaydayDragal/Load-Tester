@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory app:title="Appearance">
+        <ListPreference
+            app:key="pref_theme_mode"
+            app:title="Theme"
+            app:entries="@array/theme_entries"
+            app:entryValues="@array/theme_values"
+            app:defaultValue="system"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:key="pref_accent"
+            app:title="Accent colour"
+            app:entries="@array/accent_entries"
+            app:entryValues="@array/accent_values"
+            app:defaultValue="blue"
+            app:useSimpleSummaryProvider="true" />
+        <SwitchPreferenceCompat
+            app:key="pref_keep_screen_on"
+            app:title="Keep screen on while connected"
+            app:defaultValue="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Connection">
+        <EditTextPreference
+            app:key="pref_poll_ms"
+            app:title="Poll interval (ms)"
+            app:defaultValue="500"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Resistance test defaults">
+        <EditTextPreference
+            app:key="pref_safety_pct"
+            app:title="Safety factor (% of fuse)"
+            app:defaultValue="80"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_steps"
+            app:title="Steps"
+            app:defaultValue="8"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_settle_ms"
+            app:title="Settle time (ms)"
+            app:defaultValue="800"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_sample_ms"
+            app:title="Sample window (ms)"
+            app:defaultValue="1500"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Demo device">
+        <EditTextPreference
+            app:key="pref_demo_emf"
+            app:title="Source voltage (V)"
+            app:defaultValue="12.6"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_demo_r"
+            app:title="Series resistance (Ω)"
+            app:defaultValue="0.35"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="About">
+        <Preference
+            app:key="pref_about"
+            app:title="EL15 Load Control"
+            app:summary="Version 1.0 · tap for details" />
+    </PreferenceCategory>
+</PreferenceScreen>
