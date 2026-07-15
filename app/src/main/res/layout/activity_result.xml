@@ -114,7 +114,7 @@
             <com.loadtester.el15.ResistanceChartView
                 android:id="@+id/trendChart"
                 android:layout_width="match_parent"
-                android:layout_height="260dp"
+                android:layout_height="300dp"
                 android:padding="8dp" />
         </com.google.android.material.card.MaterialCardView>
 

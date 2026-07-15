@@ -80,7 +80,9 @@ More steps + a longer sample window give a tighter fit at the cost of runtime
 - per-run metrics: **peak power dissipated**, **max unit temperature**, **max
   fan speed**, and a fit-quality (R²) confidence check,
 - a **Voltage-vs-Current graph** with the fitted resistance line,
-- a **Voltage & Current per-step** trend graph,
+- a **multi-metric trend graph** — voltage, current, power, temperature and fan
+  plotted per step (each normalized to its own range, with a legend showing the
+  real min–max so the traces share one plot),
 - the raw data table — per step: current, voltage, power, temperature, fan, and
   per-point resistance, and
 - **Print** (Android print dialog → paper or PDF) and **Share** buttons that

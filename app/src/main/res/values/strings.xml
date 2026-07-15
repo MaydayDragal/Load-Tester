@@ -25,7 +25,7 @@
     <string name="rt_results_title">Resistance Test Results</string>
     <string name="rt_circuit_resistance">Circuit Resistance</string>
     <string name="rt_vi_caption">Voltage vs Current (slope = resistance)</string>
-    <string name="rt_trend_caption">Voltage &amp; Current per step</string>
+    <string name="rt_trend_caption">Metrics per step — V, I, P, temp, fan (normalized)</string>
     <string name="rt_print">Print</string>
     <string name="rt_share">Share</string>
     <string name="rt_report_contents">Report contents</string>

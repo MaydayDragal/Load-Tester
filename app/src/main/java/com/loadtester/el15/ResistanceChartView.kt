@@ -63,8 +63,9 @@ class ResistanceChartView @JvmOverloads constructor(
         val iColor = Color.parseColor("#FFB300")
         val fit = Color.parseColor("#00ACC1")
 
-        val padL = dpToPx(44f); val padR = dpToPx(if (mode == MODE_TREND) 44f else 16f)
-        val padT = dpToPx(16f); val padB = dpToPx(34f)
+        val padL = dpToPx(44f); val padR = dpToPx(16f)
+        // Trend mode needs headroom for a multi-series legend.
+        val padT = dpToPx(if (mode == MODE_TREND) 62f else 16f); val padB = dpToPx(34f)
         val plot = RectF(left + padL, top + padT, left + w - padR, top + h - padB)
 
         text.color = label
@@ -82,7 +83,7 @@ class ResistanceChartView @JvmOverloads constructor(
         canvas.drawLine(plot.left, plot.bottom, plot.right, plot.bottom, paint)
 
         if (mode == MODE_VI) drawVi(canvas, plot, grid, vColor, fit, label)
-        else drawTrend(canvas, plot, grid, vColor, iColor, label)
+        else drawTrend(canvas, plot, grid, label)
     }
 
     private fun drawVi(canvas: Canvas, plot: RectF, grid: Int, pointColor: Int, fit: Int, label: Int) {
@@ -116,63 +117,78 @@ class ResistanceChartView @JvmOverloads constructor(
         drawRotated(canvas, "Voltage (V)", plot.left - dpToPx(32f), plot.centerY())
     }
 
-    private fun drawTrend(canvas: Canvas, plot: RectF, grid: Int, vColor: Int, iColor: Int, label: Int) {
+    /** One trace on the normalized trend plot. */
+    private class Trace(val name: String, val unit: String, val color: Int, val values: List<Float>)
+
+    private fun drawTrend(canvas: Canvas, plot: RectF, grid: Int, label: Int) {
         val n = samples.size
-        val vHi = samples.maxOf { it.voltage }; val vLo = samples.minOf { it.voltage }
-        val iHi = max(samples.maxOf { it.current }, 1e-3f); val iLo = 0f
-        val vPad = max((vHi - vLo) * 0.15f, 0.02f)
-        val vMax = vHi + vPad; val vMin = vLo - vPad
-        val iMax = iHi * 1.1f
+        val traces = listOf(
+            Trace("V", "V", Color.parseColor("#4CAF50"), samples.map { it.voltage }),
+            Trace("I", "A", Color.parseColor("#FFB300"), samples.map { it.current }),
+            Trace("P", "W", Color.parseColor("#00ACC1"), samples.map { it.power }),
+            Trace("T", "°C", Color.parseColor("#EF5350"), samples.map { it.temperature }),
+            Trace("Fan", "", Color.parseColor("#AB47BC"), samples.map { it.fanSpeed.toFloat() }),
+        )
 
         fun x(idx: Int) = plot.left + idx.toFloat() / (n - 1) * plot.width()
-        fun yv(v: Float) = plot.bottom - (v - vMin) / (vMax - vMin) * plot.height()
-        fun yi(i: Float) = plot.bottom - (i - iLo) / (iMax - iLo) * plot.height()
+        // Each trace is normalized to its own min..max so they share the plot;
+        // real values are shown in the legend and the data table. A flat trace
+        // sits on the mid-line.
+        fun yNorm(v: Float, lo: Float, hi: Float): Float {
+            val f = if (hi - lo > 1e-6f) (v - lo) / (hi - lo) else 0.5f
+            return plot.bottom - f * plot.height()
+        }
 
-        // Light horizontal grid
+        // Horizontal grid
         paint.color = grid; paint.style = Paint.Style.STROKE; paint.strokeWidth = dpToPx(1f)
         for (k in 0..4) {
             val gy = plot.bottom - k / 4f * plot.height()
             canvas.drawLine(plot.left, gy, plot.right, gy, paint)
         }
 
-        paint.style = Paint.Style.STROKE; paint.strokeWidth = dpToPx(2.5f)
-        // Voltage series
-        paint.color = vColor
-        for (k in 0 until n - 1) {
-            canvas.drawLine(x(k), yv(samples[k].voltage), x(k + 1), yv(samples[k + 1].voltage), paint)
-        }
-        // Current series
-        paint.color = iColor
-        for (k in 0 until n - 1) {
-            canvas.drawLine(x(k), yi(samples[k].current), x(k + 1), yi(samples[k + 1].current), paint)
-        }
-        paint.style = Paint.Style.FILL
-        for (k in 0 until n) {
-            paint.color = vColor; canvas.drawCircle(x(k), yv(samples[k].voltage), dpToPx(3f), paint)
-            paint.color = iColor; canvas.drawCircle(x(k), yi(samples[k].current), dpToPx(3f), paint)
+        // Series
+        for (t in traces) {
+            val lo = t.values.min(); val hi = t.values.max()
+            paint.color = t.color
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = dpToPx(2.2f)
+            for (k in 0 until n - 1) {
+                canvas.drawLine(
+                    x(k), yNorm(t.values[k], lo, hi),
+                    x(k + 1), yNorm(t.values[k + 1], lo, hi), paint
+                )
+            }
+            paint.style = Paint.Style.FILL
+            for (k in 0 until n) canvas.drawCircle(x(k), yNorm(t.values[k], lo, hi), dpToPx(2.5f), paint)
         }
 
-        // Left (V) and right (I) tick labels
-        text.textAlign = Paint.Align.RIGHT; text.color = vColor
-        for (k in 0..4) {
-            val v = vMin + k / 4f * (vMax - vMin)
-            val gy = plot.bottom - k / 4f * plot.height()
-            canvas.drawText("%.2f".format(v), plot.left - dpToPx(4f), gy + spToPx(4f), text)
-        }
-        text.textAlign = Paint.Align.LEFT; text.color = iColor
-        for (k in 0..4) {
-            val i = iLo + k / 4f * (iMax - iLo)
-            val gy = plot.bottom - k / 4f * plot.height()
-            canvas.drawText("%.2f".format(i), plot.right + dpToPx(4f), gy + spToPx(4f), text)
-        }
-
-        // Legend / titles
-        text.color = label; text.textAlign = Paint.Align.CENTER
+        // Axis titles
+        text.color = label
+        text.textAlign = Paint.Align.CENTER
         canvas.drawText("Step", plot.centerX(), plot.bottom + dpToPx(26f), text)
-        text.textAlign = Paint.Align.LEFT; text.color = vColor
-        canvas.drawText("● Voltage (V)", plot.left, plot.top - dpToPx(2f), text)
-        text.color = iColor
-        canvas.drawText("● Current (A)", plot.left + dpToPx(96f), plot.top - dpToPx(2f), text)
+        drawRotated(canvas, "normalized", plot.left - dpToPx(32f), plot.centerY())
+
+        // Legend with each series' real range, flowed across up to two rows.
+        text.textSize = spToPx(10f)
+        var lx = plot.left
+        var ly = plot.top - dpToPx(34f)
+        val rowGap = dpToPx(15f)
+        for (t in traces) {
+            val lo = t.values.min(); val hi = t.values.max()
+            val labelText = "● ${t.name} ${fmtRange(lo, hi, t.unit)}"
+            val wNeeded = text.measureText(labelText) + dpToPx(14f)
+            if (lx + wNeeded > plot.right && lx > plot.left) {
+                lx = plot.left; ly += rowGap
+            }
+            text.color = t.color; text.textAlign = Paint.Align.LEFT
+            canvas.drawText(labelText, lx, ly, text)
+            lx += wNeeded
+        }
+        text.textSize = spToPx(11f)
+    }
+
+    private fun fmtRange(lo: Float, hi: Float, unit: String): String {
+        return if (hi - lo < 0.05f) "%.2f%s".format(hi, unit)
+        else "%.2f–%.2f%s".format(lo, hi, unit)
     }
 
     private fun drawGridAndTicks(

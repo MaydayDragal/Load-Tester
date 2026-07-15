@@ -237,7 +237,7 @@ class ResultActivity : AppCompatActivity() {
             binding.viChart.drawChart(c, margin, top + 40f, chartW, chartH, light = true)
         })
         if (sel(KEY_TREND)) sections.add((chartH + 44f) to { c, top ->
-            c.drawText("Voltage & Current per step", margin, top + 28f, caption)
+            c.drawText("Metrics per step — V, I, P, temp, fan (normalized)", margin, top + 28f, caption)
             binding.trendChart.drawChart(c, margin, top + 40f, chartW, chartH, light = true)
         })
         if (sel(KEY_TABLE)) {
