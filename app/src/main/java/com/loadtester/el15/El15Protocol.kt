@@ -97,6 +97,14 @@ object El15Protocol {
 
     const val FAN_SPEED_MAX = 5
 
+    // ---- Hardware ratings (ALIENTEK EL15: 150 W / 60 V / 12 A) -------------
+    // Auto tests must never command beyond these. Power is usually the binding
+    // limit: at a high source voltage, 150 W allows far less than 12 A.
+    const val MAX_CURRENT_A = 12f
+    const val MAX_POWER_W = 150f
+    const val MAX_VOLTAGE_V = 60f
+    const val MIN_VOLTAGE_V = 0.1f
+
     /** True if [data] begins with the EL15 status header. */
     fun isStatusPacket(data: ByteArray): Boolean =
         data.size >= 4 && data.copyOfRange(0, 4).contentEquals(HEADER)

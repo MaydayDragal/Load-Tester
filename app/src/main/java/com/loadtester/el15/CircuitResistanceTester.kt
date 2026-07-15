@@ -67,6 +67,9 @@ class CircuitResistanceTester(
     private var stepIndex = 0
     private var fuseRating = 0f
     private var maxCurrent = 0f
+    private var currentTarget = 0f
+    private var vOcMeasured = 0f
+    private var vRecent = 0f
 
     private val pending = ArrayList<Runnable>()
 
@@ -76,20 +79,62 @@ class CircuitResistanceTester(
     fun start(fuseRatingAmps: Float) {
         if (running) return
         fuseRating = fuseRatingAmps
-        maxCurrent = min(fuseRatingAmps * safetyFactor, absoluteMaxCurrent)
-        val n = steps.coerceIn(3, 20)
-        targets.clear()
-        for (k in 1..n) targets.add(maxCurrent * k / n)
         results.clear()
         stepBuffer.clear()
+        targets.clear()
         stepIndex = 0
+        vOcMeasured = 0f
+        vRecent = 0f
 
-        // Prime: CC mode, load off, zero setpoint. Then start the ladder.
+        // Prime: CC mode, load off, zero setpoint. Read the open-circuit voltage,
+        // then size the ladder to the unit's ratings before drawing any current.
         state = State.PRIMING
         ble.setMode(El15Protocol.MODE_CC)
         ble.setSetpoint(0f)
         ble.setLoad(false)
-        schedule({ beginStep(0) }, PRIME_MS)
+        schedule({ finishPriming() }, PRIME_MS)
+    }
+
+    /**
+     * Called after priming. Uses the measured open-circuit voltage to bound the
+     * sweep so it never exceeds the EL15's ratings:
+     *   I_max = min( 80%·fuse, 12 A, 150 W / Voc ).
+     * Bounding by 150 W / Voc is conservative: since the terminal voltage only
+     * sags under load (V ≤ Voc), the real power V·I never exceeds 150 W.
+     */
+    private fun finishPriming() {
+        if (!running) return
+        val voc = vOcMeasured
+        if (voc < El15Protocol.MIN_VOLTAGE_V) {
+            abort("No reading from the load, or voltage below the EL15's %.1f V minimum. Test aborted."
+                .format(El15Protocol.MIN_VOLTAGE_V))
+            return
+        }
+        if (voc > El15Protocol.MAX_VOLTAGE_V) {
+            abort("Source is %.1f V — above the EL15's %.0f V rating. Test aborted."
+                .format(voc, El15Protocol.MAX_VOLTAGE_V))
+            return
+        }
+
+        val fuseCap = fuseRating * safetyFactor
+        val powerCap = El15Protocol.MAX_POWER_W / voc
+        maxCurrent = minOf(fuseCap, El15Protocol.MAX_CURRENT_A, powerCap, absoluteMaxCurrent)
+        if (maxCurrent < MIN_TEST_CURRENT) {
+            abort("Safe test current (%.3f A) is too low to measure — check the fuse rating and connections."
+                .format(maxCurrent))
+            return
+        }
+
+        val n = steps.coerceIn(3, 20)
+        for (k in 1..n) targets.add(maxCurrent * k / n)
+        beginStep(0)
+    }
+
+    /** Belt-and-braces cap applied to every commanded current. */
+    private fun clampToRatings(target: Float): Float {
+        val v = if (vRecent > El15Protocol.MIN_VOLTAGE_V) vRecent else El15Protocol.MAX_VOLTAGE_V
+        val powerCap = El15Protocol.MAX_POWER_W / v
+        return minOf(target, El15Protocol.MAX_CURRENT_A, powerCap, absoluteMaxCurrent)
     }
 
     /** Abort the test and safely turn the load off. */
@@ -106,8 +151,11 @@ class CircuitResistanceTester(
             abort("Load protection tripped (${status.warning}). Test stopped.")
             return
         }
-        if (state == State.COLLECTING) {
-            stepBuffer.add(Sample(status.current, status.voltage))
+        vRecent = status.voltage
+        when (state) {
+            State.PRIMING -> vOcMeasured = status.voltage
+            State.COLLECTING -> stepBuffer.add(Sample(status.current, status.voltage))
+            else -> {}
         }
     }
 
@@ -119,8 +167,8 @@ class CircuitResistanceTester(
             return
         }
         stepIndex = idx
-        val target = targets[idx]
-        ble.setSetpoint(target)
+        currentTarget = clampToRatings(targets[idx])
+        ble.setSetpoint(currentTarget)
         if (idx == 0) ble.setLoad(true) // energise the load once, on the first step
 
         state = State.SETTLING
@@ -134,7 +182,7 @@ class CircuitResistanceTester(
     private fun endStep() {
         if (!running) return
         state = State.SETTLING
-        val target = targets[stepIndex]
+        val target = currentTarget
         if (stepBuffer.isNotEmpty()) {
             val i = stepBuffer.map { it.current.toDouble() }.average().toFloat()
             val v = stepBuffer.map { it.voltage.toDouble() }.average().toFloat()
@@ -214,6 +262,8 @@ class CircuitResistanceTester(
 
     companion object {
         private const val PRIME_MS = 900L
+        private const val MIN_TEST_CURRENT = 0.05f
+        /** Absolute backstop; the EL15's 12 A rating is the real ceiling. */
         const val ABS_MAX_CURRENT = 40f
     }
 }

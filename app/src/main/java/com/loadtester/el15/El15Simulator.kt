@@ -79,7 +79,7 @@ class El15Simulator(
     // ---- Simulation core --------------------------------------------------
     private fun tick() {
         ticks++
-        val (voltage, current) = solve()
+        val (voltage, current, warn) = solveClamped()
         if (loadOn && current > 0.001f) {
             runtimeSec += (POLL_MS / 1000.0).toInt().coerceAtLeast(0)
             if (ticks % 2 == 0) runtimeSec += 1 // ~1s per two 500ms ticks
@@ -87,12 +87,36 @@ class El15Simulator(
             energyWh += voltage * current * dtHours
             capacityAh += current * dtHours
         }
-        onStatus(buildStatus(voltage, current))
+        onStatus(buildStatus(voltage, current, warn))
     }
 
-    /** Returns (terminalVoltage, current) for the active mode. */
+    /**
+     * Returns (terminalVoltage, current, warning) for the active mode, after
+     * enforcing the EL15's hardware limits (12 A max, 150 W over-power). A well-
+     * behaved auto test never reaches these; a manual overload trips protection,
+     * just like the real unit.
+     */
+    private fun solveClamped(): Triple<Float, Float, String> {
+        val (vRaw, iRaw) = solve()
+        var i = min(iRaw, El15Protocol.MAX_CURRENT_A)
+        var v = if (loadOn) max(emf - i * seriesR, 0f) else vRaw
+        var warn = ""
+        // Over-power protection (with a small tolerance, like real OPP).
+        if (loadOn && v * i > El15Protocol.MAX_POWER_W * 1.02f) {
+            val disc = emf * emf - 4 * seriesR * El15Protocol.MAX_POWER_W
+            i = if (disc > 0f) (emf - sqrt(disc)) / (2 * seriesR)
+                else El15Protocol.MAX_POWER_W / max(v, 0.1f)
+            v = max(emf - i * seriesR, 0f)
+            warn = "OPP"
+        } else if (loadOn && iRaw > El15Protocol.MAX_CURRENT_A * 1.001f) {
+            warn = "OCP"
+        }
+        return Triple(v.withNoise(0.0015f), i.withNoise(0.0015f), warn)
+    }
+
+    /** Ideal (unclamped) terminal voltage and current for the active mode. */
     private fun solve(): Pair<Float, Float> {
-        if (!loadOn) return emf.withNoise(0.0005f) to 0f
+        if (!loadOn) return emf to 0f
         // Physical ceiling: terminal voltage cannot fall below ~0.3 V.
         val iCeil = (emf - 0.3f) / seriesR
         val i = when (mode) {
@@ -116,13 +140,14 @@ class El15Simulator(
         }
         val current = max(i, 0f)
         val voltage = max(emf - current * seriesR, 0f)
-        return voltage.withNoise(0.0015f) to current.withNoise(0.0015f)
+        return voltage to current
     }
 
-    private fun buildStatus(voltage: Float, current: Float): El15Status {
+    private fun buildStatus(voltage: Float, current: Float, warn: String): El15Status {
         val s = El15Status()
         s.valid = true
         s.crcPass = true
+        s.warning = warn
         s.mode = mode
         s.modeName = El15Protocol.MODE_NAMES[mode] ?: "CC"
         s.voltage = voltage
@@ -138,7 +163,7 @@ class El15Simulator(
             current > 1f -> 1
             else -> 0
         }
-        s.ready = loadOn
+        s.ready = loadOn && warn.isEmpty()
 
         val info = El15Protocol.MODE_SETPOINT_INFO[mode]
         if (info != null) {

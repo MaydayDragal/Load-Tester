@@ -41,11 +41,27 @@ The app records (V, I) at each step and fits a least-squares line; the slope is
 the circuit resistance and the intercept is the open-circuit voltage.
 
 **Dynamic, fuse-driven** — you enter the circuit's **fuse rating**. The test
-never draws more than **80% of the fuse rating** (with an absolute 40 A cap), and
-the step size scales with the rating: a 2 A circuit is probed in tens of mA, a
-30 A circuit in amps. Before starting, the app shows a confirmation with the
-exact peak current it will draw. It aborts immediately if the load trips a
-protection (REV/UVP/OVP), and always turns the load off when finished.
+never draws more than **80% of the fuse rating**, and the step size scales with
+the rating: a 2 A circuit is probed in tens of mA, a 30 A circuit in amps.
+Before starting, the app shows a confirmation with the exact peak current it will
+draw and what limits it. It aborts immediately if the load trips a protection
+(REV/UVP/OVP), and always turns the load off when finished.
+
+**Kept within the EL15's ratings** — the sweep is clamped so it can never command
+more than the hardware allows (ALIENTEK EL15: **12 A**, **150 W**, **60 V**).
+Because dissipation is `V × I`, **power is usually the binding limit**: on a 48 V
+source, 150 W permits only ~3.1 A regardless of a larger fuse. The test measures
+the open-circuit voltage while priming, then caps the ladder at:
+
+```
+I_max = min( 80% × fuse ,  12 A ,  150 W ÷ Voc )
+```
+
+Bounding by `150 W ÷ Voc` is conservative — terminal voltage only sags under
+load, so real power stays under 150 W. Each commanded step is clamped again live,
+and the test aborts if the source is outside 0.1–60 V. (Example: a 48 V source
+with a 30 A fuse would naively pull 24 A / ~1150 W; the test instead peaks at
+~3.1 A / ~148 W.)
 
 **Configurable sweep** — the test card exposes three tunables:
 

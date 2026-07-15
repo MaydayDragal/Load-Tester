@@ -21,7 +21,7 @@
     <string name="rt_stop">Stop</string>
     <string name="rt_explain">Loads the circuit in steps up to 80%% of the fuse rating, then computes resistance from the V–I slope.</string>
     <string name="rt_confirm_title">Start resistance test?</string>
-    <string name="rt_confirm_msg">This will draw up to %1$.2f A from the connected circuit (80%% of a %2$.1f A fuse). Make sure the wiring and source are rated for it, then keep clear.</string>
+    <string name="rt_confirm_msg">This will draw up to %1$.2f A — limited by %2$s. The sweep stays within the EL15\'s 12 A / 150 W ratings. Make sure your wiring and source can handle it, then keep clear.</string>
     <string name="rt_results_title">Resistance Test Results</string>
     <string name="rt_circuit_resistance">Circuit Resistance</string>
     <string name="rt_vi_caption">Voltage vs Current (slope = resistance)</string>

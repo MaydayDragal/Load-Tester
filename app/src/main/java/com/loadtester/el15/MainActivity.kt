@@ -144,19 +144,38 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
                 toast("Enter the circuit's fuse rating in amps")
                 return@setOnClickListener
             }
-            if (fuse > CircuitResistanceTester.ABS_MAX_CURRENT / tester.safetyFactor) {
-                toast("Fuse rating too high (max ${CircuitResistanceTester.ABS_MAX_CURRENT} A test current)")
+            if (fuse > 200f) {
+                toast("That fuse rating looks too high — double-check the value")
                 return@setOnClickListener
             }
             if (!applyTestOptions()) return@setOnClickListener
-            val maxI = fuse * tester.safetyFactor
+            val (peak, limiter) = predictedPeak(fuse)
             MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.rt_confirm_title)
-                .setMessage(getString(R.string.rt_confirm_msg, maxI, fuse))
+                .setMessage(getString(R.string.rt_confirm_msg, peak, limiter))
                 .setPositiveButton(R.string.rt_start) { _, _ -> startTest(fuse) }
                 .setNegativeButton(R.string.cancel, null)
                 .show()
         }
+    }
+
+    /**
+     * Estimate the peak current the sweep will reach and what limits it, using
+     * the present (open-circuit) voltage. The tester re-derives this precisely
+     * after priming; this is only for the confirmation dialog.
+     */
+    private fun predictedPeak(fuse: Float): Pair<Float, String> {
+        val v = lastStatus?.voltage?.takeIf { it > El15Protocol.MIN_VOLTAGE_V }
+            ?: El15Protocol.MAX_VOLTAGE_V
+        val fuseCap = fuse * tester.safetyFactor
+        val powerCap = El15Protocol.MAX_POWER_W / v
+        val peak = minOf(fuseCap, powerCap, El15Protocol.MAX_CURRENT_A)
+        val limiter = when (peak) {
+            fuseCap -> "80%% of the %.1f A fuse".format(fuse)
+            powerCap -> "the %.0f W power limit at %.1f V".format(El15Protocol.MAX_POWER_W, v)
+            else -> "the %.0f A current limit".format(El15Protocol.MAX_CURRENT_A)
+        }
+        return peak to limiter
     }
 
     /** Read the user-configurable sweep options; returns false and toasts if invalid. */
