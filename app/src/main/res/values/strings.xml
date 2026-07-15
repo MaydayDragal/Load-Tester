@@ -35,6 +35,12 @@
     <string name="rt_sample">Sample ms</string>
 
     <!-- Demo / simulator device -->
-    <string name="demo_device">🧪 EL15 Demo (Simulator)\nTap to try without hardware</string>
-    <string name="demo_connected">Connected — Demo device (simulated ~0.35 Ω circuit)</string>
+    <string name="demo_device">🧪 EL15 Demo (Simulator)\nTap to set up a virtual circuit</string>
+    <string name="demo_connected_fmt">Demo — %1$.1f V, %2$.3f Ω · tap to edit circuit</string>
+    <string name="demo_cfg_title">Demo circuit</string>
+    <string name="demo_cfg_explain">Set the virtual circuit the demo load sees. A resistance test will recover these values. Try a higher voltage (e.g. 48 V) to see the sweep power-limit to the EL15\'s 150 W.</string>
+    <string name="demo_cfg_connect">Connect</string>
+    <string name="demo_cfg_apply">Apply</string>
+    <string name="demo_source">Source voltage</string>
+    <string name="demo_resistance">Series resistance</string>
 </resources>

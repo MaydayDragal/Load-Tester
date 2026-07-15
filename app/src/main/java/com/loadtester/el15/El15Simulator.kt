@@ -22,8 +22,10 @@ import kotlin.math.sqrt
  */
 class El15Simulator(
     private val onStatus: (El15Status) -> Unit,
-    private val emf: Float = 12.60f,
-    private val seriesR: Float = 0.35f,
+    /** Open-circuit source voltage of the virtual circuit; editable live. */
+    var emf: Float = 12.60f,
+    /** Series resistance of the virtual circuit; editable live. */
+    var seriesR: Float = 0.35f,
 ) : El15Controller {
 
     private val main = Handler(Looper.getMainLooper())

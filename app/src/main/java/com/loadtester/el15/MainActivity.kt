@@ -13,6 +13,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.textfield.TextInputEditText
 import com.loadtester.el15.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity(), El15BleManager.Listener,
@@ -29,6 +30,10 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
 
     /** Non-null while the demo device is "connected". */
     private var simulator: El15Simulator? = null
+
+    /** User-editable virtual-circuit parameters for the demo device. */
+    private var demoEmf = 12.6f
+    private var demoSeriesR = 0.35f
 
     /** The load currently being driven: the demo device if active, else BLE. */
     private val controller: El15Controller get() = simulator ?: ble
@@ -61,6 +66,10 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
 
         ble = El15BleManager(this).also { it.listener = this }
         tester = CircuitResistanceTester(activeController, this)
+
+        val prefs = getPreferences(MODE_PRIVATE)
+        demoEmf = prefs.getFloat("demo_emf", demoEmf)
+        demoSeriesR = prefs.getFloat("demo_r", demoSeriesR)
 
         setupModeSpinner()
         setupControls()
@@ -280,7 +289,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
             .setTitle("Select device")
             .setAdapter(deviceListAdapter) { _, which ->
                 if (which == 0) {
-                    startSimulator()
+                    showDemoConfigDialog(applyLive = false) { startSimulator() }
                 } else {
                     val device = foundDevices.values.toList().getOrNull(which - 1)
                     if (device != null) ble.connect(device)
@@ -295,10 +304,16 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
     private fun startSimulator() {
         ble.stopScan()
         deviceDialog?.dismiss()
-        val sim = El15Simulator({ status -> runOnUiThread { handleIncomingStatus(status) } })
+        val sim = El15Simulator(
+            { status -> runOnUiThread { handleIncomingStatus(status) } },
+            demoEmf, demoSeriesR
+        )
         simulator = sim
         sim.start()
-        binding.statusText.text = getString(R.string.demo_connected)
+        updateDemoStatusText()
+        binding.statusText.setOnClickListener {
+            showDemoConfigDialog(applyLive = true, onDone = null)
+        }
         binding.connectButton.text = getString(R.string.disconnect)
         clearReadouts()
         updateControlsEnabled(true)
@@ -308,15 +323,59 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener,
         if (tester.running) tester.stop()
         simulator?.stop()
         simulator = null
+        binding.statusText.setOnClickListener(null)
+        binding.statusText.isClickable = false
         binding.statusText.text = "Disconnected"
         binding.connectButton.text = getString(R.string.scan_connect)
         updateControlsEnabled(false)
         clearReadouts()
     }
 
+    private fun updateDemoStatusText() {
+        binding.statusText.text = getString(R.string.demo_connected_fmt, demoEmf, demoSeriesR)
+    }
+
     private fun disconnectAll() {
         if (simulator != null) stopSimulator() else ble.disconnect()
     }
+
+    /**
+     * Prompt for the virtual-circuit parameters (source voltage + series
+     * resistance). [applyLive] updates a running demo immediately; [onDone] runs
+     * after the values are applied (used to connect on first setup).
+     */
+    private fun showDemoConfigDialog(applyLive: Boolean, onDone: (() -> Unit)?) {
+        val view = layoutInflater.inflate(R.layout.dialog_demo_circuit, null)
+        val emfIn = view.findViewById<TextInputEditText>(R.id.demoEmfInput)
+        val resIn = view.findViewById<TextInputEditText>(R.id.demoResInput)
+        emfIn.setText(fmtField(demoEmf))
+        resIn.setText(fmtField(demoSeriesR))
+        val posLabel = if (onDone != null) R.string.demo_cfg_connect else R.string.demo_cfg_apply
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.demo_cfg_title)
+            .setView(view)
+            .setPositiveButton(posLabel) { _, _ ->
+                // Values are clamped to sane ranges so input is always valid.
+                demoEmf = (emfIn.text.toString().trim().toFloatOrNull() ?: demoEmf)
+                    .coerceIn(0.1f, 100f)
+                demoSeriesR = (resIn.text.toString().trim().toFloatOrNull() ?: demoSeriesR)
+                    .coerceIn(0f, 100f)
+                getPreferences(MODE_PRIVATE).edit()
+                    .putFloat("demo_emf", demoEmf)
+                    .putFloat("demo_r", demoSeriesR)
+                    .apply()
+                if (applyLive) {
+                    simulator?.let { it.emf = demoEmf; it.seriesR = demoSeriesR }
+                    updateDemoStatusText()
+                }
+                onDone?.invoke()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun fmtField(v: Float): String =
+        if (v == v.toLong().toFloat()) v.toLong().toString() else v.toString()
 
     private fun clearReadouts() {
         binding.voltageValue.text = "—"

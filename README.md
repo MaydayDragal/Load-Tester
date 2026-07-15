@@ -136,10 +136,18 @@ The full port lives in
 
 Tap **Scan & Connect** and pick **🧪 EL15 Demo (Simulator)** at the top of the
 device list. This connects to a built-in fake load that models a virtual circuit
-(≈12.6 V source behind ≈0.35 Ω) and behaves like a real EL15 — it honours
-mode/setpoint/load commands and streams live readings, so every feature,
-including the circuit-resistance test, works end-to-end. A resistance test
-against the demo recovers ≈0.35 Ω / ≈12.6 V. Implemented in
+and behaves like a real EL15 — it honours mode/setpoint/load commands and streams
+live readings, so every feature, including the circuit-resistance test, works
+end-to-end. A resistance test against the demo recovers whatever circuit you set.
+
+**Editable circuit** — when you select the demo, a dialog lets you set the
+virtual circuit's **source voltage** (0.1–100 V) and **series resistance**
+(0–100 Ω); the values persist and can be changed live by tapping the status bar
+while connected. Defaults are 12.6 V / 0.35 Ω. Set a high voltage (e.g. 48 V) to
+watch the resistance sweep power-limit to the EL15's 150 W, or push past 60 V to
+see the over-range guard abort the test. The demo also enforces the 12 A / 150 W
+limits (OCP/OPP), so it current- and power-limits just like the real unit.
+Implemented in
 [`El15Simulator.kt`](app/src/main/java/com/loadtester/el15/El15Simulator.kt);
 the real transport and the demo share the
 [`El15Controller`](app/src/main/java/com/loadtester/el15/El15Controller.kt)
