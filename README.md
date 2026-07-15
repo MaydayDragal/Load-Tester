@@ -77,12 +77,19 @@ More steps + a longer sample window give a tighter fit at the cost of runtime
 **Results** — when the sweep completes you get:
 
 - the computed **circuit resistance** (auto Ω / mΩ) and open-circuit voltage,
+- per-run metrics: **peak power dissipated**, **max unit temperature**, **max
+  fan speed**, and a fit-quality (R²) confidence check,
 - a **Voltage-vs-Current graph** with the fitted resistance line,
 - a **Voltage & Current per-step** trend graph,
-- the raw data table (per-point resistance included), and a fit-quality (R²)
-  confidence check, and
+- the raw data table — per step: current, voltage, power, temperature, fan, and
+  per-point resistance, and
 - **Print** (Android print dialog → paper or PDF) and **Share** buttons that
   render a clean white-background report.
+
+**Selectable report** — a **Report contents** checklist lets you choose exactly
+which metrics, graphs, and the data table appear in the printed / shared report;
+the report bitmap is built from your selection (which is remembered between
+runs).
 
 Implemented in
 [`CircuitResistanceTester.kt`](app/src/main/java/com/loadtester/el15/CircuitResistanceTester.kt)

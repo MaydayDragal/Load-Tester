@@ -118,7 +118,7 @@
                 android:padding="8dp" />
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Data table -->
+        <!-- Data table (horizontally scrollable) -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -127,14 +127,54 @@
             app:cardCornerRadius="14dp"
             app:cardElevation="0dp">
 
-            <TextView
-                android:id="@+id/dataTable"
+            <HorizontalScrollView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:fontFamily="monospace"
-                android:padding="16dp"
-                android:textColor="@color/on_surface"
-                android:textSize="13sp" />
+                android:scrollbars="horizontal">
+
+                <TextView
+                    android:id="@+id/dataTable"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:padding="16dp"
+                    android:textColor="@color/on_surface"
+                    android:textSize="13sp" />
+            </HorizontalScrollView>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Report contents selector -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/rt_report_contents"
+            android:textColor="@color/on_surface"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="@string/rt_report_hint"
+            android:textColor="@color/muted"
+            android:textSize="12sp" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="14dp"
+            app:cardElevation="0dp">
+
+            <LinearLayout
+                android:id="@+id/reportItemsContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="8dp" />
         </com.google.android.material.card.MaterialCardView>
 
         <!-- Actions -->

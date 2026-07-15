@@ -28,6 +28,8 @@
     <string name="rt_trend_caption">Voltage &amp; Current per step</string>
     <string name="rt_print">Print</string>
     <string name="rt_share">Share</string>
+    <string name="rt_report_contents">Report contents</string>
+    <string name="rt_report_hint">Choose what appears in the printed / shared report.</string>
     <string name="rt_low_confidence">⚠ Low-confidence fit — voltage barely changed under load. Check connections, or use a lower-impedance path / higher current.</string>
     <string name="rt_options">Sweep options</string>
     <string name="rt_steps">Steps</string>

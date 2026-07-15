@@ -32,7 +32,14 @@ class CircuitResistanceTester(
         fun onTestError(message: String)
     }
 
-    data class Sample(val current: Float, val voltage: Float)
+    data class Sample(
+        val current: Float,
+        val voltage: Float,
+        val temperature: Float = 0f,
+        val fanSpeed: Int = 0,
+    ) {
+        val power: Float get() = current * voltage
+    }
 
     data class ResistanceResult(
         val samples: List<Sample>,
@@ -154,7 +161,9 @@ class CircuitResistanceTester(
         vRecent = status.voltage
         when (state) {
             State.PRIMING -> vOcMeasured = status.voltage
-            State.COLLECTING -> stepBuffer.add(Sample(status.current, status.voltage))
+            State.COLLECTING -> stepBuffer.add(
+                Sample(status.current, status.voltage, status.temperature, status.fanSpeed)
+            )
             else -> {}
         }
     }
@@ -186,7 +195,9 @@ class CircuitResistanceTester(
         if (stepBuffer.isNotEmpty()) {
             val i = stepBuffer.map { it.current.toDouble() }.average().toFloat()
             val v = stepBuffer.map { it.voltage.toDouble() }.average().toFloat()
-            results.add(Sample(i, v))
+            val t = stepBuffer.map { it.temperature.toDouble() }.average().toFloat()
+            val fan = stepBuffer.maxOf { it.fanSpeed }
+            results.add(Sample(i, v, t, fan))
             callback.onTestProgress(stepIndex + 1, targets.size, target, v, i)
         }
         beginStep(stepIndex + 1)
