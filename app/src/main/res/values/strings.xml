@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">EL15 Load Control</string>
+    <string name="scan_connect">Scan &amp; Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="cancel">Cancel</string>
+    <string name="load_on">Turn Load ON</string>
+    <string name="load_off">Turn Load OFF</string>
+    <string name="lock">Lock Keypad</string>
+    <string name="set">Set</string>
+    <string name="set_mode">Set Mode</string>
+    <string name="voltage">Voltage</string>
+    <string name="current">Current</string>
+    <string name="power">Power</string>
+    <string name="mode">Mode</string>
+    <string name="protection">⚠ PROTECTION: %1$s</string>
+</resources>
