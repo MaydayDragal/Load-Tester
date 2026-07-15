@@ -20,6 +20,54 @@ section — the EL15 is the electronic load). No PC required.
 - **Protection banner** (REV / UVP / other) when the load trips.
 - **CAP** mode shows accumulated energy (Wh) and capacity (Ah);
   **DCR** mode shows measured milliohms.
+- **Circuit Resistance Test** (see below): a dynamic, fuse-rating-driven load
+  sweep that measures a circuit's series resistance and produces a graph.
+
+## Circuit Resistance Test
+
+A custom test mode that measures the **series resistance of a circuit** (source
+internal resistance + wiring + connections) by loading it, rather than the
+device's built-in DCR (which measures a component's internal resistance).
+
+**How it works** — the EL15 is put into constant-current (CC) mode and made to
+sink a rising ladder of currents. As current increases, terminal voltage sags
+according to the circuit's resistance. The relationship is a straight line:
+
+```
+V = Voc − R · I     ⇒     R = −dV/dI   (slope of the V–I line)
+```
+
+The app records (V, I) at each step and fits a least-squares line; the slope is
+the circuit resistance and the intercept is the open-circuit voltage.
+
+**Dynamic, fuse-driven** — you enter the circuit's **fuse rating**. The test
+never draws more than **80% of the fuse rating** (with an absolute 40 A cap), and
+the step size scales with the rating: a 2 A circuit is probed in tens of mA, a
+30 A circuit in amps. Before starting, the app shows a confirmation with the
+exact peak current it will draw. It aborts immediately if the load trips a
+protection (REV/UVP/OVP), and always turns the load off when finished.
+
+**Results** — when the sweep completes you get:
+
+- the computed **circuit resistance** (auto Ω / mΩ) and open-circuit voltage,
+- a **Voltage-vs-Current graph** with the fitted resistance line,
+- a **Voltage & Current per-step** trend graph,
+- the raw data table (per-point resistance included), and a fit-quality (R²)
+  confidence check, and
+- **Print** (Android print dialog → paper or PDF) and **Share** buttons that
+  render a clean white-background report.
+
+Implemented in
+[`CircuitResistanceTester.kt`](app/src/main/java/com/loadtester/el15/CircuitResistanceTester.kt)
+(sweep engine + regression),
+[`ResistanceChartView.kt`](app/src/main/java/com/loadtester/el15/ResistanceChartView.kt)
+(dependency-free Canvas charts), and
+[`ResultActivity.kt`](app/src/main/java/com/loadtester/el15/ResultActivity.kt)
+(results, print/share).
+
+> ⚠ **Safety** — this drives real current through your circuit. Only test
+> sources and wiring rated for the peak current shown, keep the fuse rating
+> honest, and stay clear of the setup while a test runs.
 
 ## Protocol
 

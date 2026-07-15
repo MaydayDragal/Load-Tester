@@ -17,10 +17,12 @@ import androidx.core.content.ContextCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.loadtester.el15.databinding.ActivityMainBinding
 
-class MainActivity : AppCompatActivity(), El15BleManager.Listener {
+class MainActivity : AppCompatActivity(), El15BleManager.Listener,
+    CircuitResistanceTester.Callback {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var ble: El15BleManager
+    private lateinit var tester: CircuitResistanceTester
 
     private val foundDevices = LinkedHashMap<String, BluetoothDevice>()
     private var lastStatus: El15Status? = null
@@ -43,14 +45,17 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener {
         setContentView(binding.root)
 
         ble = El15BleManager(this).also { it.listener = this }
+        tester = CircuitResistanceTester(ble, this)
 
         setupModeSpinner()
         setupControls()
+        setupResistanceTest()
         updateControlsEnabled(false)
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        if (tester.running) tester.stop()
         ble.disconnect()
     }
 
@@ -99,6 +104,78 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener {
         }
 
         binding.lockButton.setOnClickListener { ble.setLock() }
+    }
+
+    // ---- Circuit resistance test -----------------------------------------
+    private fun setupResistanceTest() {
+        binding.startTestButton.setOnClickListener {
+            if (tester.running) {
+                tester.stop()
+                onTestFinishedUi("Test stopped")
+                return@setOnClickListener
+            }
+            if (ble.state != El15BleManager.State.CONNECTED) {
+                toast("Connect to the EL15 first")
+                return@setOnClickListener
+            }
+            val fuse = binding.fuseInput.text.toString().trim().toFloatOrNull()
+            if (fuse == null || fuse <= 0f) {
+                toast("Enter the circuit's fuse rating in amps")
+                return@setOnClickListener
+            }
+            if (fuse > CircuitResistanceTester.ABS_MAX_CURRENT / tester.safetyFactor) {
+                toast("Fuse rating too high (max ${CircuitResistanceTester.ABS_MAX_CURRENT} A test current)")
+                return@setOnClickListener
+            }
+            val maxI = fuse * tester.safetyFactor
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.rt_confirm_title)
+                .setMessage(getString(R.string.rt_confirm_msg, maxI, fuse))
+                .setPositiveButton(R.string.rt_start) { _, _ -> startTest(fuse) }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun startTest(fuse: Float) {
+        binding.fuseInput.clearFocus()
+        binding.testProgressText.visibility = View.VISIBLE
+        binding.testProgressText.text = "Priming…"
+        binding.startTestButton.setText(R.string.rt_stop)
+        updateControlsEnabled(true) // refresh: disables manual controls while testing
+        tester.start(fuse)
+    }
+
+    private fun onTestFinishedUi(message: String?) {
+        binding.startTestButton.setText(R.string.rt_start)
+        message?.let { binding.testProgressText.text = it }
+        updateControlsEnabled(ble.state == El15BleManager.State.CONNECTED)
+    }
+
+    override fun onTestProgress(step: Int, totalSteps: Int, targetCurrent: Float, voltage: Float, current: Float) {
+        binding.testProgressText.text =
+            "Step %d/%d  →  %.3f A set   %.3f V  @ %.3f A".format(step, totalSteps, targetCurrent, voltage, current)
+    }
+
+    override fun onTestComplete(result: CircuitResistanceTester.ResistanceResult) {
+        onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)}")
+        ResultActivity.start(this, result)
+    }
+
+    override fun onTestError(message: String) {
+        onTestFinishedUi(null)
+        binding.testProgressText.text = message
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Test stopped")
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun formatOhm(ohm: Float): String = when {
+        ohm <= 0f -> "n/a"
+        ohm < 1f -> "%.1f mΩ".format(ohm * 1000f)
+        else -> "%.3f Ω".format(ohm)
     }
 
     // ---- Permissions / scanning ------------------------------------------
@@ -155,6 +232,10 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener {
     override fun onStateChanged(state: El15BleManager.State, info: String) {
         binding.statusText.text = info
         val connected = state == El15BleManager.State.CONNECTED
+        if (!connected && tester.running) {
+            tester.stop()
+            onTestFinishedUi("Test stopped (disconnected)")
+        }
         binding.connectButton.text = when (state) {
             El15BleManager.State.CONNECTED -> getString(R.string.disconnect)
             El15BleManager.State.CONNECTING -> getString(R.string.cancel)
@@ -182,6 +263,7 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener {
 
     override fun onStatus(status: El15Status) {
         lastStatus = status
+        if (tester.running) tester.onStatus(status)
         binding.voltageValue.text = "%.3f V".format(status.voltage)
         binding.modeValue.text = status.modeName
 
@@ -249,13 +331,18 @@ class MainActivity : AppCompatActivity(), El15BleManager.Listener {
         // Surface only unexpected issues.
     }
 
-    private fun updateControlsEnabled(enabled: Boolean) {
-        binding.modeSpinner.isEnabled = enabled
-        binding.setModeButton.isEnabled = enabled
-        binding.setpointInput.isEnabled = enabled
-        binding.setSetpointButton.isEnabled = enabled
-        binding.loadToggle.isEnabled = enabled
-        binding.lockButton.isEnabled = enabled
+    private fun updateControlsEnabled(connected: Boolean) {
+        // Manual controls are available only while connected AND no test is running.
+        val manual = connected && !tester.running
+        binding.modeSpinner.isEnabled = manual
+        binding.setModeButton.isEnabled = manual
+        binding.setpointInput.isEnabled = manual
+        binding.setSetpointButton.isEnabled = manual
+        binding.loadToggle.isEnabled = manual
+        binding.lockButton.isEnabled = manual
+        // The test can be started only while connected; the button doubles as Stop.
+        binding.startTestButton.isEnabled = connected
+        binding.fuseInput.isEnabled = connected && !tester.running
     }
 
     private fun toast(msg: String) {
