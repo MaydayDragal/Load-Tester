@@ -7,7 +7,6 @@ import androidx.preference.PreferenceManager
 /** Centralised access to user settings (backed by default SharedPreferences). */
 object Prefs {
     const val THEME_MODE = "pref_theme_mode"     // system | light | dark
-    const val ACCENT = "pref_accent"             // blue | teal | indigo | violet | emerald | crimson
     const val POLL_MS = "pref_poll_ms"
     const val SAFETY_PCT = "pref_safety_pct"
     const val STEPS = "pref_steps"
@@ -31,15 +30,6 @@ object Prefs {
                 else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
             }
         )
-    }
-
-    fun accentStyle(ctx: Context): Int = when (str(ctx, ACCENT, "blue")) {
-        "teal" -> R.style.Accent_Teal
-        "indigo" -> R.style.Accent_Indigo
-        "violet" -> R.style.Accent_Violet
-        "emerald" -> R.style.Accent_Emerald
-        "crimson" -> R.style.Accent_Crimson
-        else -> R.style.Accent_Blue
     }
 
     fun pollMs(ctx: Context): Long = str(ctx, POLL_MS, "500").toLongOrNull()?.coerceIn(100, 5000) ?: 500L

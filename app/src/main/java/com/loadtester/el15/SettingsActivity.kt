@@ -41,12 +41,9 @@ class SettingsActivity : BaseActivity() {
         }
 
         override fun onSharedPreferenceChanged(sp: SharedPreferences?, key: String?) {
-            when (key) {
-                Prefs.THEME_MODE -> {
-                    Prefs.applyNightMode(requireContext())
-                    activity?.recreate()
-                }
-                Prefs.ACCENT -> activity?.recreate()
+            if (key == Prefs.THEME_MODE) {
+                Prefs.applyNightMode(requireContext())
+                activity?.recreate()
             }
         }
 

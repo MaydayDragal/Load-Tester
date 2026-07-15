@@ -6,57 +6,82 @@
     android:orientation="vertical"
     android:background="?android:attr/colorBackground">
 
-    <com.google.android.material.appbar.AppBarLayout
+    <!-- Top app bar -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:fitsSystemWindows="true"
-        app:elevation="0dp">
+        android:background="@drawable/header_bg"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="13dp"
+        android:paddingVertical="9dp"
+        android:fitsSystemWindows="true">
 
-        <com.google.android.material.appbar.MaterialToolbar
-            android:id="@+id/toolbar"
-            android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
-            android:background="?attr/colorPrimary"
-            app:title="@string/app_name"
-            app:titleTextColor="#FFFFFF"
-            app:menu="@menu/main_menu"
-            app:theme="@style/ThemeOverlay.Material3.Dark" />
+        <FrameLayout
+            android:layout_width="26dp"
+            android:layout_height="26dp"
+            android:background="@drawable/box_accent">
+            <ImageView
+                android:layout_width="15dp"
+                android:layout_height="15dp"
+                android:layout_gravity="center"
+                android:src="@drawable/ic_zap"
+                app:tint="@color/accent" />
+        </FrameLayout>
 
-        <com.google.android.material.tabs.TabLayout
-            android:id="@+id/tabs"
-            android:layout_width="match_parent"
+        <LinearLayout
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:background="?attr/colorPrimary"
-            app:tabTextColor="#B3FFFFFF"
-            app:tabSelectedTextColor="#FFFFFF"
-            app:tabIndicatorColor="#FFFFFF"
-            app:tabIndicatorFullWidth="false"
-            app:tabMode="fixed">
-
-            <com.google.android.material.tabs.TabItem
+            android:layout_weight="1"
+            android:layout_marginStart="10dp"
+            android:orientation="vertical">
+            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/tab_monitor" />
-
-            <com.google.android.material.tabs.TabItem
+                android:fontFamily="sans-serif-condensed"
+                android:textStyle="bold"
+                android:letterSpacing="0.02"
+                android:text="@string/app_name_caps"
+                android:textColor="?attr/colorOnSurface"
+                android:textSize="15sp" />
+            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/tab_test" />
-        </com.google.android.material.tabs.TabLayout>
-    </com.google.android.material.appbar.AppBarLayout>
+                android:text="@string/app_kicker"
+                android:textAllCaps="true"
+                android:letterSpacing="0.16"
+                android:textColor="@color/accent"
+                android:textSize="9sp" />
+        </LinearLayout>
 
-    <ViewFlipper
-        android:id="@+id/flipper"
+        <ImageButton
+            android:id="@+id/headerSettings"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_settings"
+            android:contentDescription="@string/settings"
+            app:tint="@color/muted" />
+
+        <ImageButton
+            android:id="@+id/headerInfo"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_info"
+            android:contentDescription="@string/about"
+            app:tint="@color/muted" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/divider" />
+
+    <include
+        android:id="@+id/monitor"
+        layout="@layout/section_monitor"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1">
-
-        <include
-            android:id="@+id/monitor"
-            layout="@layout/section_monitor" />
-
-        <include
-            android:id="@+id/test"
-            layout="@layout/section_test" />
-    </ViewFlipper>
+        android:layout_weight="1" />
 </LinearLayout>

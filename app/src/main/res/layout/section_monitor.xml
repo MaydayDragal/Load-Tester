@@ -4,339 +4,318 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:clipToPadding="false"
-    android:paddingBottom="24dp">
+    android:scrollbars="none">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="12dp">
+        android:padding="13dp">
 
         <!-- Connection -->
-        <com.google.android.material.card.MaterialCardView
-            style="@style/Card"
+        <com.loadtester.el15.BlueprintFrame
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="wrap_content"
+            android:background="@color/surface"
+            android:padding="12dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:padding="14dp">
+                android:orientation="horizontal">
 
-                <View
-                    android:id="@+id/connDot"
-                    android:layout_width="12dp"
-                    android:layout_height="12dp"
-                    android:background="@drawable/dot"
-                    android:backgroundTint="@color/value_red" />
+                <View android:id="@+id/connDot"
+                    android:layout_width="11dp" android:layout_height="11dp"
+                    android:background="@drawable/dot" android:backgroundTint="@color/value_red" />
 
-                <TextView
-                    android:id="@+id/connStatusText"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:text="@string/disconnected"
-                    android:textColor="?attr/colorOnSurface"
-                    android:textSize="14sp" />
+                <LinearLayout android:id="@+id/connStatusTap"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:layout_marginStart="11dp"
+                    android:orientation="vertical">
+                    <TextView android:id="@+id/connStatusText"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="@string/disconnected" android:textColor="?attr/colorOnSurface"
+                        android:textSize="13sp" />
+                    <TextView android:id="@+id/connStatusSub"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="@string/no_device" android:textColor="@color/muted"
+                        android:textSize="10sp" />
+                </LinearLayout>
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/connButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    style="@style/BtnPrimary"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:minHeight="0dp" android:paddingHorizontal="14dp"
                     android:text="@string/scan_connect" />
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
+        </com.loadtester.el15.BlueprintFrame>
 
-        <!-- Protection banner -->
-        <TextView
-            android:id="@+id/warningText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@color/value_red"
-            android:padding="10dp"
-            android:text="@string/protection"
-            android:textColor="#FFFFFF"
-            android:textStyle="bold"
-            android:visibility="gone" />
+        <!-- Protection -->
+        <LinearLayout android:id="@+id/warningBox"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="11dp" android:orientation="horizontal"
+            android:gravity="center_vertical" android:padding="10dp"
+            android:background="#3A1416" android:visibility="gone">
+            <ImageView android:layout_width="16dp" android:layout_height="16dp"
+                android:src="@drawable/ic_warning" app:tint="#FF9A9C" />
+            <TextView android:id="@+id/warningText"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginStart="8dp" android:textColor="#FF9A9C"
+                android:textStyle="bold" android:textSize="13sp" android:text="@string/protection" />
+        </LinearLayout>
 
-        <!-- Primary readouts -->
-        <com.google.android.material.card.MaterialCardView
-            style="@style/Card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp">
+        <!-- Readouts -->
+        <com.loadtester.el15.BlueprintFrame
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="11dp" android:background="@color/surface"
+            android:paddingHorizontal="15dp" android:paddingVertical="14dp">
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical">
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:orientation="horizontal">
-
-                    <LinearLayout style="@style/ReadoutCell">
+                    <LinearLayout style="@style/ReadoutCell" android:gravity="center_horizontal">
                         <TextView style="@style/ReadoutLabel" android:text="@string/voltage" />
-                        <TextView android:id="@+id/voltageValue" style="@style/ReadoutValue"
-                            android:textColor="@color/value_green" android:text="—" />
+                        <com.loadtester.el15.ArcGaugeView android:id="@+id/gaugeVoltage"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp" />
                     </LinearLayout>
-
-                    <LinearLayout style="@style/ReadoutCell">
+                    <LinearLayout style="@style/ReadoutCell" android:gravity="center_horizontal">
                         <TextView style="@style/ReadoutLabel" android:text="@string/current" />
-                        <TextView android:id="@+id/currentValue" style="@style/ReadoutValue"
-                            android:textColor="@color/value_amber" android:text="—" />
+                        <com.loadtester.el15.ArcGaugeView android:id="@+id/gaugeCurrent"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp" />
                     </LinearLayout>
                 </LinearLayout>
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp" android:gravity="center_vertical"
                     android:orientation="horizontal">
-
-                    <LinearLayout style="@style/ReadoutCell">
+                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:orientation="vertical">
                         <TextView style="@style/ReadoutLabel" android:text="@string/power" />
-                        <TextView android:id="@+id/powerValue" style="@style/ReadoutValue"
-                            android:textColor="@color/accent" android:text="—" />
+                        <TextView android:id="@+id/powerValue"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:fontFamily="monospace" android:textStyle="bold"
+                            android:textColor="@color/accent" android:textSize="16sp" android:text="—" />
+                        <ProgressBar android:id="@+id/powerBar"
+                            style="?android:attr/progressBarStyleHorizontal"
+                            android:layout_width="match_parent" android:layout_height="4dp"
+                            android:layout_marginTop="4dp" android:max="150" android:progress="0"
+                            android:progressTint="@color/accent" android:progressBackgroundTint="@color/field_bg" />
                     </LinearLayout>
-
-                    <LinearLayout style="@style/ReadoutCell">
+                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:layout_marginStart="14dp" android:orientation="vertical">
                         <TextView style="@style/ReadoutLabel" android:text="@string/mode" />
-                        <TextView android:id="@+id/modeValue" style="@style/ReadoutValue" android:text="—" />
+                        <TextView android:id="@+id/modeValue"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-condensed" android:textStyle="bold"
+                            android:textColor="?attr/colorOnSurface" android:textSize="18sp" android:text="—" />
                     </LinearLayout>
                 </LinearLayout>
 
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:layout_marginTop="14dp"
-                    android:background="?attr/colorOutline" />
+                <View android:layout_width="match_parent" android:layout_height="1dp"
+                    android:layout_marginTop="12dp" android:background="@color/divider" />
 
-                <TextView
-                    android:id="@+id/extraValue"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:textColor="@color/muted"
-                    android:textSize="13sp"
-                    android:text="" />
+                <TextView android:id="@+id/extraValue"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp" android:fontFamily="monospace"
+                    android:textColor="@color/muted" android:textSize="12sp" android:text="" />
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
+        </com.loadtester.el15.BlueprintFrame>
 
         <!-- Controls -->
-        <com.google.android.material.card.MaterialCardView
-            style="@style/Card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp">
+        <com.loadtester.el15.BlueprintFrame
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="11dp" android:background="@color/surface" android:padding="15dp">
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical">
 
-                <TextView style="@style/SectionHeader" android:text="@string/mode" />
+                <TextView style="@style/SectionHeader" android:text="@string/mode" android:layout_marginBottom="8dp" />
 
-                <com.google.android.material.chip.ChipGroup
-                    android:id="@+id/modeChipGroup"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    app:singleSelection="true"
-                    app:selectionRequired="false">
-
-                    <com.google.android.material.chip.Chip android:id="@+id/chipCc"
-                        style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" android:text="CC" />
-                    <com.google.android.material.chip.Chip android:id="@+id/chipCv"
-                        style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" android:text="CV" />
-                    <com.google.android.material.chip.Chip android:id="@+id/chipCr"
-                        style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" android:text="CR" />
-                    <com.google.android.material.chip.Chip android:id="@+id/chipCp"
-                        style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" android:text="CP" />
-                    <com.google.android.material.chip.Chip android:id="@+id/chipCap"
-                        style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" android:text="CAP" />
-                    <com.google.android.material.chip.Chip android:id="@+id/chipDcr"
-                        style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" android:text="DCR" />
+                <com.google.android.material.chip.ChipGroup android:id="@+id/modeChipGroup"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    app:singleSelection="true" app:selectionRequired="false"
+                    app:chipSpacingHorizontal="6dp" app:chipSpacingVertical="6dp">
+                    <com.google.android.material.chip.Chip android:id="@+id/chipCc" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CC" />
+                    <com.google.android.material.chip.Chip android:id="@+id/chipCv" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CV" />
+                    <com.google.android.material.chip.Chip android:id="@+id/chipCr" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CR" />
+                    <com.google.android.material.chip.Chip android:id="@+id/chipCp" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CP" />
+                    <com.google.android.material.chip.Chip android:id="@+id/chipCap" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CAP" />
+                    <com.google.android.material.chip.Chip android:id="@+id/chipDcr" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="DCR" />
+                    <com.google.android.material.chip.Chip android:id="@+id/chipRtest" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="R-TEST" />
                 </com.google.android.material.chip.ChipGroup>
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
+                <!-- Device-mode controls -->
+                <LinearLayout android:id="@+id/deviceControls"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
 
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:id="@+id/setpointLayout"
-                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:hint="@string/setpoint">
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="13dp" android:gravity="bottom" android:orientation="horizontal">
+                        <com.google.android.material.textfield.TextInputLayout android:id="@+id/setpointLayout"
+                            style="@style/Field" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_weight="1" android:hint="@string/setpoint">
+                            <com.google.android.material.textfield.TextInputEditText android:id="@+id/setpointInput"
+                                android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:fontFamily="monospace" android:imeOptions="actionDone"
+                                android:inputType="numberDecimal" />
+                        </com.google.android.material.textfield.TextInputLayout>
+                        <com.google.android.material.button.MaterialButton android:id="@+id/setSetpointButton"
+                            style="@style/BtnSecondary" android:layout_width="wrap_content"
+                            android:layout_height="54dp" android:layout_marginStart="9dp" android:text="@string/set" />
+                    </LinearLayout>
 
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/setpointInput"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:imeOptions="actionDone"
-                            android:inputType="numberDecimal" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/loadToggle"
+                        style="@style/BtnPrimary" android:layout_width="match_parent" android:layout_height="50dp"
+                        android:layout_marginTop="12dp" android:text="@string/load_on" android:textSize="15sp"
+                        app:icon="@drawable/ic_power" app:iconGravity="textStart"
+                        app:backgroundTint="@color/value_green" />
+
+                    <com.google.android.material.button.MaterialButton android:id="@+id/lockButton"
+                        style="@style/BtnSecondary" android:layout_width="match_parent" android:layout_height="40dp"
+                        android:layout_marginTop="8dp" android:text="@string/lock"
+                        app:icon="@drawable/ic_lock" app:iconGravity="textStart" />
+                </LinearLayout>
+
+                <!-- R-TEST panel -->
+                <LinearLayout android:id="@+id/rtestPanel"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical" android:visibility="gone">
+
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="13dp" android:text="@string/rt_explain"
+                        android:textColor="@color/muted" android:textSize="12sp" />
+
+                    <com.google.android.material.textfield.TextInputLayout android:id="@+id/fuseLayout"
+                        style="@style/Field" android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp" android:hint="@string/rt_hint"
+                        app:helperText="@string/rt_fuse_helper" app:suffixText="A">
+                        <com.google.android.material.textfield.TextInputEditText android:id="@+id/fuseInput"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:fontFamily="monospace" android:imeOptions="actionDone" android:inputType="numberDecimal" />
                     </com.google.android.material.textfield.TextInputLayout>
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/setSetpointButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="12dp"
-                        android:text="@string/set" />
+                    <TextView style="@style/SectionHeader" android:text="@string/rt_options"
+                        android:layout_marginTop="12dp" android:layout_marginBottom="4dp" />
+
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+                        <com.google.android.material.textfield.TextInputLayout android:id="@+id/stepsLayout"
+                            style="@style/Field" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_weight="1" android:hint="@string/rt_steps">
+                            <com.google.android.material.textfield.TextInputEditText android:id="@+id/stepsInput"
+                                android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:fontFamily="monospace" android:inputType="number" />
+                        </com.google.android.material.textfield.TextInputLayout>
+                        <com.google.android.material.textfield.TextInputLayout android:id="@+id/settleLayout"
+                            style="@style/Field" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp" android:layout_weight="1" android:hint="@string/rt_settle">
+                            <com.google.android.material.textfield.TextInputEditText android:id="@+id/settleInput"
+                                android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:fontFamily="monospace" android:inputType="number" />
+                        </com.google.android.material.textfield.TextInputLayout>
+                        <com.google.android.material.textfield.TextInputLayout android:id="@+id/sampleLayout"
+                            style="@style/Field" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp" android:layout_weight="1" android:hint="@string/rt_sample">
+                            <com.google.android.material.textfield.TextInputEditText android:id="@+id/sampleInput"
+                                android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:fontFamily="monospace" android:inputType="number" />
+                        </com.google.android.material.textfield.TextInputLayout>
+                    </LinearLayout>
+
+                    <com.google.android.material.button.MaterialButton android:id="@+id/startTestButton"
+                        style="@style/BtnPrimary" android:layout_width="match_parent" android:layout_height="50dp"
+                        android:layout_marginTop="14dp" android:text="@string/rt_start" android:textSize="15sp"
+                        app:icon="@drawable/ic_play" app:iconGravity="textStart" />
+
+                    <ProgressBar android:id="@+id/testBar"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent" android:layout_height="5dp"
+                        android:layout_marginTop="12dp" android:max="100" android:progress="0"
+                        android:progressTint="@color/accent" android:progressBackgroundTint="@color/field_bg"
+                        android:visibility="gone" />
+
+                    <TextView android:id="@+id/testProgressText"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:fontFamily="monospace"
+                        android:textColor="@color/accent" android:textSize="12sp" android:visibility="gone" />
                 </LinearLayout>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/loadToggle"
-                    android:layout_width="match_parent"
-                    android:layout_height="54dp"
-                    android:layout_marginTop="12dp"
-                    android:text="@string/load_on"
-                    android:textSize="16sp"
-                    app:backgroundTint="@color/value_green" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/lockButton"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="@string/lock" />
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
+        </com.loadtester.el15.BlueprintFrame>
 
-        <!-- Live waveform -->
-        <com.google.android.material.card.MaterialCardView
-            style="@style/Card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp">
+        <!-- Waveform -->
+        <com.loadtester.el15.BlueprintFrame
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="11dp" android:background="@color/surface" android:padding="14dp">
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical">
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView style="@style/SectionHeader"
-                        android:layout_width="0dp" android:layout_weight="1"
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:gravity="center_vertical" android:orientation="horizontal">
+                    <TextView style="@style/SectionHeader" android:layout_width="0dp" android:layout_weight="1"
                         android:text="@string/waveform" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/wavePauseButton"
-                        style="@style/Widget.Material3.Button.IconButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        app:icon="@drawable/ic_pause" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/waveRecordButton"
-                        style="@style/Widget.Material3.Button.IconButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        app:icon="@drawable/ic_record" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/waveExportButton"
-                        style="@style/Widget.Material3.Button.IconButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        app:icon="@drawable/ic_download" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/wavePauseButton"
+                        style="@style/IconBtn" android:layout_width="32dp" android:layout_height="32dp"
+                        app:icon="@drawable/ic_pause" app:iconGravity="textStart" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/waveRecordButton"
+                        style="@style/IconBtn" android:layout_width="32dp" android:layout_height="32dp"
+                        android:layout_marginStart="4dp" app:icon="@drawable/ic_record" app:iconTint="@null" />
+                    <com.google.android.material.button.MaterialButton android:id="@+id/waveExportButton"
+                        style="@style/IconBtn" android:layout_width="32dp" android:layout_height="32dp"
+                        android:layout_marginStart="4dp" app:icon="@drawable/ic_download" />
                 </LinearLayout>
 
-                <TextView
-                    android:id="@+id/waveLegend"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/waveform_legend"
-                    android:textSize="12sp" />
+                <TextView android:id="@+id/waveLegend"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp" android:textSize="11sp"
+                    android:text="@string/waveform_legend" />
 
-                <com.loadtester.el15.WaveformView
-                    android:id="@+id/waveformView"
-                    android:layout_width="match_parent"
-                    android:layout_height="150dp"
-                    android:layout_marginTop="6dp" />
+                <com.loadtester.el15.WaveformView android:id="@+id/waveformView"
+                    android:layout_width="match_parent" android:layout_height="150dp" android:layout_marginTop="4dp" />
 
-                <TextView
-                    android:id="@+id/waveStats"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:textColor="@color/muted"
-                    android:textSize="12sp"
-                    android:text="—" />
+                <TextView android:id="@+id/waveStats"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp" android:fontFamily="monospace"
+                    android:textColor="@color/muted" android:textSize="10sp" android:text="—" />
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
+        </com.loadtester.el15.BlueprintFrame>
 
         <!-- Packet inspector -->
-        <com.google.android.material.card.MaterialCardView
-            style="@style/Card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp">
+        <com.loadtester.el15.BlueprintFrame
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="11dp" android:layout_marginBottom="8dp"
+            android:background="@color/surface" android:padding="14dp">
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <TextView style="@style/SectionHeader"
-                        android:layout_width="0dp" android:layout_weight="1"
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:gravity="center_vertical" android:orientation="horizontal">
+                    <TextView style="@style/SectionHeader" android:layout_width="0dp" android:layout_weight="1"
                         android:text="@string/packet_inspector" />
-
-                    <TextView
-                        android:id="@+id/packetCrc"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:paddingHorizontal="8dp"
-                        android:paddingVertical="2dp"
-                        android:text="CRC —"
-                        android:textColor="@color/muted"
-                        android:textSize="12sp"
-                        android:textStyle="bold" />
+                    <TextView android:id="@+id/packetCrc"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:fontFamily="monospace" android:textStyle="bold" android:textSize="11sp"
+                        android:paddingHorizontal="8dp" android:paddingVertical="2dp"
+                        android:text="CRC —" android:textColor="@color/muted" />
                 </LinearLayout>
-
-                <TextView
-                    android:id="@+id/packetHex"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:fontFamily="monospace"
-                    android:textColor="@color/muted"
-                    android:textSize="12sp"
-                    android:text="—" />
+                <TextView android:id="@+id/packetHex"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="7dp" android:fontFamily="monospace"
+                    android:textColor="@color/muted" android:textSize="10sp" android:text="—" />
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
+        </com.loadtester.el15.BlueprintFrame>
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>

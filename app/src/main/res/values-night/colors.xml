@@ -1,15 +1,29 @@
 <resources>
-    <color name="background">#0E1319</color>
-    <color name="surface">#19212B</color>
-    <color name="surface_variant">#222C38</color>
+    <!-- Blueprint tokens — DARK (the hero design) -->
+    <color name="background">#0B1016</color>
+    <color name="surface">#121A23</color>
+    <color name="field_bg">#0C131B</color>
     <color name="on_surface">#E6EDF3</color>
-    <color name="muted">#8B98A5</color>
-    <color name="outline">#2B3543</color>
+    <color name="muted">#8791A0</color>
+    <color name="outline">#26303A</color>
+    <color name="divider">#26303A</color>
+    <color name="grid">#141C24</color>
+    <color name="track">#242C34</color>
 
-    <!-- Slightly brighter data series for dark backgrounds -->
+    <!-- Steel accent (constant hero value) -->
+    <color name="accent">#7BA1C9</color>
+    <color name="accent_600">#5F86AD</color>
+    <color name="accent_700">#4A6A8C</color>
+    <color name="primary">#7BA1C9</color>
+    <color name="primary_dark">#0D1520</color>
+    <color name="on_accent">#08111C</color>
+
     <color name="value_green">#4CAF50</color>
     <color name="value_amber">#FFB300</color>
     <color name="value_red">#EF5350</color>
     <color name="value_blue">#42A5F5</color>
     <color name="value_purple">#AB47BC</color>
+
+    <color name="header_top">#0F1721</color>
+    <color name="header_bottom">#0B1016</color>
 </resources>

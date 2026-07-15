@@ -8,7 +8,24 @@ It re-implements the BLE protocol used by the desktop
 [Device Support](https://github.com/maj113/DM40GUI/blob/master/README.md#device-support)
 section — the EL15 is the electronic load). No PC required.
 
-## Interface
+## Interface — blueprint instrument panel
+
+The UI follows a dark **"instrument-panel / blueprint"** design: square hairline
+frames with `+` corner registration marks, a single steel accent (`#7ba1c9`),
+condensed headings, and monospace readouts. It is a **single Monitor screen**
+(no tabs) with full-screen Settings/Results and a custom top app bar (bolt glyph
++ title/kicker + settings/info). Highlights:
+
+- **Arc gauges** for voltage (green) and current (amber) with the live value
+  inside; the voltage gauge auto-scales its range to the source (0–20 V for a
+  12.6 V source, 0–55 V for 48 V). A power bar (0–150 W) and mode sit beneath.
+- **Mode chips** `CC · CV · CR · CP · CAP · DCR · R-TEST` — selecting **R-TEST**
+  swaps the setpoint/load controls for the fuse-aware sweep panel in place.
+- Live waveform, packet inspector (hex + `CRC ✓`), and the blueprint report.
+
+Light/dark follow the theme setting; the dark treatment is the hero.
+
+## Interface (features)
 
 A Material 3 app with a top app bar and two tabs — **Monitor** and **Resistance
 Test** — plus a **Settings** screen (gear icon) and an About dialog.

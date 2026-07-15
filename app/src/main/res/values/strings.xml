@@ -1,5 +1,8 @@
 <resources>
     <string name="app_name">EL15 Load Control</string>
+    <string name="app_name_caps">EL15 LOAD CONTROL</string>
+    <string name="app_kicker">ALIENTEK · Electronic Load</string>
+    <string name="no_device">No device</string>
     <string name="tab_monitor">Monitor</string>
     <string name="tab_test">Resistance Test</string>
     <string name="settings">Settings</string>
@@ -16,6 +19,7 @@
     <string name="load_on">Turn Load ON</string>
     <string name="load_off">Turn Load OFF</string>
     <string name="lock">Lock Keypad</string>
+    <string name="locked">Keypad Locked</string>
     <string name="set">Set</string>
     <string name="set_mode">Set Mode</string>
     <string name="setpoint">Setpoint</string>

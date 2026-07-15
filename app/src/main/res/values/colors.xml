@@ -1,21 +1,30 @@
 <resources>
-    <!-- Adaptive surfaces (light values; dark in values-night) -->
-    <color name="background">#F4F6F9</color>
+    <!-- Blueprint tokens — LIGHT adaptation (dark is the hero, in values-night) -->
+    <color name="background">#EDF1F6</color>
     <color name="surface">#FFFFFF</color>
-    <color name="surface_variant">#EAEEF3</color>
-    <color name="on_surface">#131A22</color>
-    <color name="muted">#5D6B7A</color>
-    <color name="outline">#D6DCE4</color>
+    <color name="field_bg">#E7ECF2</color>
+    <color name="on_surface">#101821</color>
+    <color name="muted">#5A6774</color>
+    <color name="outline">#22101821</color>
+    <color name="divider">#22101821</color>
+    <color name="grid">#12101821</color>
+    <color name="track">#22101821</color>
 
-    <!-- Brand / accent (constant across themes) -->
-    <color name="primary">#1565C0</color>
-    <color name="primary_dark">#0D47A1</color>
-    <color name="accent">#00ACC1</color>
+    <!-- Steel accent (constant) -->
+    <color name="accent">#3C6188</color>
+    <color name="accent_600">#325278</color>
+    <color name="accent_700">#274261</color>
+    <color name="primary">#3C6188</color>
+    <color name="primary_dark">#274261</color>
+    <color name="on_accent">#FFFFFF</color>
 
-    <!-- Data series (constant; readable on light and dark) -->
+    <!-- Data series (constant across themes) -->
     <color name="value_green">#2E9E5B</color>
-    <color name="value_amber">#E39A00</color>
-    <color name="value_red">#E5484D</color>
-    <color name="value_blue">#3B82F6</color>
-    <color name="value_purple">#9B51E0</color>
+    <color name="value_amber">#D98A00</color>
+    <color name="value_red">#D63A3F</color>
+    <color name="value_blue">#2F79D6</color>
+    <color name="value_purple">#8A45C7</color>
+
+    <color name="header_top">#DDE4EC</color>
+    <color name="header_bottom">#EDF1F6</color>
 </resources>

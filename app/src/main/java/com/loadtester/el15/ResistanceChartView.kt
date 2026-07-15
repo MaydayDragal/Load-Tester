@@ -61,7 +61,7 @@ class ResistanceChartView @JvmOverloads constructor(
         val grid = if (light) Color.parseColor("#DDDDDD") else Color.parseColor("#2A3441")
         val vColor = Color.parseColor("#4CAF50")
         val iColor = Color.parseColor("#FFB300")
-        val fit = Color.parseColor("#00ACC1")
+        val fit = Color.parseColor("#7BA1C9")
 
         val padL = dpToPx(44f); val padR = dpToPx(16f)
         // Trend mode needs headroom for a multi-series legend.
@@ -125,7 +125,7 @@ class ResistanceChartView @JvmOverloads constructor(
         val traces = listOf(
             Trace("V", "V", Color.parseColor("#4CAF50"), samples.map { it.voltage }),
             Trace("I", "A", Color.parseColor("#FFB300"), samples.map { it.current }),
-            Trace("P", "W", Color.parseColor("#00ACC1"), samples.map { it.power }),
+            Trace("P", "W", Color.parseColor("#7BA1C9"), samples.map { it.power }),
             Trace("T", "°C", Color.parseColor("#EF5350"), samples.map { it.temperature }),
             Trace("Fan", "", Color.parseColor("#AB47BC"), samples.map { it.fanSpeed.toFloat() }),
         )

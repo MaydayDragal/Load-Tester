@@ -10,11 +10,13 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        android:background="?attr/colorPrimary"
+        android:background="@drawable/header_bg"
         app:navigationIcon="@drawable/ic_back"
         app:title="@string/settings"
-        app:titleTextColor="#FFFFFF"
-        app:theme="@style/ThemeOverlay.Material3.Dark" />
+        app:titleTextColor="?attr/colorOnSurface"
+        app:titleTextAppearance="@style/ToolbarTitle" />
+
+    <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/divider" />
 
     <FrameLayout
         android:id="@+id/settingsContainer"
