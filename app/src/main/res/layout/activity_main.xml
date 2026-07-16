@@ -55,6 +55,15 @@
         </LinearLayout>
 
         <ImageButton
+            android:id="@+id/headerHistory"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_history"
+            android:contentDescription="@string/history_title"
+            app:tint="@color/muted" />
+
+        <ImageButton
             android:id="@+id/headerSettings"
             android:layout_width="36dp"
             android:layout_height="36dp"

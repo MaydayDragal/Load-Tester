@@ -75,22 +75,82 @@
                 </com.google.android.material.textfield.TextInputLayout>
             </com.loadtester.el15.BlueprintFrame>
 
-            <!-- V–I chart -->
-            <TextView style="@style/SectionHeader" android:layout_marginTop="14dp" android:layout_marginStart="2dp" android:text="@string/rt_vi_caption" />
-            <com.loadtester.el15.BlueprintFrame
-                android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="6dp" android:background="@color/surface" android:padding="8dp">
-                <com.loadtester.el15.ResistanceChartView android:id="@+id/viChart"
-                    android:layout_width="match_parent" android:layout_height="280dp" />
-            </com.loadtester.el15.BlueprintFrame>
+            <!-- Interactive chart -->
+            <TextView style="@style/SectionHeader" android:layout_marginTop="14dp" android:layout_marginStart="2dp"
+                android:text="@string/chart_title" />
 
-            <!-- Trend chart -->
-            <TextView style="@style/SectionHeader" android:layout_marginTop="14dp" android:layout_marginStart="2dp" android:text="@string/rt_trend_caption" />
             <com.loadtester.el15.BlueprintFrame
                 android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="6dp" android:background="@color/surface" android:padding="8dp">
-                <com.loadtester.el15.ResistanceChartView android:id="@+id/trendChart"
-                    android:layout_width="match_parent" android:layout_height="300dp" />
+                android:layout_marginTop="6dp" android:background="@color/surface" android:padding="12dp">
+
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <!-- View selector -->
+                    <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:scrollbars="none">
+                        <com.google.android.material.chip.ChipGroup android:id="@+id/chartViewGroup"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            app:singleSelection="true" app:selectionRequired="true" app:singleLine="true"
+                            app:chipSpacingHorizontal="6dp">
+                            <com.google.android.material.chip.Chip android:id="@+id/viewVi" style="@style/ModeChip"
+                                android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/chart_view_vi" />
+                            <com.google.android.material.chip.Chip android:id="@+id/viewTrend" style="@style/ModeChip"
+                                android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/chart_view_trend" />
+                            <com.google.android.material.chip.Chip android:id="@+id/viewAbs" style="@style/ModeChip"
+                                android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/chart_view_abs" />
+                            <com.google.android.material.chip.Chip android:id="@+id/viewRi" style="@style/ModeChip"
+                                android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/chart_view_ri" />
+                            <com.google.android.material.chip.Chip android:id="@+id/viewPi" style="@style/ModeChip"
+                                android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/chart_view_pi" />
+                        </com.google.android.material.chip.ChipGroup>
+                    </HorizontalScrollView>
+
+                    <com.loadtester.el15.TestChartView android:id="@+id/chart"
+                        android:layout_width="match_parent" android:layout_height="300dp"
+                        android:layout_marginTop="8dp" />
+
+                    <!-- Series toggles (trend views) -->
+                    <com.google.android.material.chip.ChipGroup android:id="@+id/seriesGroup"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        app:chipSpacingHorizontal="6dp" app:chipSpacingVertical="6dp">
+                        <com.google.android.material.chip.Chip android:id="@+id/seriesV" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="V" />
+                        <com.google.android.material.chip.Chip android:id="@+id/seriesI" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="I" />
+                        <com.google.android.material.chip.Chip android:id="@+id/seriesP" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="P" />
+                        <com.google.android.material.chip.Chip android:id="@+id/seriesT" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="Temp" />
+                        <com.google.android.material.chip.Chip android:id="@+id/seriesF" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="Fan" />
+                    </com.google.android.material.chip.ChipGroup>
+
+                    <!-- Style toggles -->
+                    <com.google.android.material.chip.ChipGroup android:id="@+id/styleGroup"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        app:chipSpacingHorizontal="6dp" app:chipSpacingVertical="6dp">
+                        <com.google.android.material.chip.Chip android:id="@+id/styleGrid" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="@string/chart_style_grid" />
+                        <com.google.android.material.chip.Chip android:id="@+id/styleMarkers" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="@string/chart_style_markers" />
+                        <com.google.android.material.chip.Chip android:id="@+id/styleFill" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="@string/chart_style_fill" />
+                        <com.google.android.material.chip.Chip android:id="@+id/styleThick" style="@style/ModeChip"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:checkable="true" android:text="@string/chart_style_thick" />
+                    </com.google.android.material.chip.ChipGroup>
+                </LinearLayout>
             </com.loadtester.el15.BlueprintFrame>
 
             <!-- Data table -->
@@ -106,7 +166,8 @@
             </com.loadtester.el15.BlueprintFrame>
 
             <!-- Report contents -->
-            <TextView style="@style/SectionHeader" android:layout_marginTop="14dp" android:layout_marginStart="2dp" android:text="@string/rt_report_contents" />
+            <TextView style="@style/SectionHeader" android:layout_marginTop="14dp" android:layout_marginStart="2dp"
+                android:text="@string/rt_report_contents" />
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginTop="2dp" android:layout_marginStart="2dp" android:text="@string/rt_report_hint"
                 android:textColor="@color/muted" android:textSize="12sp" />
@@ -119,16 +180,23 @@
 
             <!-- Actions -->
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="13dp" android:layout_marginBottom="8dp" android:orientation="horizontal">
+                android:layout_marginTop="13dp" android:orientation="horizontal">
                 <com.google.android.material.button.MaterialButton android:id="@+id/printButton"
                     style="@style/BtnPrimary" android:layout_width="0dp" android:layout_height="wrap_content"
                     android:layout_weight="1" android:text="@string/rt_print" />
                 <com.google.android.material.button.MaterialButton android:id="@+id/shareButton"
                     style="@style/BtnSecondary" android:layout_width="0dp" android:layout_height="wrap_content"
                     android:layout_marginStart="9dp" android:layout_weight="1" android:text="@string/rt_share" />
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="9dp" android:layout_marginBottom="8dp" android:orientation="horizontal">
                 <com.google.android.material.button.MaterialButton android:id="@+id/csvButton"
                     style="@style/BtnSecondary" android:layout_width="0dp" android:layout_height="wrap_content"
-                    android:layout_marginStart="9dp" android:layout_weight="1" android:text="@string/rt_csv" />
+                    android:layout_weight="1" android:text="@string/rt_csv" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/saveButton"
+                    style="@style/BtnSecondary" android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_marginStart="9dp" android:layout_weight="1" android:text="@string/rt_save_device"
+                    app:icon="@drawable/ic_save" app:iconGravity="textStart" />
             </LinearLayout>
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>

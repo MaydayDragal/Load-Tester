@@ -47,6 +47,30 @@
     <string name="rt_details">Test details</string>
     <string name="rt_notes_hint">Notes (included in the report)</string>
     <string name="rt_csv">Export CSV</string>
+    <string name="rt_save_device">Save to phone</string>
+    <string name="rt_save_report">Report image (PNG)</string>
+    <string name="rt_save_csv">Data (CSV)</string>
+    <string name="rt_save_both">Both</string>
+    <string name="rt_saved_to">Saved to %1$s</string>
+    <string name="wave_export_title">Export waveform (%1$d samples)</string>
+
+    <!-- Test archive / history -->
+    <string name="history_title">Test History</string>
+    <string name="history_empty">No saved tests yet.\nEvery completed resistance test is archived here automatically.</string>
+    <string name="history_delete">Delete test</string>
+    <string name="history_delete_msg">Delete the archived test (%1$s)? This cannot be undone.</string>
+
+    <!-- Chart customization -->
+    <string name="chart_title">Graphs</string>
+    <string name="chart_view_vi">V–I fit</string>
+    <string name="chart_view_trend">Trend</string>
+    <string name="chart_view_abs">Absolute</string>
+    <string name="chart_view_ri">R vs I</string>
+    <string name="chart_view_pi">P vs I</string>
+    <string name="chart_style_grid">Grid</string>
+    <string name="chart_style_markers">Markers</string>
+    <string name="chart_style_fill">Fill</string>
+    <string name="chart_style_thick">Thick lines</string>
     <string name="rt_low_confidence">⚠ Low-confidence fit — voltage barely changed under load. Check connections, or use a lower-impedance path / higher current.</string>
     <string name="rt_options">Sweep options</string>
     <string name="rt_steps">Steps</string>

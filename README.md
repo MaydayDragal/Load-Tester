@@ -122,10 +122,33 @@ More steps + a longer sample window give a tighter fit at the cost of runtime
 - **Print** (Android print dialog → paper or PDF) and **Share** buttons that
   render a clean white-background report.
 
-**Selectable report** — a **Report contents** checklist lets you choose exactly
-which metrics, graphs, and the data table appear in the printed / shared report;
-the report bitmap is built from your selection (which is remembered between
-runs).
+**Customizable graphs** — the results screen has one interactive chart with
+five views: **V–I fit** (scatter + fitted resistance line), **Trend**
+(per-step multi-series, normalized), **Absolute** (selected series on a real
+shared axis), **R vs I** (per-point resistance linearity check against the
+fitted value), and **P vs I** (power curve). Series (V/I/P/Temp/Fan) can be
+toggled on the trend views, and style flags — grid, point markers, area fill,
+thick lines — apply everywhere. The configuration persists between runs and
+carries into the printed report.
+
+**Test archive & recall** — every completed sweep is automatically saved
+on-device (JSON in app storage). The **Test History** screen (clock icon in the
+header) lists all archived tests — headline resistance, Voc, peak current,
+points, R², notes preview — and reopens any of them in the full results view.
+Notes edits are saved back into the archive. Records can be deleted with
+confirmation.
+
+**Save to phone** — reports (PNG) and data (CSV) can be saved directly to the
+phone's **Downloads/EL15 Load Control** folder (MediaStore on Android 10+, no
+permission needed; legacy storage permission requested once on Android 7–9), in
+addition to the existing Print and Share flows. The live waveform recorder's
+CSV export offers the same share-or-save choice.
+
+**Selectable report** — a **Report contents** checklist chooses exactly which
+sections appear in the printed / shared / saved report: summary & resistance,
+test details, the V–I graph, the trend graph, the currently configured custom
+chart view, the data table, and notes; the selection is remembered between
+runs.
 
 Implemented in
 [`CircuitResistanceTester.kt`](app/src/main/java/com/loadtester/el15/CircuitResistanceTester.kt)

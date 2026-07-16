@@ -6,7 +6,6 @@ import android.bluetooth.BluetoothDevice
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.SpannableStringBuilder
@@ -18,13 +17,10 @@ import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.loadtester.el15.databinding.ActivityMainBinding
-import java.io.File
-import java.io.FileOutputStream
 import kotlin.math.ceil
 
 class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceTester.Callback {
@@ -84,6 +80,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         demoEmf = Prefs.demoEmf(this)
         demoSeriesR = Prefs.demoR(this)
 
+        binding.headerHistory.setOnClickListener { startActivity(Intent(this, HistoryActivity::class.java)) }
         binding.headerSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
         binding.headerInfo.setOnClickListener { showAbout() }
 
@@ -199,7 +196,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
             if (waveformView.recording) { waveformView.stopRecording(); toast("Recording stopped (${waveformView.recordedCount()} samples)") }
             else { waveformView.startRecording(); toast("Recording…") }
         }
-        waveExportButton.setOnClickListener { exportWaveformCsv() }
+        waveExportButton.setOnClickListener { waveformExportChooser() }
     }
 
     private fun applyLegend() {
@@ -284,8 +281,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     override fun onTestComplete(result: CircuitResistanceTester.ResistanceResult) {
         onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)}")
         val device = simulator?.let { "Demo (%.1f V, %.3f Ω)".format(demoEmf, demoSeriesR) } ?: "EL15 (BLE)"
-        ResultActivity.start(this, result, tester.steps, tester.settleMs, tester.collectMs,
-            (tester.safetyFactor * 100).toInt(), device, System.currentTimeMillis())
+        val record = TestRecord.from(
+            result, tester.steps, tester.settleMs, tester.collectMs,
+            (tester.safetyFactor * 100).toInt(), device, System.currentTimeMillis(),
+        )
+        if (!ResultActivity.start(this, record)) toast("Could not archive the test result")
     }
 
     override fun onTestError(message: String) {
@@ -404,26 +404,57 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     private fun fmtField(v: Float) = if (v == v.toLong().toFloat()) v.toLong().toString() else v.toString()
 
     // ---- Waveform CSV -----------------------------------------------------
-    private fun exportWaveformCsv() {
+    private fun buildWaveformCsv(rows: List<WaveformView.WPoint>): ByteArray {
+        val sb = StringBuilder("time_ms,elapsed_s,voltage_V,current_A,power_W,temp_C,fan\n")
+        val t0 = rows.first().tMs
+        for (r in rows) sb.append("%d,%.3f,%.4f,%.4f,%.4f,%.2f,%d\n".format(
+            java.util.Locale.US, r.tMs, (r.tMs - t0) / 1000.0, r.v, r.i, r.p, r.temp, r.fan))
+        return sb.toString().toByteArray()
+    }
+
+    private fun waveformExportChooser() {
         val rows = binding.monitor.waveformView.exportRows()
         if (rows.isEmpty()) { toast("No waveform data yet"); return }
-        try {
-            val dir = File(cacheDir, "shared").apply { mkdirs() }
-            val file = File(dir, "waveform.csv")
-            FileOutputStream(file).use { out ->
-                val sb = StringBuilder("time_ms,elapsed_s,voltage_V,current_A,power_W,temp_C,fan\n")
-                val t0 = rows.first().tMs
-                for (r in rows) sb.append("%d,%.3f,%.4f,%.4f,%.4f,%.2f,%d\n".format(
-                    java.util.Locale.US, r.tMs, (r.tMs - t0) / 1000.0, r.v, r.i, r.p, r.temp, r.fan))
-                out.write(sb.toString().toByteArray())
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+            .format(java.util.Date())
+        val name = "el15-waveform-$stamp.csv"
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.wave_export_title, rows.size))
+            .setItems(arrayOf(getString(R.string.rt_share), getString(R.string.rt_save_device))) { _, which ->
+                try {
+                    val bytes = buildWaveformCsv(rows)
+                    if (which == 0) {
+                        Exporter.share(this, name, "text/csv", bytes, "EL15 waveform (${rows.size} samples)")
+                    } else {
+                        withStoragePermission {
+                            val where = Exporter.saveToDownloads(this, name, "text/csv", bytes)
+                            toast(if (where != null) getString(R.string.rt_saved_to, where) else "Save failed")
+                        }
+                    }
+                } catch (e: Exception) { toast("Export failed: ${e.message}") }
             }
-            val uri: Uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                type = "text/csv"; putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_SUBJECT, "EL15 waveform (${rows.size} samples)")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }, "Export waveform CSV"))
-        } catch (e: Exception) { toast("Export failed: ${e.message}") }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private var pendingStorageAction: (() -> Unit)? = null
+    private val storagePermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) pendingStorageAction?.invoke() else toast("Storage permission denied")
+        pendingStorageAction = null
+    }
+
+    private fun withStoragePermission(action: () -> Unit) {
+        if (!Exporter.needsLegacyWritePermission() ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            action()
+        } else {
+            pendingStorageAction = action
+            storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
     }
 
     // ---- Status / rendering ----------------------------------------------

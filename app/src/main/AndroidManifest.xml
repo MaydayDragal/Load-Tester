@@ -26,6 +26,12 @@
         android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="30" />
 
+    <!-- Saving reports/CSVs to public Downloads: only needed below API 29
+         (MediaStore handles it permissionlessly from Q on). -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <application
         android:name=".El15App"
         android:allowBackup="true"
@@ -58,6 +64,11 @@
 
         <activity
             android:name=".SettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity" />
+
+        <activity
+            android:name=".HistoryActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity" />
 

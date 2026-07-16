@@ -50,7 +50,10 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("androidx.print:print:1.0.0")
     implementation("androidx.preference:preference-ktx:1.2.1")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM unit tests (the android.jar copy is a stub).
+    testImplementation("org.json:json:20231013")
 }
