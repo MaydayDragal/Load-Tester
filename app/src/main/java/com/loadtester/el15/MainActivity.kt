@@ -38,6 +38,8 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     private var simulator: El15Simulator? = null
     private var pendingThemeRecreate = false
+    private var nightMode = -1
+    private var pendingResultId: String? = null
     private var demoEmf = 12.6f
     private var demoSeriesR = 0.35f
 
@@ -77,6 +79,8 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
         ble = El15BleManager(this).also { it.listener = this }
         tester = CircuitResistanceTester(activeController, this)
+        nightMode = resources.configuration.uiMode and
+            android.content.res.Configuration.UI_MODE_NIGHT_MASK
         demoEmf = Prefs.demoEmf(this)
         demoSeriesR = Prefs.demoR(this)
 
@@ -99,6 +103,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     override fun onResume() {
         super.onResume()
+        pendingResultId?.let { id ->
+            pendingResultId = null
+            startActivity(Intent(this, ResultActivity::class.java)
+                .putExtra(ResultActivity.EXTRA_RECORD_ID, id))
+        }
         val poll = Prefs.pollMs(this)
         ble.pollIntervalMs = poll; simulator?.pollIntervalMs = poll
         tester.pollIntervalMs = poll
@@ -115,9 +124,12 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        // uiMode is in configChanges so a day/night flip cannot destroy a live
-        // BLE session or abort a running sweep. Restyle by recreating, but only
-        // when idle; otherwise keep the stale palette until the session ends.
+        // configChanges covers several kinds; only a real day/night flip should
+        // trigger a re-theme. (uiMode is handled so a flip cannot destroy a
+        // live BLE session or abort a running sweep.)
+        val newNight = newConfig.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        if (newNight == nightMode) return
+        nightMode = newNight
         if (!isConnected() && !tester.running) {
             recreate()
         } else {
@@ -279,13 +291,25 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     }
 
     override fun onTestComplete(result: CircuitResistanceTester.ResistanceResult) {
-        onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)}")
         val device = simulator?.let { "Demo (%.1f V, %.3f Ω)".format(demoEmf, demoSeriesR) } ?: "EL15 (BLE)"
         val record = TestRecord.from(
             result, tester.steps, tester.settleMs, tester.collectMs,
             (tester.safetyFactor * 100).toInt(), device, System.currentTimeMillis(),
         )
-        if (!ResultActivity.start(this, record)) toast("Could not archive the test result")
+        if (!TestRepository(this).save(record)) {
+            onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)}")
+            toast("Could not archive the test result")
+            return
+        }
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)}")
+            startActivity(Intent(this, ResultActivity::class.java)
+                .putExtra(ResultActivity.EXTRA_RECORD_ID, record.id))
+        } else {
+            // Background activity starts are blocked; open it when we return.
+            onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)} (saved to History)")
+            pendingResultId = record.id
+        }
     }
 
     override fun onTestError(message: String) {

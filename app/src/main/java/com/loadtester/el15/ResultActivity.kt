@@ -338,10 +338,15 @@ class ResultActivity : BaseActivity() {
             })
         }
 
+        // Pin chart geometry to the report's fixed pixel width: without this,
+        // dp/sp would scale with device density/font-scale and squash or clip
+        // the 1080x560 chart on high-density phones.
+        val reportScale = w / 393f
         fun chartSection(titleStr: String, cfg: TestChartView.ChartConfig) {
             sections.add((chartH + 44f) to { c, top ->
                 c.drawText(titleStr, margin, top + 28f, caption)
-                binding.chart.drawChart(c, margin, top + 40f, chartW, chartH, light = true, cfg = cfg)
+                binding.chart.drawChart(c, margin, top + 40f, chartW, chartH,
+                    light = true, cfg = cfg, scale = reportScale)
             })
         }
         if (sel(KEY_VI)) chartSection(
@@ -355,10 +360,14 @@ class ResultActivity : BaseActivity() {
                 grid = chartConfig.grid, markers = chartConfig.markers,
                 fill = chartConfig.fill, thick = chartConfig.thick),
         )
-        if (sel(KEY_CUSTOM) && chartConfig.view != TestChartView.ChartConfig.VIEW_VI &&
-            chartConfig.view != TestChartView.ChartConfig.VIEW_TREND
-        ) {
+        // Include the configured view unless it would duplicate a dedicated
+        // section that is itself selected.
+        val dupVi = chartConfig.view == TestChartView.ChartConfig.VIEW_VI && sel(KEY_VI)
+        val dupTrend = chartConfig.view == TestChartView.ChartConfig.VIEW_TREND && sel(KEY_TREND)
+        if (sel(KEY_CUSTOM) && !dupVi && !dupTrend) {
             val name = when (chartConfig.view) {
+                TestChartView.ChartConfig.VIEW_VI -> "Voltage vs Current (slope = resistance)"
+                TestChartView.ChartConfig.VIEW_TREND -> "Metrics per step (normalized)"
                 TestChartView.ChartConfig.VIEW_ABS -> "Metrics per step (absolute)"
                 TestChartView.ChartConfig.VIEW_R_I -> "Resistance linearity (R at point vs current)"
                 else -> "Power vs current"

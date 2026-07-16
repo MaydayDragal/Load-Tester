@@ -1,15 +1,20 @@
 package com.loadtester.el15
 
 import android.content.Context
+import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
 
 /**
  * On-device archive of completed resistance tests. Each record is one JSON
- * file in filesDir/tests/ named by its id; listing reads the directory. All
- * operations are synchronous file I/O on small files (a record is a few KB) —
- * callers on the main thread are fine at this scale, but heavy users can wrap
- * calls in a coroutine.
+ * file in filesDir/tests/ named by its id; listing reads the directory.
+ *
+ * Writes go through [AtomicFile] (temp file + fsync + rename), so a process
+ * kill or power loss mid-write — e.g. during the notes rewrite in onPause —
+ * can never truncate an archived test; the last committed version survives.
+ *
+ * Individual load/save calls are cheap (a record is a few KB), but [list]
+ * parses every record and should be dispatched off the main thread.
  */
 class TestRepository(context: Context) {
 
@@ -17,17 +22,28 @@ class TestRepository(context: Context) {
 
     private fun fileFor(id: String) = File(dir, "$id.json")
 
-    /** Persist (create or overwrite) a record. Returns false on I/O failure. */
-    fun save(record: TestRecord): Boolean = try {
-        fileFor(record.id).writeText(record.toJson().toString())
-        true
-    } catch (e: Exception) {
-        false
+    /** Persist (create or overwrite) a record atomically. Returns false on I/O failure. */
+    fun save(record: TestRecord): Boolean {
+        val af = AtomicFile(fileFor(record.id))
+        val out = try {
+            af.startWrite()
+        } catch (e: Exception) {
+            return false
+        }
+        return try {
+            out.write(record.toJson().toString().toByteArray(Charsets.UTF_8))
+            af.finishWrite(out)
+            true
+        } catch (e: Exception) {
+            af.failWrite(out)
+            false
+        }
     }
 
     fun load(id: String): TestRecord? = try {
         val f = fileFor(id)
-        if (!f.exists()) null else TestRecord.fromJson(JSONObject(f.readText()))
+        if (!f.exists()) null
+        else TestRecord.fromJson(JSONObject(AtomicFile(f).readFully().toString(Charsets.UTF_8)))
     } catch (e: Exception) {
         null
     }
@@ -37,14 +53,17 @@ class TestRepository(context: Context) {
         (dir.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: emptyArray())
             .mapNotNull { f ->
                 try {
-                    TestRecord.fromJson(JSONObject(f.readText()))
+                    TestRecord.fromJson(JSONObject(AtomicFile(f).readFully().toString(Charsets.UTF_8)))
                 } catch (e: Exception) {
                     null
                 }
             }
             .sortedByDescending { it.timestampMs }
 
-    fun delete(id: String): Boolean = fileFor(id).delete()
+    fun delete(id: String): Boolean {
+        AtomicFile(fileFor(id)).delete()
+        return !fileFor(id).exists()
+    }
 
     fun count(): Int = dir.listFiles { f -> f.name.endsWith(".json") }?.size ?: 0
 

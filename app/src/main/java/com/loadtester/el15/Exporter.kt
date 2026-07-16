@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -11,13 +12,16 @@ import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.OutputStream
 
 /**
  * File delivery: share sheets (via FileProvider) and "save to phone"
- * (public Downloads). On API 29+ Downloads writes go through MediaStore and
- * need no permission; on API 24–28 the legacy public directory is used and the
- * caller must hold WRITE_EXTERNAL_STORAGE (see [needsLegacyWritePermission]).
+ * (public Downloads). On API 29+ Downloads writes go through MediaStore with
+ * IS_PENDING semantics (no permission, no half-written files visible); on
+ * API 24–28 the legacy public directory is used — the caller must hold
+ * WRITE_EXTERNAL_STORAGE (see [needsLegacyWritePermission]) and files are
+ * media-scanned so they appear over MTP and in pickers immediately.
  */
 object Exporter {
 
@@ -27,62 +31,72 @@ object Exporter {
     fun needsLegacyWritePermission(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
 
     /**
-     * Write [bytes] as [fileName] into Downloads/[DOWNLOAD_SUBDIR].
-     * Returns a human-readable location on success, null on failure.
+     * Write [fileName] into Downloads/[DOWNLOAD_SUBDIR] using [writeBody].
+     * Returns the human-readable location (with the *actual* stored name,
+     * which MediaStore may have uniquified) or null on failure.
      */
-    fun saveToDownloads(context: Context, fileName: String, mime: String, bytes: ByteArray): String? =
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.MIME_TYPE, mime)
-                    put(MediaStore.Downloads.RELATIVE_PATH,
-                        Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOAD_SUBDIR)
-                }
-                val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: throw IllegalStateException("MediaStore insert failed")
-                resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                    ?: throw IllegalStateException("openOutputStream failed")
-                "Downloads/$DOWNLOAD_SUBDIR/$fileName"
-            } else {
+    private fun saveToDownloadsImpl(
+        context: Context,
+        fileName: String,
+        mime: String,
+        writeBody: (OutputStream) -> Unit,
+    ): String? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, mime)
+                put(MediaStore.Downloads.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOAD_SUBDIR)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = try {
+                resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            } catch (e: Exception) {
+                null
+            } ?: return null
+            try {
+                resolver.openOutputStream(uri)?.use(writeBody)
+                    ?: throw IOException("openOutputStream failed")
+                resolver.update(uri, ContentValues().apply {
+                    put(MediaStore.Downloads.IS_PENDING, 0)
+                }, null, null)
+                // MediaStore may have uniquified the name on collision.
+                val actual = resolver.query(
+                    uri, arrayOf(MediaStore.Downloads.DISPLAY_NAME), null, null, null
+                )?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: fileName
+                "Downloads/$DOWNLOAD_SUBDIR/$actual"
+            } catch (e: Exception) {
+                // Don't leave an orphaned pending row / ghost file behind.
+                try { resolver.delete(uri, null, null) } catch (ignored: Exception) {}
+                null
+            }
+        } else {
+            try {
                 @Suppress("DEPRECATION")
                 val base = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 val outDir = File(base, DOWNLOAD_SUBDIR).apply { mkdirs() }
                 val f = uniqueFile(outDir, fileName)
-                FileOutputStream(f).use { it.write(bytes) }
+                FileOutputStream(f).use(writeBody)
+                // Without a scan the file is invisible over MTP / in pickers
+                // until the next full rescan.
+                MediaScannerConnection.scanFile(context, arrayOf(f.absolutePath), arrayOf(mime), null)
                 "Downloads/$DOWNLOAD_SUBDIR/${f.name}"
+            } catch (e: Exception) {
+                null
             }
-        } catch (e: Exception) {
-            null
         }
+    }
+
+    fun saveToDownloads(context: Context, fileName: String, mime: String, bytes: ByteArray): String? =
+        saveToDownloadsImpl(context, fileName, mime) { it.write(bytes) }
 
     fun saveBitmapToDownloads(context: Context, fileName: String, bitmap: Bitmap): String? =
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                    put(MediaStore.Downloads.MIME_TYPE, "image/png")
-                    put(MediaStore.Downloads.RELATIVE_PATH,
-                        Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOAD_SUBDIR)
-                }
-                val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: throw IllegalStateException("MediaStore insert failed")
-                resolver.openOutputStream(uri)?.use { out: OutputStream ->
-                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-                } ?: throw IllegalStateException("openOutputStream failed")
-                "Downloads/$DOWNLOAD_SUBDIR/$fileName"
-            } else {
-                @Suppress("DEPRECATION")
-                val base = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val outDir = File(base, DOWNLOAD_SUBDIR).apply { mkdirs() }
-                val f = uniqueFile(outDir, fileName)
-                FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                "Downloads/$DOWNLOAD_SUBDIR/${f.name}"
+        saveToDownloadsImpl(context, fileName, "image/png") { out ->
+            // compress returns false on encode failure instead of throwing.
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                throw IOException("PNG encode failed")
             }
-        } catch (e: Exception) {
-            null
         }
 
     /** Share [bytes] as [fileName] via the system share sheet (cache + FileProvider). */
@@ -96,7 +110,11 @@ object Exporter {
     fun shareBitmap(context: Context, fileName: String, bitmap: Bitmap, subject: String) {
         val dir = File(context.cacheDir, "shared").apply { mkdirs() }
         val file = File(dir, fileName)
-        FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        FileOutputStream(file).use {
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) {
+                throw IOException("PNG encode failed")
+            }
+        }
         shareFile(context, file, "image/png", subject)
     }
 

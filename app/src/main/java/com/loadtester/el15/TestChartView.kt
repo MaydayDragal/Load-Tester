@@ -88,6 +88,12 @@ class TestChartView @JvmOverloads constructor(
     private val text = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fillPath = Path()
 
+    /**
+     * When set, dp()/sp() scale by this instead of device density/font scale —
+     * used for report bitmaps whose pixel size is fixed regardless of device.
+     */
+    private var renderScale: Float? = null
+
     override fun onDraw(canvas: Canvas) {
         drawChart(canvas, 0f, 0f, width.toFloat(), height.toFloat(), light = false)
     }
@@ -118,8 +124,24 @@ class TestChartView @JvmOverloads constructor(
         drawChart(canvas, left, top, w, h, light, config)
     }
 
-    /** Report rendering can override the view without touching screen state. */
-    fun drawChart(canvas: Canvas, left: Float, top: Float, w: Float, h: Float, light: Boolean, cfg: ChartConfig) {
+    /**
+     * Report rendering can override the view config and the geometry scale
+     * without touching screen state. [scale] pins dp/sp so a fixed-pixel
+     * report bitmap renders identically on every device density/font scale.
+     */
+    fun drawChart(
+        canvas: Canvas, left: Float, top: Float, w: Float, h: Float,
+        light: Boolean, cfg: ChartConfig, scale: Float? = null,
+    ) {
+        renderScale = scale
+        try {
+            drawChartInner(canvas, left, top, w, h, light, cfg)
+        } finally {
+            renderScale = null
+        }
+    }
+
+    private fun drawChartInner(canvas: Canvas, left: Float, top: Float, w: Float, h: Float, light: Boolean, cfg: ChartConfig) {
         val axis = Color.parseColor(if (light) "#455A64" else "#8B98A5")
         val label = Color.parseColor(if (light) "#102027" else "#E6EDF3")
         val grid = Color.parseColor(if (light) "#DDDDDD" else "#2A3441")
@@ -154,16 +176,23 @@ class TestChartView @JvmOverloads constructor(
                 yIncludes = openCircuitV,
             )
             ChartConfig.VIEW_R_I -> {
-                val rs = samples.map { rAtPoint(it) * 1000f } // mΩ
-                drawXY(
-                    canvas, plot, cfg, grid, label,
-                    xs = samples.map { it.current }, ys = rs,
-                    color = palette(light).getValue('T'),
-                    xTitle = "Current (A)", yTitle = "R at point (mΩ)",
-                    fitLine = if (resistance > 0f) { _: Float -> resistance * 1000f } else null,
-                    fitColor = palette(light).getValue('P'),
-                    connect = true,
-                )
+                // Points where R@pt is undefined (no current / no Voc) would
+                // plot as a 0 mΩ sentinel and wreck the axis — drop them.
+                val valid = samples.filter { it.current > 1e-4f && openCircuitV > 0f }
+                if (valid.size < 2) {
+                    text.textAlign = Paint.Align.CENTER
+                    canvas.drawText("Not enough valid points", plot.centerX(), plot.centerY(), text)
+                } else {
+                    drawXY(
+                        canvas, plot, cfg, grid, label,
+                        xs = valid.map { it.current }, ys = valid.map { rAtPoint(it) * 1000f },
+                        color = palette(light).getValue('T'),
+                        xTitle = "Current (A)", yTitle = "R at point (mΩ)",
+                        fitLine = if (resistance > 0f) { _: Float -> resistance * 1000f } else null,
+                        fitColor = palette(light).getValue('P'),
+                        connect = true,
+                    )
+                }
             }
             ChartConfig.VIEW_P_I -> drawXY(
                 canvas, plot, cfg, grid, label,
@@ -355,6 +384,6 @@ class TestChartView @JvmOverloads constructor(
     private fun withAlpha(color: Int, a: Float): Int =
         Color.argb((a * 255).toInt(), Color.red(color), Color.green(color), Color.blue(color))
 
-    private fun dp(v: Float) = v * resources.displayMetrics.density
-    private fun sp(v: Float) = v * resources.displayMetrics.scaledDensity
+    private fun dp(v: Float) = v * (renderScale ?: resources.displayMetrics.density)
+    private fun sp(v: Float) = v * (renderScale ?: resources.displayMetrics.scaledDensity)
 }

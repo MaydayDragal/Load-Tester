@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.appbar.MaterialToolbar
@@ -12,6 +13,9 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The test archive: every completed resistance test is saved on-device and
@@ -41,10 +45,14 @@ class HistoryActivity : BaseActivity() {
     }
 
     private fun refresh() {
-        val records = repo.list()
-        adapter.submit(records)
-        findViewById<View>(R.id.emptyText).visibility =
-            if (records.isEmpty()) View.VISIBLE else View.GONE
+        // list() reads and parses every archived record — keep it off the UI
+        // thread so a large archive can't freeze History on entry.
+        lifecycleScope.launch {
+            val records = withContext(Dispatchers.IO) { repo.list() }
+            adapter.submit(records)
+            findViewById<View>(R.id.emptyText).visibility =
+                if (records.isEmpty()) View.VISIBLE else View.GONE
+        }
     }
 
     private fun confirmDelete(record: TestRecord) {
