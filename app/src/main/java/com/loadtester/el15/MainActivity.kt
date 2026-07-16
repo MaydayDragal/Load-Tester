@@ -226,6 +226,17 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         if (stepsInput.text.isNullOrBlank()) stepsInput.setText(Prefs.steps(this@MainActivity).toString())
         if (settleInput.text.isNullOrBlank()) settleInput.setText(Prefs.settleMs(this@MainActivity).toString())
         if (sampleInput.text.isNullOrBlank()) sampleInput.setText(Prefs.sampleMs(this@MainActivity).toString())
+
+        fun info(layout: com.google.android.material.textfield.TextInputLayout, title: Int, body: Int) {
+            layout.setEndIconOnClickListener {
+                MaterialAlertDialogBuilder(this@MainActivity)
+                    .setTitle(title).setMessage(body)
+                    .setPositiveButton(android.R.string.ok, null).show()
+            }
+        }
+        info(stepsLayout, R.string.rt_steps, R.string.rt_steps_info)
+        info(settleLayout, R.string.rt_settle, R.string.rt_settle_info)
+        info(sampleLayout, R.string.rt_sample, R.string.rt_sample_info)
         startTestButton.setOnClickListener {
             if (tester.running) { tester.stop(); onTestFinishedUi("Test stopped"); return@setOnClickListener }
             if (!isConnected()) { toast("Connect to the EL15 (or the demo) first"); return@setOnClickListener }
@@ -246,9 +257,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         val steps = stepsInput.text.toString().trim().toIntOrNull() ?: Prefs.steps(this@MainActivity)
         val settle = settleInput.text.toString().trim().toLongOrNull() ?: Prefs.settleMs(this@MainActivity)
         val sample = sampleInput.text.toString().trim().toLongOrNull() ?: Prefs.sampleMs(this@MainActivity)
-        if (steps !in 3..20) { toast("Steps must be 3–20"); return false }
-        if (settle !in 100..5000) { toast("Settle time must be 100–5000 ms"); return false }
-        if (sample !in 200..8000) { toast("Sample window must be 200–8000 ms"); return false }
+        if (steps !in 2..CircuitResistanceTester.MAX_STEPS) {
+            toast("Steps must be 2–${CircuitResistanceTester.MAX_STEPS}"); return false
+        }
+        if (settle < 0) { toast("Settle time can't be negative"); return false }
+        if (sample < 0) { toast("Sample window can't be negative"); return false }
         tester.steps = steps; tester.settleMs = settle; tester.collectMs = sample
         stepsInput.setText(steps.toString()); settleInput.setText(settle.toString()); sampleInput.setText(sample.toString())
         true
@@ -271,8 +284,13 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         fuseInput.clearFocus()
         testBar.visibility = View.VISIBLE; testBar.progress = 0
         testProgressText.visibility = View.VISIBLE
-        val est = (tester.steps * (tester.settleMs + tester.collectMs) / 1000.0).toInt()
-        testProgressText.text = "Priming… (~${est}s)"
+        // Estimate with the *effective* windows (the engine stretches short
+        // ones to the poll rate), formatted as minutes for long sweeps.
+        val poll = Prefs.pollMs(this@MainActivity)
+        val perStep = maxOf(tester.settleMs, poll + 100) + maxOf(tester.collectMs, 2 * poll + 200)
+        val estS = tester.steps.toLong() * perStep / 1000L
+        val estStr = if (estS >= 120) "~${estS / 60}m ${estS % 60}s" else "~${estS}s"
+        testProgressText.text = "Priming… ($estStr)"
         startTestButton.setText(R.string.rt_stop)
         tester.start(fuse) // start FIRST so tester.running locks the controls below
         updateControlsEnabled(true)

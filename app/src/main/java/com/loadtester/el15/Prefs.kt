@@ -37,9 +37,9 @@ object Prefs {
     fun safetyFactor(ctx: Context): Float =
         (str(ctx, SAFETY_PCT, "80").toFloatOrNull()?.coerceIn(10f, 95f) ?: 80f) / 100f
 
-    fun steps(ctx: Context): Int = str(ctx, STEPS, "8").toIntOrNull()?.coerceIn(3, 20) ?: 8
-    fun settleMs(ctx: Context): Long = str(ctx, SETTLE_MS, "800").toLongOrNull()?.coerceIn(100, 5000) ?: 800L
-    fun sampleMs(ctx: Context): Long = str(ctx, SAMPLE_MS, "1500").toLongOrNull()?.coerceIn(200, 8000) ?: 1500L
+    fun steps(ctx: Context): Int = str(ctx, STEPS, "8").toIntOrNull()?.coerceIn(2, 1000) ?: 8
+    fun settleMs(ctx: Context): Long = str(ctx, SETTLE_MS, "800").toLongOrNull()?.coerceAtLeast(0) ?: 800L
+    fun sampleMs(ctx: Context): Long = str(ctx, SAMPLE_MS, "1500").toLongOrNull()?.coerceAtLeast(0) ?: 1500L
 
     fun demoEmf(ctx: Context): Float = str(ctx, DEMO_EMF, "12.6").toFloatOrNull()?.coerceIn(0.1f, 100f) ?: 12.6f
     fun demoR(ctx: Context): Float = str(ctx, DEMO_R, "0.35").toFloatOrNull()?.coerceIn(0f, 100f) ?: 0.35f

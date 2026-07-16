@@ -76,6 +76,12 @@
     <string name="rt_steps">Steps</string>
     <string name="rt_settle">Settle ms</string>
     <string name="rt_sample">Sample ms</string>
+    <string name="cd_steps_info">What does Steps do?</string>
+    <string name="cd_settle_info">What does Settle do?</string>
+    <string name="cd_sample_info">What does Sample do?</string>
+    <string name="rt_steps_info">How many current levels the sweep climbs through on its way to the peak current (up to 1000).\n\nEach step contributes one averaged data point to the V–I fit, the graphs, and the table — more steps give a tighter resistance fit and finer curves, at the cost of a longer test. The estimated duration is shown when the test starts.</string>
+    <string name="rt_settle_info">How long the load holds each new current level before sampling begins, giving the circuit time to stabilise after the setpoint change.\n\nAny value is accepted. Very short values are automatically stretched to just past the poll interval so at least one fresh reading arrives after settling.</string>
+    <string name="rt_sample_info">How long readings are collected and averaged at each step, after settling. Longer windows smooth out noise for a cleaner fit.\n\nAny value is accepted. Very short values are automatically stretched to about two poll intervals so every step captures at least two readings.</string>
 
     <!-- Demo / simulator device -->
     <string name="demo_device">🧪 EL15 Demo (Simulator)\nTap to set up a virtual circuit</string>

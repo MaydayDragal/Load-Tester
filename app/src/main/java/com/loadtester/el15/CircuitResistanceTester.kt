@@ -140,7 +140,7 @@ class CircuitResistanceTester(
             return
         }
 
-        val n = steps.coerceIn(3, 20)
+        val n = steps.coerceIn(2, MAX_STEPS)
         for (k in 1..n) targets.add(maxCurrent * k / n)
         beginStep(0)
     }
@@ -295,6 +295,7 @@ class CircuitResistanceTester(
     companion object {
         private const val PRIME_MS = 900L
         private const val MIN_TEST_CURRENT = 0.05f
+        const val MAX_STEPS = 1000
         /** Absolute backstop; the EL15's 12 A rating is the real ceiling. */
         const val ABS_MAX_CURRENT = 40f
     }

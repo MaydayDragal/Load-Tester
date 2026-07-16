@@ -406,9 +406,15 @@ class ResultActivity : BaseActivity() {
             chartSection(name, chartConfig)
         }
 
-        // 5) Data table.
+        // 5) Data table — capped so a 1000-step sweep can't inflate the report
+        // bitmap past sane memory; the CSV export always has every row.
         if (sel(KEY_TABLE)) {
-            textSection("MEASUREMENTS", buildTable().split("\n").map { it to monoPaint }, 32f)
+            val allRows = buildTable().split("\n")
+            val rows = if (allRows.size > REPORT_TABLE_MAX_ROWS + 2) {
+                allRows.take(REPORT_TABLE_MAX_ROWS + 2) +
+                    "… ${allRows.size - REPORT_TABLE_MAX_ROWS - 2} more rows — full data in the CSV export"
+            } else allRows
+            textSection("MEASUREMENTS", rows.map { it to monoPaint }, 32f)
         }
 
         // ---- Compose the page ----
@@ -533,6 +539,7 @@ class ResultActivity : BaseActivity() {
 
     companion object {
         const val EXTRA_RECORD_ID = "record_id"
+        private const val REPORT_TABLE_MAX_ROWS = 100
 
         private const val KEY_RESISTANCE = "resistance"
         private const val KEY_META = "meta"
