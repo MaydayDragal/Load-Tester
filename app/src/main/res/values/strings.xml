@@ -113,7 +113,16 @@
     <string name="bench_confirm_title">Start bench test?</string>
     <string name="bench_confirm_msg">%1$s.\n\nCurrent is capped at %2$.2f A (safety factor applied), within the EL15\'s 12 A / 150 W ratings. The load switches off automatically when the test completes, is stopped, or protection trips.</string>
     <string name="bench_capacity_chem">Battery chemistry</string>
+    <string name="bench_capacity_battery">Select battery</string>
+    <string name="bench_capacity_custom">Custom (pick chemistry)…</string>
     <string name="bench_capacity_msg">Open-circuit voltage now: %1$.2f V (%2$s). Cell count and cutoff are pre-filled from it — adjust if needed. Enter the rated capacity to grade state of health.</string>
+    <string name="cap_cells">Cells in series</string>
+    <string name="cap_rated">Rated capacity (Ah, 0 = skip state of health)</string>
+    <string name="cap_current">Discharge current (A)</string>
+    <string name="cap_stop_v">Stop voltage (V)</string>
+    <string name="cap_limit">Current limit (A)</string>
+    <string name="cap_enter_hint">Enter rated capacity to see the estimated test time.</string>
+    <string name="cap_need_rated">Enter the rated capacity first</string>
     <string name="bench_runtime_msg">Discharges at constant power until the cutoff voltage, reporting runtime and energy delivered.</string>
     <string name="bench_step_msg">Square-waves the current between two levels and measures worst-case voltage droop and recovery time.</string>
     <string name="bench_ocp_msg">Ramps current step by step until the source voltage collapses or protection trips — finds the real deliverable current.</string>

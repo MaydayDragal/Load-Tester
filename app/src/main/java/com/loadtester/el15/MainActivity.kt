@@ -509,7 +509,9 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
             .show()
     }
 
-    private fun confirmBench(type: Int, params: LinkedHashMap<String, Float>, summary: String) {
+    private fun confirmBench(
+        type: Int, params: LinkedHashMap<String, Float>, summary: String, tag: String = "",
+    ) {
         val limit = params.remove("limitA") ?: El15Protocol.MAX_CURRENT_A
         if (limit <= 0f) { toast("Current limit must be positive"); return }
         MaterialAlertDialogBuilder(this)
@@ -518,13 +520,31 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
                 minOf(limit * core.session.safetyFactor, El15Protocol.MAX_CURRENT_A)))
             .setPositiveButton(R.string.rt_start) { _, _ ->
                 onBenchStartedUi()
-                core.session.start(type, limit, params, deviceLabel())
+                core.session.start(type, limit, params, deviceLabel(), tag)
             }
             .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
+    /** Step 1: pick a known battery (auto-fills everything) or go custom. */
     private fun startCapacityFlow() {
+        val batteries = LongTestEngine.BATTERIES
+        val labels = (batteries.map { it.name } +
+            getString(R.string.bench_capacity_custom)).toTypedArray()
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.bench_capacity_battery)
+            .setItems(labels) { _, which ->
+                if (which >= batteries.size) chooseChemistryThenCapacity()
+                else batteries[which].let {
+                    capacityDialog(it.chemIndex, it.cells, it.ratedAh, it.cutoffV, it.defaultCRate, it.name)
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /** Custom path: choose chemistry, then seed the dialog from the live OCV. */
+    private fun chooseChemistryThenCapacity() {
         val chems = LongTestEngine.CHEMISTRIES
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.bench_capacity_chem)
@@ -532,21 +552,132 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
                 val chem = chems[which]
                 val voc = core.lastStatus?.voltage ?: 0f
                 val cells = LongTestEngine.estimateCells(voc, chem)
-                benchDialog(
-                    getString(R.string.bench_capacity),
-                    getString(R.string.bench_capacity_msg, voc, chem.name),
-                    listOf(
-                        BField("cells", "Cells in series", cells.toString()),
-                        BField("dischargeA", "Discharge current (A)", "1.0"),
-                        BField("cutoffV", "Cutoff voltage (V)",
-                            String.format(Locale.US, "%.2f", cells * chem.cutoffPerCell)),
-                        BField("ratedAh", "Rated capacity (Ah, 0 = skip SoH)", "0"),
-                        BField("limitA", "Current limit (A)", "12"),
-                    )) { p ->
-                    p["chem"] = which.toFloat()
-                    confirmBench(SessionRecord.TYPE_CAPACITY, p,
-                        "CC discharge at %.2f A until %.2f V".format(p["dischargeA"], p["cutoffV"]))
+                capacityDialog(which, cells, 0f, cells * chem.cutoffPerCell, 0.2f, "")
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Friendly capacity setup: pre-filled fields, C-rate quick-set from the
+     * rated capacity, a live "≈ duration / C-rate / stops at" summary, and a
+     * safe-floor warning if the stop voltage is dropped below the chemistry
+     * minimum. The battery name becomes the record's tag for History/Trends.
+     */
+    private fun capacityDialog(
+        chemIndex: Int, cells: Int, ratedAh: Float, cutoffV: Float, cRate: Float, presetName: String,
+    ) {
+        val chem = LongTestEngine.CHEMISTRIES[chemIndex]
+        val pad = (resources.displayMetrics.density * 20).toInt()
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+        }
+
+        fun field(hint: String, value: String): TextInputEditText {
+            val layout = TextInputLayout(this, null,
+                com.google.android.material.R.attr.textInputOutlinedStyle).apply { this.hint = hint }
+            val edit = TextInputEditText(layout.context).apply {
+                setText(value)
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                    android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+                typeface = android.graphics.Typeface.MONOSPACE
+            }
+            layout.addView(edit)
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.topMargin = pad / 3
+            column.addView(layout, lp)
+            return edit
+        }
+
+        val startDischarge = if (ratedAh > 0f && cRate > 0f)
+            minOf(ratedAh * cRate, El15Protocol.MAX_CURRENT_A) else 1.0f
+        val cellsEdit = field(getString(R.string.cap_cells), cells.toString())
+        val ratedEdit = field(getString(R.string.cap_rated), if (ratedAh > 0f) fmtField(ratedAh) else "0")
+        val currentEdit = field(getString(R.string.cap_current),
+            String.format(Locale.US, "%.2f", startDischarge))
+        val cutoffEdit = field(getString(R.string.cap_stop_v), String.format(Locale.US, "%.2f", cutoffV))
+        val limitEdit = field(getString(R.string.cap_limit), "12")
+
+        // C-rate quick-set chips: current = C × rated capacity.
+        val chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        column.addView(chipRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            .apply { topMargin = pad / 3 })
+        val summary = android.widget.TextView(this).apply {
+            setTextColor(color(R.color.muted)); textSize = 12f
+        }
+        column.addView(summary, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            .apply { topMargin = pad / 3 })
+
+        fun refreshSummary() {
+            val rated = ratedEdit.text.toString().trim().toFloatOrNull() ?: 0f
+            val cur = currentEdit.text.toString().trim().toFloatOrNull() ?: 0f
+            val cutoff = cutoffEdit.text.toString().trim().toFloatOrNull() ?: 0f
+            val n = cellsEdit.text.toString().trim().toIntOrNull() ?: cells
+            val parts = ArrayList<String>()
+            if (rated > 0f && cur > 0f) {
+                val hours = rated / cur
+                parts += "≈ ${SessionRecord.fmtDuration((hours * 3600).toLong())} at %.2fC".format(cur / rated)
+            }
+            if (cutoff > 0f) parts += "stops at %.2f V".format(cutoff)
+            val floor = n * chem.cutoffPerCell
+            val warn = if (cutoff in 0.01f..floor && cutoff < floor)
+                "\n⚠ below the %s safe floor of %.2f V".format(chem.name, floor) else ""
+            summary.text = (if (parts.isEmpty()) getString(R.string.cap_enter_hint)
+            else parts.joinToString(" · ")) + warn
+        }
+
+        for (c in listOf(0.2f, 0.5f, 1.0f)) {
+            val btn = com.google.android.material.button.MaterialButton(this,
+                null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = if (c == 1.0f) "1C" else "%.1fC".format(c)
+                setOnClickListener {
+                    val rated = ratedEdit.text.toString().trim().toFloatOrNull() ?: 0f
+                    if (rated <= 0f) { toast(getString(R.string.cap_need_rated)); return@setOnClickListener }
+                    currentEdit.setText(String.format(Locale.US, "%.2f",
+                        minOf(rated * c, El15Protocol.MAX_CURRENT_A)))
                 }
+            }
+            chipRow.addView(btn, LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = pad / 4 })
+        }
+
+        for (e in listOf(cellsEdit, ratedEdit, currentEdit, cutoffEdit)) {
+            e.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) = refreshSummary()
+            })
+        }
+        refreshSummary()
+
+        val scroller = android.widget.ScrollView(this).apply { addView(column) }
+        val title = if (presetName.isNotEmpty()) presetName else getString(R.string.bench_capacity)
+        MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setView(scroller)
+            .setPositiveButton(R.string.bench_next) { _, _ ->
+                val p = LinkedHashMap<String, Float>()
+                val n = cellsEdit.text.toString().trim().toIntOrNull()
+                val cur = currentEdit.text.toString().trim().toFloatOrNull()
+                val cutoff = cutoffEdit.text.toString().trim().toFloatOrNull()
+                val rated = ratedEdit.text.toString().trim().toFloatOrNull() ?: 0f
+                val limit = limitEdit.text.toString().trim().toFloatOrNull()
+                if (n == null || n < 1) { toast("Enter cells in series"); return@setPositiveButton }
+                if (cur == null || cur <= 0f) { toast("Enter a discharge current"); return@setPositiveButton }
+                if (cutoff == null || cutoff <= 0f) { toast("Enter a stop voltage"); return@setPositiveButton }
+                if (limit == null || limit <= 0f) { toast("Enter a current limit"); return@setPositiveButton }
+                p["cells"] = n.toFloat()
+                p["dischargeA"] = cur
+                p["cutoffV"] = cutoff
+                p["ratedAh"] = rated
+                p["chem"] = chemIndex.toFloat()
+                p["limitA"] = limit
+                confirmBench(SessionRecord.TYPE_CAPACITY, p,
+                    "CC discharge at %.2f A until %.2f V".format(cur, cutoff), presetName)
             }
             .setNegativeButton(R.string.cancel, null)
             .show()

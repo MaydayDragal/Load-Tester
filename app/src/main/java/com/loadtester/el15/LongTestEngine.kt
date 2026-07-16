@@ -36,6 +36,21 @@ class LongTestEngine(
     /** Chemistry presets: per-cell cutoff + nominal voltage for cell counting. */
     data class Chemistry(val name: String, val cutoffPerCell: Float, val nominalPerCell: Float)
 
+    /**
+     * A named battery preset for the capacity test — auto-fills chemistry, cell
+     * count, rated capacity, a manufacturer-appropriate stop voltage, and a
+     * sensible default C-rate, so the user picks a battery instead of typing
+     * every field.
+     */
+    data class Battery(
+        val name: String,
+        val chemIndex: Int,
+        val cells: Int,
+        val ratedAh: Float,
+        val cutoffV: Float,
+        val defaultCRate: Float,
+    )
+
     var safetyFactor = 0.8f
     var pollIntervalMs = 500L
 
@@ -51,6 +66,7 @@ class LongTestEngine(
     private var vOc = 0f
     private var params = LinkedHashMap<String, Float>()
     private var deviceLabel = ""
+    private var sessionTag = ""
     private var startedMs = 0L
     private val points = ArrayList<SessionRecord.TimePoint>()
     private var decimation = 1
@@ -79,12 +95,13 @@ class LongTestEngine(
 
     private val pending = ArrayList<Runnable>()
 
-    fun start(type: Int, fuseA: Float, p: Map<String, Float>, device: String) {
+    fun start(type: Int, fuseA: Float, p: Map<String, Float>, device: String, tag: String = "") {
         if (running) return
         this.type = type
         fuse = fuseA
         params = LinkedHashMap(p)
         deviceLabel = device
+        sessionTag = tag
         vOc = 0f
         points.clear(); ah = 0.0; wh = 0.0; cutoffHits = 0
         sampleCounter = 0; decimation = 1
@@ -259,6 +276,7 @@ class LongTestEngine(
             type = type,
             deviceLabel = deviceLabel,
         )
+        rec.tag = sessionTag
         rec.params.putAll(params)
         rec.metrics.putAll(metrics)
         rec.points.addAll(points)
@@ -329,6 +347,24 @@ class LongTestEngine(
             Chemistry("LiFePO₄ (3.2 V)", cutoffPerCell = 2.5f, nominalPerCell = 3.2f),
             Chemistry("Lead-acid (2.0 V)", cutoffPerCell = 1.75f, nominalPerCell = 2.0f),
             Chemistry("NiMH (1.2 V)", cutoffPerCell = 1.0f, nominalPerCell = 1.2f),
+        )
+
+        /**
+         * Common batteries, keyed to [CHEMISTRIES] by index. Stop voltages are
+         * the manufacturer-typical cutoffs (at or above each chemistry's safe
+         * floor); C-rates are gentle capacity-test rates.
+         */
+        val BATTERIES = listOf(
+            Battery("18650 Li-ion cell (3500 mAh)", 0, 1, 3.5f, 3.0f, 0.2f),
+            Battery("21700 Li-ion cell (5000 mAh)", 0, 1, 5.0f, 3.0f, 0.2f),
+            Battery("LiPo 1S (3.7 V)", 0, 1, 1.5f, 3.3f, 0.2f),
+            Battery("LiPo 3S (11.1 V)", 0, 3, 2.2f, 9.9f, 0.2f),
+            Battery("LiPo 4S (14.8 V)", 0, 4, 2.2f, 13.2f, 0.2f),
+            Battery("LiFePO₄ 4S (12.8 V)", 1, 4, 100f, 10.0f, 0.1f),
+            Battery("12 V SLA (7 Ah)", 2, 6, 7.0f, 10.5f, 0.1f),
+            Battery("12 V lead-acid, car (50 Ah)", 2, 6, 50f, 10.5f, 0.1f),
+            Battery("AA NiMH (2000 mAh)", 3, 1, 2.0f, 1.0f, 0.2f),
+            Battery("9 V NiMH (200 mAh)", 3, 7, 0.2f, 7.0f, 0.2f),
         )
 
         /** Estimate the series cell count from open-circuit voltage. */
