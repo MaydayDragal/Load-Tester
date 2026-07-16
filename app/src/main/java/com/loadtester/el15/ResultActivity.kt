@@ -285,119 +285,168 @@ class ResultActivity : BaseActivity() {
     private fun buildReportBitmap(): Bitmap {
         val r = record!!
         val w = 1080
-        val margin = 48f
-        val gap = 16f
-        val chartW = w - margin * 2
-        val chartH = 560f
+        val margin = 40f
+        val gap = 18f
+        val framePad = 26f
+        val headerBlock = 48f
 
-        val title = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#102027"); textSize = 44f; isFakeBoldText = true
+        // Print-friendly ink mapping of the app's blueprint palette.
+        val ink = Color.parseColor("#101821")
+        val muted = Color.parseColor("#5A6774")
+        val steel = Color.parseColor("#3C6188")
+        val frameLine = Color.parseColor("#B9C4CF")
+        val cornerInk = Color.parseColor("#8791A0")
+
+        val condensed = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = ink; textSize = 46f; typeface = condensed; letterSpacing = 0.04f
         }
-        val body = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#37474F"); textSize = 30f
+        val kickerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = steel; textSize = 20f; typeface = condensed; letterSpacing = 0.16f
         }
-        val caption = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#102027"); textSize = 30f; isFakeBoldText = true
+        val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = muted; textSize = 26f; typeface = condensed; letterSpacing = 0.10f
         }
-        val big = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#00838F"); textSize = 66f; isFakeBoldText = true
+        val bigPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = steel; textSize = 64f; typeface = Typeface.MONOSPACE; isFakeBoldText = true
         }
-        val mono = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#102027"); textSize = 24f; typeface = Typeface.MONOSPACE
+        val monoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = ink; textSize = 24f; typeface = Typeface.MONOSPACE
+        }
+        val monoMuted = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = muted; textSize = 26f; typeface = Typeface.MONOSPACE
+        }
+        val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ink; textSize = 28f }
+        val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = frameLine; style = Paint.Style.STROKE; strokeWidth = 2f
+        }
+        val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = cornerInk; style = Paint.Style.STROKE; strokeWidth = 2f
         }
 
         val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(r.timestampMs))
-        val sections = ArrayList<Pair<Float, (Canvas, Float) -> Unit>>()
+        val contentW = w - margin * 2 - framePad * 2
 
-        sections.add(96f to { c, top ->
-            c.drawText(getString(R.string.rt_results_title), margin, top + 44f, title)
-            c.drawText(stamp, margin, top + 84f, body)
-        })
+        /** A blueprint-framed section: uppercase header + content, like the app's cards. */
+        class Section(val header: String, val contentH: Float, val draw: (Canvas, Float, Float, Float) -> Unit) {
+            val totalH: Float get() = framePad + headerBlock + contentH + framePad
+        }
+
+        val sections = ArrayList<Section>()
+
+        fun textSection(header: String, lines: List<Pair<String, Paint>>, lineH: Float) {
+            sections.add(Section(header, lines.size * lineH) { c, top, x, _ ->
+                var y = top + lineH * 0.78f
+                for ((line, paint) in lines) { c.drawText(line, x, y, paint); y += lineH }
+            })
+        }
+
+        // 1) Summary & resistance — mirrors the app's headline card.
         if (sel(KEY_RESISTANCE)) {
-            sections.add(80f to { c, top ->
-                c.drawText("Circuit resistance", margin, top + 26f, body)
-                c.drawText(formatResistance(r.resistanceOhm), margin, top + 74f, big)
-            })
-            sections.add(120f to { c, top ->
-                var y = top + 30f
-                for (line in listOf(
-                    "Open-circuit voltage: %.3f V".format(r.openCircuitVoltage),
-                    "Peak: %.2f A · %.1f W    Max temp: %.1f °C    Fan: %d/%d".format(
-                        r.maxTestCurrent, r.peakPower, r.maxTemp, r.maxFan, El15Protocol.FAN_SPEED_MAX),
-                    "Points: %d      Fit R²: %.4f%s".format(
-                        r.samples.size, r.rSquared, if (!r.reliable) "  (low confidence)" else ""),
-                )) { c.drawText(line, margin, y, body); y += 38f }
-            })
-        }
-        if (sel(KEY_META)) {
-            val lines = buildMetadata().split("\n")
-            sections.add((44f + lines.size * 30f) to { c, top ->
-                c.drawText("Test details", margin, top + 28f, caption)
-                var ty = top + 60f
-                for (l in lines) { c.drawText(l, margin, ty, mono); ty += 30f }
+            val summary = listOf(
+                "Open-circuit voltage: %.3f V".format(r.openCircuitVoltage),
+                "Tested up to %.2f A  (%d%% of %.1f A fuse)".format(r.maxTestCurrent, r.safetyPct, r.fuseRating),
+                "Peak power dissipated: %.1f W".format(r.peakPower),
+                "Max unit temperature: %.1f °C".format(r.maxTemp),
+                "Max fan speed: %d / %d".format(r.maxFan, El15Protocol.FAN_SPEED_MAX),
+                "Points: %d      Fit R²: %.4f%s".format(
+                    r.samples.size, r.rSquared, if (!r.reliable) "  (LOW CONFIDENCE)" else ""),
+            )
+            val bigLine = 78f
+            val lineH = 40f
+            sections.add(Section("CIRCUIT RESISTANCE", bigLine + 10f + summary.size * lineH) { c, top, x, _ ->
+                // Big value first; its baseline sits a full ascent below the top,
+                // so it can never collide with the section header above.
+                c.drawText(formatResistance(r.resistanceOhm), x, top + 58f, bigPaint)
+                var y = top + bigLine + 10f + lineH * 0.7f
+                for (line in summary) { c.drawText(line, x, y, monoMuted); y += lineH }
             })
         }
 
-        // Pin chart geometry to the report's fixed pixel width: without this,
-        // dp/sp would scale with device density/font-scale and squash or clip
-        // the 1080x560 chart on high-density phones.
+        // 2) Test details.
+        if (sel(KEY_META)) {
+            textSection("TEST DETAILS", buildMetadata().split("\n").map { it to monoPaint }, 34f)
+        }
+
+        // 3) Notes — third, matching the app's card order.
+        if (sel(KEY_NOTES) && notesText().isNotEmpty()) {
+            textSection("NOTES", wrapText(notesText(), bodyPaint, contentW).map { it to bodyPaint }, 38f)
+        }
+
+        // 4) Graphs. Pin chart geometry to the report's fixed pixel width so
+        // device density/font-scale cannot squash or clip the rendering.
+        val chartH = 560f
         val reportScale = w / 393f
         fun chartSection(titleStr: String, cfg: TestChartView.ChartConfig) {
-            sections.add((chartH + 44f) to { c, top ->
-                c.drawText(titleStr, margin, top + 28f, caption)
-                binding.chart.drawChart(c, margin, top + 40f, chartW, chartH,
-                    light = true, cfg = cfg, scale = reportScale)
+            sections.add(Section(titleStr, chartH) { c, top, x, cw ->
+                binding.chart.drawChart(c, x, top, cw, chartH, light = true, cfg = cfg, scale = reportScale)
             })
         }
         if (sel(KEY_VI)) chartSection(
-            "Voltage vs Current (slope = resistance)",
+            "VOLTAGE VS CURRENT (SLOPE = RESISTANCE)",
             TestChartView.ChartConfig(view = TestChartView.ChartConfig.VIEW_VI,
                 grid = chartConfig.grid, markers = true, thick = chartConfig.thick),
         )
         if (sel(KEY_TREND)) chartSection(
-            "Metrics per step (normalized)",
+            "METRICS PER STEP (NORMALIZED)",
             TestChartView.ChartConfig(view = TestChartView.ChartConfig.VIEW_TREND,
                 grid = chartConfig.grid, markers = chartConfig.markers,
                 fill = chartConfig.fill, thick = chartConfig.thick),
         )
-        // Include the configured view unless it would duplicate a dedicated
-        // section that is itself selected.
         val dupVi = chartConfig.view == TestChartView.ChartConfig.VIEW_VI && sel(KEY_VI)
         val dupTrend = chartConfig.view == TestChartView.ChartConfig.VIEW_TREND && sel(KEY_TREND)
         if (sel(KEY_CUSTOM) && !dupVi && !dupTrend) {
             val name = when (chartConfig.view) {
-                TestChartView.ChartConfig.VIEW_VI -> "Voltage vs Current (slope = resistance)"
-                TestChartView.ChartConfig.VIEW_TREND -> "Metrics per step (normalized)"
-                TestChartView.ChartConfig.VIEW_ABS -> "Metrics per step (absolute)"
-                TestChartView.ChartConfig.VIEW_R_I -> "Resistance linearity (R at point vs current)"
-                else -> "Power vs current"
+                TestChartView.ChartConfig.VIEW_VI -> "VOLTAGE VS CURRENT (SLOPE = RESISTANCE)"
+                TestChartView.ChartConfig.VIEW_TREND -> "METRICS PER STEP (NORMALIZED)"
+                TestChartView.ChartConfig.VIEW_ABS -> "METRICS PER STEP (ABSOLUTE)"
+                TestChartView.ChartConfig.VIEW_R_I -> "RESISTANCE LINEARITY (R AT POINT VS CURRENT)"
+                else -> "POWER VS CURRENT"
             }
             chartSection(name, chartConfig)
         }
+
+        // 5) Data table.
         if (sel(KEY_TABLE)) {
-            val lines = buildTable().split("\n")
-            sections.add((44f + lines.size * 32f) to { c, top ->
-                c.drawText("Measurements", margin, top + 28f, caption)
-                var ty = top + 62f
-                for (l in lines) { c.drawText(l, margin, ty, mono); ty += 32f }
-            })
-        }
-        if (sel(KEY_NOTES) && notesText().isNotEmpty()) {
-            val wrapped = wrapText(notesText(), body, chartW)
-            sections.add((44f + wrapped.size * 34f) to { c, top ->
-                c.drawText("Notes", margin, top + 28f, caption)
-                var ty = top + 60f
-                for (l in wrapped) { c.drawText(l, margin, ty, body); ty += 34f }
-            })
+            textSection("MEASUREMENTS", buildTable().split("\n").map { it to monoPaint }, 32f)
         }
 
-        val totalH = (margin * 2 + sections.sumOf { it.first.toDouble() } +
-            gap * (sections.size - 1).coerceAtLeast(0)).toInt().coerceAtLeast(200)
+        // ---- Compose the page ----
+        val titleBlock = 108f
+        val totalH = (margin * 2 + titleBlock +
+            sections.sumOf { (it.totalH + gap).toDouble() }).toInt().coerceAtLeast(300)
         val bmp = Bitmap.createBitmap(w, totalH, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         c.drawColor(Color.WHITE)
+
+        // Page header, styled like the app's top bar.
         var y = margin
-        for ((height, draw) in sections) { draw(c, y); y += height + gap }
+        c.drawText("RESISTANCE TEST RESULTS", margin, y + 44f, titlePaint)
+        c.drawText("EL15 LOAD CONTROL · $stamp", margin, y + 82f, kickerPaint)
+        y += titleBlock
+
+        fun drawCorners(left: Float, top: Float, right: Float, bottom: Float) {
+            val inset = 10f
+            val half = 6f
+            for ((cx, cy) in listOf(
+                left + inset to top + inset, right - inset to top + inset,
+                left + inset to bottom - inset, right - inset to bottom - inset,
+            )) {
+                c.drawLine(cx - half, cy, cx + half, cy, cornerPaint)
+                c.drawLine(cx, cy - half, cx, cy + half, cornerPaint)
+            }
+        }
+
+        for (s0 in sections) {
+            val top = y
+            val bottom = y + s0.totalH
+            c.drawRect(margin, top, w - margin, bottom, framePaint)
+            drawCorners(margin, top, w - margin, bottom)
+            val x = margin + framePad
+            c.drawText(s0.header, x, top + framePad + 20f, headerPaint)
+            s0.draw(c, top + framePad + headerBlock, x, contentW)
+            y = bottom + gap
+        }
         return bmp
     }
 
