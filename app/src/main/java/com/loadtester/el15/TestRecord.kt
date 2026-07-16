@@ -23,6 +23,7 @@ data class TestRecord(
     val reliable: Boolean,
     val samples: List<CircuitResistanceTester.Sample>,
     var notes: String = "",
+    var tag: String = "",
 ) {
     val peakPower: Float get() = samples.maxOfOrNull { it.power } ?: 0f
     val maxTemp: Float get() = samples.maxOfOrNull { it.temperature } ?: 0f
@@ -44,6 +45,7 @@ data class TestRecord(
         put("rSquared", rSquared.toDouble())
         put("reliable", reliable)
         put("notes", notes)
+        put("tag", tag)
         put("samples", JSONArray().apply {
             for (s in samples) put(JSONArray().apply {
                 put(s.current.toDouble()); put(s.voltage.toDouble())
@@ -83,6 +85,7 @@ data class TestRecord(
                 reliable = o.optBoolean("reliable", false),
                 samples = samples,
                 notes = o.optString("notes", ""),
+                tag = o.optString("tag", ""),
             )
         }
 

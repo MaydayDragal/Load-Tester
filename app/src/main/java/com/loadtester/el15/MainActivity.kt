@@ -2,7 +2,6 @@ package com.loadtester.el15
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothDevice
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -14,46 +13,40 @@ import android.text.style.ForegroundColorSpan
 import android.view.View
 import android.view.WindowManager
 import android.widget.ArrayAdapter
+import android.widget.LinearLayout
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import com.loadtester.el15.databinding.ActivityMainBinding
+import java.util.Locale
 import kotlin.math.ceil
 
-class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceTester.Callback {
+/**
+ * The instrument panel. All device/session state lives in [DeviceCore] — this
+ * activity is a view over the core (it can be destroyed and recreated freely
+ * while a connection, sweep, or bench session keeps running underneath).
+ */
+class MainActivity : BaseActivity(), DeviceCore.Ui {
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var ble: El15BleManager
-    private lateinit var tester: CircuitResistanceTester
-    private lateinit var calibrator: SweepCalibrator
+    private lateinit var core: DeviceCore
 
-    private val foundDevices = LinkedHashMap<String, BluetoothDevice>()
-    private var lastStatus: El15Status? = null
     private var userEditingSetpoint = false
     private var updatingChips = false
-    private var rtestActive = false
     private var maxVoltageSeen = 0f
 
-    private var simulator: El15Simulator? = null
     private var pendingThemeRecreate = false
     private var nightMode = -1
     private var pendingResultId: String? = null
-    private var demoEmf = 12.6f
-    private var demoSeriesR = 0.35f
+    private var pendingResultSession = false
 
-    private val controller: El15Controller get() = simulator ?: ble
-    private val activeController = object : El15Controller {
-        override fun setMode(mode: Int) = controller.setMode(mode)
-        override fun setSetpoint(value: Float) = controller.setSetpoint(value)
-        override fun setLoad(on: Boolean) = controller.setLoad(on)
-        override fun setLock() = controller.setLock()
-    }
-
-    private fun isConnected(): Boolean =
-        simulator != null || ble.state == El15BleManager.State.CONNECTED
+    /** Which control panel is showing under the mode chips. */
+    private enum class Panel { DEVICE, RTEST, BENCH }
+    private var panel = Panel.DEVICE
 
     // Only the six device modes map to chips that send a mode command.
     private val chipToMode: Map<Int, Int> by lazy {
@@ -73,18 +66,19 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         else toast("Bluetooth permission denied — the demo device is still available")
     }
 
+    private val notifPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* optional — alarms/results notifications simply stay silent if denied */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        ble = El15BleManager(this).also { it.listener = this }
-        tester = CircuitResistanceTester(activeController, this)
-        calibrator = SweepCalibrator(activeController, calCallback)
+        core = DeviceCore.get(this)
+        core.syncSettings()
         nightMode = resources.configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK
-        demoEmf = Prefs.demoEmf(this)
-        demoSeriesR = Prefs.demoR(this)
 
         binding.headerHistory.setOnClickListener { startActivity(Intent(this, HistoryActivity::class.java)) }
         binding.headerSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
@@ -98,29 +92,65 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         setupModeChips()
         setupWaveformControls()
         setupTest()
+        setupBench()
         applyLegend()
         clearReadouts()
-        updateControlsEnabled(false)
+
+        core.addUi(this)
+        renderConnectionState()
+        restoreLiveState()
+
+        if (Build.VERSION.SDK_INT >= 33 && !Notifications.canPost(this)) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // The core (and its foreground service) owns the session — never tear
+        // down the connection just because the Activity died.
+        if (::core.isInitialized) core.removeUi(this)
+    }
+
+    /** Rebuild transient view state from the core after (re)creation. */
+    private fun restoreLiveState() = with(binding.monitor) {
+        for (pt in core.waveLog) waveformView.add(pt.v, pt.i, pt.p, pt.temp, pt.fan, pt.tMs)
+        if (core.waveLog.isNotEmpty()) waveStats.text = waveformView.statsText()
+        core.lastStatus?.let { if (core.isConnected) renderStatus(it) }
+        if (core.tester.running) {
+            panel = Panel.RTEST
+            testBar.visibility = View.VISIBLE
+            testProgressText.visibility = View.VISIBLE
+            testProgressText.text = core.lastProgressText
+            startTestButton.setText(R.string.rt_stop)
+        } else if (core.calibrator.running) {
+            panel = Panel.RTEST
+            testProgressText.visibility = View.VISIBLE
+            testProgressText.text = core.lastProgressText
+        } else if (core.session.running) {
+            panel = Panel.BENCH
+            benchProgressText.visibility = View.VISIBLE
+            benchProgressText.text = core.lastProgressText
+        }
+        applyPanel()
+        updateRecordIcon()
     }
 
     override fun onResume() {
         super.onResume()
         pendingResultId?.let { id ->
+            val session = pendingResultSession
             pendingResultId = null
-            startActivity(Intent(this, ResultActivity::class.java)
+            if (session) SessionResultActivity.start(this, id)
+            else startActivity(Intent(this, ResultActivity::class.java)
                 .putExtra(ResultActivity.EXTRA_RECORD_ID, id))
         }
-        val poll = Prefs.pollMs(this)
-        ble.pollIntervalMs = poll; simulator?.pollIntervalMs = poll
-        tester.pollIntervalMs = poll
-        tester.safetyFactor = Prefs.safetyFactor(this)
-        calibrator.pollIntervalMs = poll
-        calibrator.safetyFactor = Prefs.safetyFactor(this)
+        core.syncSettings()
         // Demo circuit may have been edited in Settings; apply it live.
         val newEmf = Prefs.demoEmf(this); val newR = Prefs.demoR(this)
-        if (newEmf != demoEmf || newR != demoSeriesR) {
-            demoEmf = newEmf; demoSeriesR = newR
-            simulator?.let { it.emf = demoEmf; it.seriesR = demoSeriesR; updateDemoStatusText() }
+        if (newEmf != core.demoEmf || newR != core.demoSeriesR) {
+            core.applyDemoCircuit(newEmf, newR)
+            if (core.isDemo) updateDemoStatusText()
         }
         if (Prefs.keepScreenOn(this)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -128,29 +158,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        // configChanges covers several kinds; only a real day/night flip should
-        // trigger a re-theme. (uiMode is handled so a flip cannot destroy a
-        // live BLE session or abort a running sweep.)
+        // Only a real day/night flip triggers a re-theme, and never mid-session.
         val newNight = newConfig.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
         if (newNight == nightMode) return
         nightMode = newNight
-        if (!isConnected() && !tester.running) {
-            recreate()
-        } else {
-            pendingThemeRecreate = true
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        val wasTesting = tester.running || calibrator.running
-        if (calibrator.running) calibrator.stop()
-        if (tester.running) tester.stop()
-        simulator?.stop()
-        // shutdownAndDisconnect writes LOAD_OFF directly on the GATT before
-        // teardown — the queued writes from tester.stop() would otherwise be
-        // cleared by a plain disconnect and the load left sinking current.
-        if (wasTesting) ble.shutdownAndDisconnect() else ble.disconnect()
+        if (!core.isConnected && !core.busy) recreate() else pendingThemeRecreate = true
     }
 
     private fun color(res: Int) = ContextCompat.getColor(this, res)
@@ -160,48 +172,66 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         .setMessage(getString(R.string.about_body, BuildConfig.VERSION_NAME))
         .setPositiveButton(android.R.string.ok, null).show()
 
+    private fun deviceLabel(): String =
+        if (core.isDemo) "Demo (%.1f V, %.3f Ω)".format(core.demoEmf, core.demoSeriesR)
+        else "EL15 (BLE)"
+
     // ---- Controls ---------------------------------------------------------
     private fun setupControls() = with(binding.monitor) {
         connButton.setOnClickListener {
-            if (isConnected() || ble.state == El15BleManager.State.CONNECTING) disconnectAll() else requestScan()
+            if (core.isConnected || core.ble.state == El15BleManager.State.CONNECTING) core.disconnect()
+            else requestScan()
         }
         connStatusTap.setOnClickListener {
-            if (simulator != null) showDemoConfigDialog(applyLive = true, onDone = null)
+            if (core.isDemo) showDemoConfigDialog(applyLive = true, onDone = null)
         }
         setpointInput.setOnFocusChangeListener { _, f -> userEditingSetpoint = f }
         setSetpointButton.setOnClickListener {
             val v = setpointInput.text.toString().trim().toFloatOrNull()
             if (v == null) toast("Enter a valid number")
-            else { controller.setSetpoint(v); setpointInput.clearFocus(); toast("Setpoint → $v") }
+            else { core.controller.setSetpoint(v); setpointInput.clearFocus(); toast("Setpoint → $v") }
         }
         loadToggle.setOnClickListener {
-            if (!isConnected()) requestScan() else controller.setLoad(!(lastStatus?.loadOn ?: false))
+            if (!core.isConnected) requestScan()
+            else core.controller.setLoad(!(core.lastStatus?.loadOn ?: false))
         }
-        lockButton.setOnClickListener { controller.setLock() }
+        lockButton.setOnClickListener { core.controller.setLock() }
     }
 
     private fun setupModeChips() = with(binding.monitor) {
         for (id in chipToMode.keys) findViewById<Chip>(id).setOnClickListener {
             if (updatingChips) return@setOnClickListener
-            rtestActive = false
-            deviceControls.visibility = View.VISIBLE
-            rtestPanel.visibility = View.GONE
-            chipToMode[id]?.let { controller.setMode(it) }
-            updateControlsEnabled(isConnected())
+            panel = Panel.DEVICE
+            applyPanel()
+            chipToMode[id]?.let { core.controller.setMode(it) }
         }
-        chipRtest.setOnClickListener {
-            if (updatingChips) return@setOnClickListener
-            if (rtestActive && !chipRtest.isChecked) {
-                // Re-tap on the active chip: keep it selected, panel stays.
-                updatingChips = true; chipRtest.isChecked = true; updatingChips = false
-                return@setOnClickListener
+        fun panelChip(chip: Chip, target: Panel, clearLoad: Boolean) {
+            chip.setOnClickListener {
+                if (updatingChips) return@setOnClickListener
+                if (panel == target && !chip.isChecked) {
+                    // Re-tap on the active chip: keep it selected, panel stays.
+                    updatingChips = true; chip.isChecked = true; updatingChips = false
+                    return@setOnClickListener
+                }
+                panel = target
+                if (clearLoad && core.isConnected && !core.busy) core.controller.setLoad(false)
+                applyPanel()
             }
-            rtestActive = true
-            deviceControls.visibility = View.GONE
-            rtestPanel.visibility = View.VISIBLE
-            if (isConnected()) controller.setLoad(false) // clear the load before a sweep
-            updateControlsEnabled(isConnected())
         }
+        panelChip(chipRtest, Panel.RTEST, clearLoad = true)
+        panelChip(chipBench, Panel.BENCH, clearLoad = false)
+    }
+
+    private fun applyPanel() = with(binding.monitor) {
+        deviceControls.visibility = if (panel == Panel.DEVICE) View.VISIBLE else View.GONE
+        rtestPanel.visibility = if (panel == Panel.RTEST) View.VISIBLE else View.GONE
+        benchPanel.visibility = if (panel == Panel.BENCH) View.VISIBLE else View.GONE
+        if (panel != Panel.DEVICE) {
+            updatingChips = true
+            modeChipGroup.check(if (panel == Panel.RTEST) chipRtest.id else chipBench.id)
+            updatingChips = false
+        }
+        updateControlsEnabled()
     }
 
     private fun setupWaveformControls() = with(binding.monitor) {
@@ -210,10 +240,21 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
             wavePauseButton.setIconResource(if (waveformView.paused) R.drawable.ic_play else R.drawable.ic_pause)
         }
         waveRecordButton.setOnClickListener {
-            if (waveformView.recording) { waveformView.stopRecording(); toast("Recording stopped (${waveformView.recordedCount()} samples)") }
-            else { waveformView.startRecording(); toast("Recording…") }
+            // Recording lives in the core so it survives the Activity.
+            if (core.recording) {
+                core.stopRecording()
+                toast("Recording stopped (${core.recordLog.size} samples)")
+            } else {
+                core.startRecording()
+                toast("Recording… (kept while the app runs in background)")
+            }
+            updateRecordIcon()
         }
         waveExportButton.setOnClickListener { waveformExportChooser() }
+    }
+
+    private fun updateRecordIcon() = with(binding.monitor) {
+        waveRecordButton.alpha = if (core.recording) 1f else 0.55f
     }
 
     private fun applyLegend() {
@@ -226,13 +267,13 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         binding.monitor.waveLegend.text = sb
     }
 
-    // ---- Resistance test --------------------------------------------------
+    // ---- Resistance test ----------------------------------------------------
     private fun setupTest() = with(binding.monitor) {
         if (stepsInput.text.isNullOrBlank()) stepsInput.setText(Prefs.steps(this@MainActivity).toString())
         if (settleInput.text.isNullOrBlank()) settleInput.setText(Prefs.settleMs(this@MainActivity).toString())
         if (sampleInput.text.isNullOrBlank()) sampleInput.setText(Prefs.sampleMs(this@MainActivity).toString())
 
-        fun info(layout: com.google.android.material.textfield.TextInputLayout, title: Int, body: Int) {
+        fun info(layout: TextInputLayout, title: Int, body: Int) {
             layout.setEndIconOnClickListener {
                 MaterialAlertDialogBuilder(this@MainActivity)
                     .setTitle(title).setMessage(body)
@@ -244,18 +285,17 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         info(sampleLayout, R.string.rt_sample, R.string.rt_sample_info)
 
         calibrateButton.setOnClickListener {
-            if (calibrator.running) {
-                calibrator.stop()
+            if (core.calibrator.running) {
+                core.calibrator.stop()
                 onTestFinishedUi("Calibration stopped")
                 return@setOnClickListener
             }
-            if (!isConnected()) { toast("Connect to the EL15 (or the demo) first"); return@setOnClickListener }
+            if (!core.isConnected) { toast("Connect to the EL15 (or the demo) first"); return@setOnClickListener }
             val fuse = fuseInput.text.toString().trim().toFloatOrNull()
             if (fuse == null || fuse <= 0f) { toast("Enter the circuit's fuse rating in amps"); return@setOnClickListener }
             if (fuse > 200f) { toast("That fuse rating looks too high — double-check it"); return@setOnClickListener }
             val (peak, _) = predictedPeak(fuse)
             val poll = Prefs.pollMs(this@MainActivity)
-            // Probes (~6s+6s) + priming + three short sweeps at default-ish timing.
             val estS = (12_000L + 3 * (2 * poll + 300) + 25 * 2300L) / 1000L
             val estStr = if (estS >= 120) "~${estS / 60} min" else "~${estS}s"
             MaterialAlertDialogBuilder(this@MainActivity)
@@ -266,8 +306,8 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
                 .show()
         }
         startTestButton.setOnClickListener {
-            if (tester.running) { tester.stop(); onTestFinishedUi("Test stopped"); return@setOnClickListener }
-            if (!isConnected()) { toast("Connect to the EL15 (or the demo) first"); return@setOnClickListener }
+            if (core.tester.running) { core.tester.stop(); onTestFinishedUi("Test stopped"); return@setOnClickListener }
+            if (!core.isConnected) { toast("Connect to the EL15 (or the demo) first"); return@setOnClickListener }
             val fuse = fuseInput.text.toString().trim().toFloatOrNull()
             if (fuse == null || fuse <= 0f) { toast("Enter the circuit's fuse rating in amps"); return@setOnClickListener }
             if (fuse > 200f) { toast("That fuse rating looks too high — double-check it"); return@setOnClickListener }
@@ -290,18 +330,18 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         }
         if (settle < 0) { toast("Settle time can't be negative"); return false }
         if (sample < 0) { toast("Sample window can't be negative"); return false }
-        tester.steps = steps; tester.settleMs = settle; tester.collectMs = sample
+        core.tester.steps = steps; core.tester.settleMs = settle; core.tester.collectMs = sample
         stepsInput.setText(steps.toString()); settleInput.setText(settle.toString()); sampleInput.setText(sample.toString())
         true
     }
 
     private fun predictedPeak(fuse: Float): Pair<Float, String> {
-        val v = lastStatus?.voltage?.takeIf { it > El15Protocol.MIN_VOLTAGE_V } ?: El15Protocol.MAX_VOLTAGE_V
-        val fuseCap = fuse * tester.safetyFactor
+        val v = core.lastStatus?.voltage?.takeIf { it > El15Protocol.MIN_VOLTAGE_V } ?: El15Protocol.MAX_VOLTAGE_V
+        val fuseCap = fuse * core.tester.safetyFactor
         val powerCap = El15Protocol.MAX_POWER_W / v
         val peak = minOf(fuseCap, powerCap, El15Protocol.MAX_CURRENT_A)
         val limiter = when (peak) {
-            fuseCap -> "%.0f%% of the %.1f A fuse".format(tester.safetyFactor * 100, fuse)
+            fuseCap -> "%.0f%% of the %.1f A fuse".format(core.tester.safetyFactor * 100, fuse)
             powerCap -> "the %.0f W power limit at %.1f V".format(El15Protocol.MAX_POWER_W, v)
             else -> "the %.0f A current limit".format(El15Protocol.MAX_CURRENT_A)
         }
@@ -312,57 +352,14 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         fuseInput.clearFocus()
         testBar.visibility = View.VISIBLE; testBar.progress = 0
         testProgressText.visibility = View.VISIBLE
-        // Estimate with the *effective* windows (the engine stretches short
-        // ones to the poll rate), formatted as minutes for long sweeps.
         val poll = Prefs.pollMs(this@MainActivity)
-        val perStep = maxOf(tester.settleMs, poll + 100) + maxOf(tester.collectMs, 2 * poll + 200)
-        val estS = tester.steps.toLong() * perStep / 1000L
+        val perStep = maxOf(core.tester.settleMs, poll + 100) + maxOf(core.tester.collectMs, 2 * poll + 200)
+        val estS = core.tester.steps.toLong() * perStep / 1000L
         val estStr = if (estS >= 120) "~${estS / 60}m ${estS % 60}s" else "~${estS}s"
         testProgressText.text = "Priming… ($estStr)"
         startTestButton.setText(R.string.rt_stop)
-        tester.start(fuse) // start FIRST so tester.running locks the controls below
-        updateControlsEnabled(true)
-    }
-
-    private fun onTestFinishedUi(message: String?) = with(binding.monitor) {
-        startTestButton.setText(R.string.rt_start)
-        testBar.visibility = View.GONE
-        message?.let { testProgressText.text = it }
-        updateControlsEnabled(isConnected())
-    }
-
-    override fun onTestProgress(step: Int, totalSteps: Int, targetCurrent: Float, voltage: Float, current: Float) = with(binding.monitor) {
-        testBar.progress = (step * 100 / totalSteps).coerceIn(0, 100)
-        testProgressText.text = "Step %d/%d  →  %.3f A set   %.3f V @ %.3f A".format(step, totalSteps, targetCurrent, voltage, current)
-    }
-
-    override fun onTestComplete(result: CircuitResistanceTester.ResistanceResult) {
-        val device = simulator?.let { "Demo (%.1f V, %.3f Ω)".format(demoEmf, demoSeriesR) } ?: "EL15 (BLE)"
-        val record = TestRecord.from(
-            result, tester.steps, tester.settleMs, tester.collectMs,
-            (tester.safetyFactor * 100).toInt(), device, System.currentTimeMillis(),
-        )
-        if (!TestRepository(this).save(record)) {
-            onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)}")
-            toast("Could not archive the test result")
-            return
-        }
-        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
-            onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)}")
-            startActivity(Intent(this, ResultActivity::class.java)
-                .putExtra(ResultActivity.EXTRA_RECORD_ID, record.id))
-        } else {
-            // Background activity starts are blocked; open it when we return.
-            onTestFinishedUi("Done — R = ${formatOhm(result.resistanceOhm)} (saved to History)")
-            pendingResultId = record.id
-        }
-    }
-
-    override fun onTestError(message: String) {
-        onTestFinishedUi(null)
-        binding.monitor.testProgressText.text = message
-        MaterialAlertDialogBuilder(this).setTitle("Test stopped").setMessage(message)
-            .setPositiveButton(android.R.string.ok, null).show()
+        core.tester.start(fuse) // start FIRST so tester.running locks the controls below
+        updateControlsEnabled()
     }
 
     private fun startCalibration(fuse: Float) = with(binding.monitor) {
@@ -370,45 +367,272 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         testBar.visibility = View.GONE
         testProgressText.visibility = View.VISIBLE
         testProgressText.text = "Calibrating…"
-        calibrator.start(fuse)
-        updateControlsEnabled(true)
+        core.calibrator.start(fuse)
+        updateControlsEnabled()
     }
 
-    private val calCallback = object : SweepCalibrator.Callback {
-        override fun onCalProgress(message: String) {
-            binding.monitor.testProgressText.text = message
-        }
+    private fun onTestFinishedUi(message: String?) = with(binding.monitor) {
+        startTestButton.setText(R.string.rt_start)
+        testBar.visibility = View.GONE
+        message?.let { testProgressText.visibility = View.VISIBLE; testProgressText.text = it }
+        updateControlsEnabled()
+    }
 
-        override fun onCalComplete(result: SweepCalibrator.CalResult) {
-            onTestFinishedUi("Calibration done — recommended ${result.steps} steps")
-            val sweeps = result.sweepResistances.joinToString(" → ") { formatOhm(it) }
-            val body = StringBuilder()
-                .append("Steps: ${result.steps}")
-                .append(if (result.converged) "  (resistance converged: $sweeps)" else "  (did not fully converge: $sweeps — using extra headroom)")
-                .append("\n\nSettle: ${result.settleMs} ms  (measured stabilization)")
-                .append("\nSample: ${result.sampleMs} ms  (noise σ %.1f mV)".format(result.noiseVolts * 1000f))
-                .append("\n\nEstimated test duration: ~${result.estimatedTestS}s")
-                .toString()
-            MaterialAlertDialogBuilder(this@MainActivity)
-                .setTitle(R.string.rt_cal_result_title)
-                .setMessage(body)
-                .setPositiveButton(R.string.rt_cal_apply) { _, _ ->
-                    with(binding.monitor) {
-                        stepsInput.setText(result.steps.toString())
-                        settleInput.setText(result.settleMs.toString())
-                        sampleInput.setText(result.sampleMs.toString())
-                    }
-                    toast("Sweep settings applied")
+    // ---- DeviceCore.Ui: resistance test / calibration -----------------------
+    override fun coreTestProgress(text: String, percent: Int) = with(binding.monitor) {
+        if (percent >= 0) {
+            testBar.visibility = View.VISIBLE
+            testBar.progress = percent.coerceIn(0, 100)
+        }
+        testProgressText.visibility = View.VISIBLE
+        testProgressText.text = text
+    }
+
+    override fun coreTestComplete(recordId: String, summary: String) {
+        onTestFinishedUi("Done — R = $summary")
+        openResult(recordId, session = false)
+    }
+
+    override fun coreTestError(message: String) {
+        onTestFinishedUi(null)
+        binding.monitor.testProgressText.visibility = View.VISIBLE
+        binding.monitor.testProgressText.text = message
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            MaterialAlertDialogBuilder(this).setTitle("Test stopped").setMessage(message)
+                .setPositiveButton(android.R.string.ok, null).show()
+        }
+    }
+
+    override fun coreCalComplete(result: SweepCalibrator.CalResult) {
+        onTestFinishedUi("Calibration done — recommended ${result.steps} steps")
+        if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) return
+        val sweeps = result.sweepResistances.joinToString(" → ") { formatOhm(it) }
+        val body = StringBuilder()
+            .append("Steps: ${result.steps}")
+            .append(if (result.converged) "  (resistance converged: $sweeps)" else "  (did not fully converge: $sweeps — using extra headroom)")
+            .append("\n\nSettle: ${result.settleMs} ms  (measured stabilization)")
+            .append("\nSample: ${result.sampleMs} ms  (noise σ %.1f mV)".format(result.noiseVolts * 1000f))
+            .append("\n\nEstimated test duration: ~${result.estimatedTestS}s")
+            .toString()
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.rt_cal_result_title)
+            .setMessage(body)
+            .setPositiveButton(R.string.rt_cal_apply) { _, _ ->
+                with(binding.monitor) {
+                    stepsInput.setText(result.steps.toString())
+                    settleInput.setText(result.settleMs.toString())
+                    sampleInput.setText(result.sampleMs.toString())
                 }
-                .setNegativeButton(R.string.cancel, null)
-                .show()
-        }
+                toast("Sweep settings applied")
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
 
-        override fun onCalError(message: String) {
-            onTestFinishedUi(null)
-            binding.monitor.testProgressText.text = message
-            MaterialAlertDialogBuilder(this@MainActivity)
-                .setTitle("Calibration stopped").setMessage(message)
+    private fun openResult(recordId: String, session: Boolean) {
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            if (session) SessionResultActivity.start(this, recordId)
+            else startActivity(Intent(this, ResultActivity::class.java)
+                .putExtra(ResultActivity.EXTRA_RECORD_ID, recordId))
+        } else {
+            // Background activity starts are blocked; open it when we return.
+            pendingResultId = recordId
+            pendingResultSession = session
+        }
+    }
+
+    // ---- Bench sessions -------------------------------------------------------
+    private data class BField(val key: String, val label: String, val def: String)
+
+    private fun setupBench() = with(binding.monitor) {
+        benchCapacity.setOnClickListener { benchGuard { startCapacityFlow() } }
+        benchRuntime.setOnClickListener { benchGuard { startRuntimeFlow() } }
+        benchStep.setOnClickListener { benchGuard { startStepFlow() } }
+        benchOcp.setOnClickListener { benchGuard { startOcpFlow() } }
+        benchStopButton.setOnClickListener {
+            core.session.stop()
+            onBenchFinishedUi("Stopped")
+        }
+    }
+
+    private fun benchGuard(start: () -> Unit) {
+        when {
+            !core.isConnected -> toast("Connect to the EL15 (or the demo) first")
+            core.busy -> toast("Another test is already running")
+            else -> start()
+        }
+    }
+
+    /** Numeric-entry dialog used by all four bench test setups. */
+    private fun benchDialog(
+        title: String, message: String, fields: List<BField>,
+        onOk: (LinkedHashMap<String, Float>) -> Unit,
+    ) {
+        val pad = (resources.displayMetrics.density * 20).toInt()
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        val editors = LinkedHashMap<String, TextInputEditText>()
+        for (f in fields) {
+            val layout = TextInputLayout(this, null,
+                com.google.android.material.R.attr.textInputOutlinedStyle).apply {
+                hint = f.label
+            }
+            val edit = TextInputEditText(layout.context).apply {
+                setText(f.def)
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                    android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+                typeface = android.graphics.Typeface.MONOSPACE
+            }
+            layout.addView(edit)
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.topMargin = pad / 3
+            container.addView(layout, lp)
+            editors[f.key] = edit
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setView(container)
+            .setPositiveButton(R.string.bench_next) { _, _ ->
+                val values = LinkedHashMap<String, Float>()
+                for ((key, edit) in editors) {
+                    val v = edit.text.toString().trim().toFloatOrNull()
+                    if (v == null || v < 0f) { toast("Invalid value for ${fields.first { it.key == key }.label}"); return@setPositiveButton }
+                    values[key] = v
+                }
+                onOk(values)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmBench(type: Int, params: LinkedHashMap<String, Float>, summary: String) {
+        val limit = params.remove("limitA") ?: El15Protocol.MAX_CURRENT_A
+        if (limit <= 0f) { toast("Current limit must be positive"); return }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.bench_confirm_title)
+            .setMessage(getString(R.string.bench_confirm_msg, summary,
+                minOf(limit * core.session.safetyFactor, El15Protocol.MAX_CURRENT_A)))
+            .setPositiveButton(R.string.rt_start) { _, _ ->
+                onBenchStartedUi()
+                core.session.start(type, limit, params, deviceLabel())
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun startCapacityFlow() {
+        val chems = LongTestEngine.CHEMISTRIES
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.bench_capacity_chem)
+            .setItems(chems.map { it.name }.toTypedArray()) { _, which ->
+                val chem = chems[which]
+                val voc = core.lastStatus?.voltage ?: 0f
+                val cells = LongTestEngine.estimateCells(voc, chem)
+                benchDialog(
+                    getString(R.string.bench_capacity),
+                    getString(R.string.bench_capacity_msg, voc, chem.name),
+                    listOf(
+                        BField("cells", "Cells in series", cells.toString()),
+                        BField("dischargeA", "Discharge current (A)", "1.0"),
+                        BField("cutoffV", "Cutoff voltage (V)",
+                            String.format(Locale.US, "%.2f", cells * chem.cutoffPerCell)),
+                        BField("ratedAh", "Rated capacity (Ah, 0 = skip SoH)", "0"),
+                        BField("limitA", "Current limit (A)", "12"),
+                    )) { p ->
+                    p["chem"] = which.toFloat()
+                    confirmBench(SessionRecord.TYPE_CAPACITY, p,
+                        "CC discharge at %.2f A until %.2f V".format(p["dischargeA"], p["cutoffV"]))
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun startRuntimeFlow() {
+        val voc = core.lastStatus?.voltage ?: 0f
+        benchDialog(
+            getString(R.string.bench_runtime),
+            getString(R.string.bench_runtime_msg),
+            listOf(
+                BField("powerW", "Constant power (W)", "10"),
+                BField("cutoffV", "Cutoff voltage (V)",
+                    if (voc > 1f) String.format(Locale.US, "%.2f", voc * 0.75f) else "9.0"),
+                BField("limitA", "Current limit (A)", "12"),
+            )) { p ->
+            confirmBench(SessionRecord.TYPE_RUNTIME, p,
+                "CP load of %.1f W until %.2f V".format(p["powerW"], p["cutoffV"]))
+        }
+    }
+
+    private fun startStepFlow() {
+        benchDialog(
+            getString(R.string.bench_step),
+            getString(R.string.bench_step_msg),
+            listOf(
+                BField("iLow", "Low current (A)", "0.2"),
+                BField("iHigh", "High current (A)", "1.0"),
+                BField("periodMs", "Period (ms)", "2000"),
+                BField("cycles", "Cycles", "10"),
+                BField("limitA", "Current limit (A)", "12"),
+            )) { p ->
+            if ((p["iHigh"] ?: 0f) <= (p["iLow"] ?: 0f)) { toast("High current must exceed low current"); return@benchDialog }
+            confirmBench(SessionRecord.TYPE_STEP, p,
+                "Square wave %.2f ↔ %.2f A, %.0f cycles".format(p["iLow"], p["iHigh"], p["cycles"]))
+        }
+    }
+
+    private fun startOcpFlow() {
+        benchDialog(
+            getString(R.string.bench_ocp),
+            getString(R.string.bench_ocp_msg),
+            listOf(
+                BField("startA", "Start current (A)", "0.2"),
+                BField("stepA", "Step size (A)", "0.1"),
+                BField("dwellMs", "Dwell per step (ms)", "1500"),
+                BField("collapsePct", "Collapse threshold (% of Voc)", "70"),
+                BField("limitA", "Current limit (A)", "12"),
+            )) { p ->
+            val pct = (p.remove("collapsePct") ?: 70f).coerceIn(10f, 95f)
+            p["collapseFrac"] = pct / 100f
+            if ((p["stepA"] ?: 0f) <= 0f) { toast("Step size must be positive"); return@benchDialog }
+            confirmBench(SessionRecord.TYPE_OCP, p,
+                "Ramp from %.2f A in %.2f A steps until the voltage collapses".format(p["startA"], p["stepA"]))
+        }
+    }
+
+    private fun onBenchStartedUi() = with(binding.monitor) {
+        benchStopButton.visibility = View.VISIBLE
+        benchProgressText.visibility = View.VISIBLE
+        benchProgressText.text = "Priming…"
+        updateControlsEnabled()
+    }
+
+    private fun onBenchFinishedUi(message: String?) = with(binding.monitor) {
+        benchStopButton.visibility = View.GONE
+        message?.let { benchProgressText.visibility = View.VISIBLE; benchProgressText.text = it }
+        updateControlsEnabled()
+    }
+
+    // ---- DeviceCore.Ui: bench sessions ----------------------------------------
+    override fun coreSessionProgress(text: String) = with(binding.monitor) {
+        benchStopButton.visibility = View.VISIBLE
+        benchProgressText.visibility = View.VISIBLE
+        benchProgressText.text = text
+    }
+
+    override fun coreSessionComplete(recordId: String, summary: String) {
+        onBenchFinishedUi("Done — $summary")
+        openResult(recordId, session = true)
+    }
+
+    override fun coreSessionError(message: String) {
+        onBenchFinishedUi(message)
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            MaterialAlertDialogBuilder(this).setTitle("Test stopped").setMessage(message)
                 .setPositiveButton(android.R.string.ok, null).show()
         }
     }
@@ -430,7 +654,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     private fun requestScan() {
         showDevicePicker()
         when {
-            !ble.isBluetoothOn -> toast("Bluetooth is off — the demo device is still available")
+            !core.ble.isBluetoothOn -> toast("Bluetooth is off — the demo device is still available")
             hasPermissions() -> startBleScan()
             else -> permissionLauncher.launch(requiredPermissions())
         }
@@ -438,83 +662,76 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     private fun startBleScan() {
         if (deviceDialog?.isShowing != true) return
-        foundDevices.clear(); ble.pollIntervalMs = Prefs.pollMs(this); ble.startScan()
+        core.foundDevices.clear()
+        core.ble.pollIntervalMs = Prefs.pollMs(this)
+        core.ble.startScan()
     }
 
     private var deviceDialog: AlertDialog? = null
     private lateinit var deviceListAdapter: ArrayAdapter<String>
 
+    /** Fixed rows before the scanned devices: demo, then optional reconnect. */
+    private var pickerLastDevice: Pair<String, String>? = null
+
     @SuppressLint("MissingPermission")
     private fun showDevicePicker() {
-        foundDevices.clear()
+        core.foundDevices.clear()
+        pickerLastDevice = Prefs.lastDevice(this)
         deviceListAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1)
         deviceListAdapter.add(getString(R.string.demo_device))
+        pickerLastDevice?.let { (addr, name) ->
+            deviceListAdapter.add(getString(R.string.reconnect_row, name, addr))
+        }
+        val fixedRows = 1 + (if (pickerLastDevice != null) 1 else 0)
         deviceDialog = MaterialAlertDialogBuilder(this)
             .setTitle("Select device")
             .setAdapter(deviceListAdapter) { _, which ->
-                if (which == 0) showDemoConfigDialog(applyLive = false) { startSimulator() }
-                else foundDevices.values.toList().getOrNull(which - 1)?.let { ble.connect(it) }
+                when {
+                    which == 0 -> showDemoConfigDialog(applyLive = false) { startSimulator() }
+                    which == 1 && pickerLastDevice != null -> {
+                        val (addr, name) = pickerLastDevice!!
+                        core.ble.stopScan()
+                        if (!core.ble.connect(addr)) toast("Could not reconnect to $name")
+                    }
+                    else -> core.foundDevices.values.toList().getOrNull(which - fixedRows)?.let { dev ->
+                        Prefs.setLastDevice(this, dev.address,
+                            try { dev.name ?: "EL15" } catch (se: SecurityException) { "EL15" })
+                        core.ble.connect(dev)
+                    }
+                }
             }
-            .setNegativeButton("Cancel") { _, _ -> ble.stopScan() }
-            .setOnDismissListener { ble.stopScan() }.show()
+            .setNegativeButton("Cancel") { _, _ -> core.ble.stopScan() }
+            .setOnDismissListener { core.ble.stopScan() }.show()
     }
 
     // ---- Demo device ------------------------------------------------------
     private fun startSimulator() {
-        ble.stopScan(); deviceDialog?.dismiss()
-        val sim = El15Simulator({ s -> runOnUiThread { handleIncomingStatus(s) } }, demoEmf, demoSeriesR)
-        sim.pollIntervalMs = Prefs.pollMs(this)
-        simulator = sim; sim.start()
+        core.ble.stopScan(); deviceDialog?.dismiss()
         maxVoltageSeen = 0f
-        updateDemoStatusText()
-        setConnDot(true)
-        binding.monitor.connButton.text = getString(R.string.disconnect)
-        clearReadouts(); updateControlsEnabled(true)
-    }
-
-    private fun stopSimulator() {
-        if (tester.running) tester.stop()
-        simulator?.stop(); simulator = null
-        if (pendingThemeRecreate) { pendingThemeRecreate = false; recreate(); return }
-        binding.monitor.connStatusText.text = getString(R.string.disconnected)
-        binding.monitor.connStatusSub.text = getString(R.string.no_device)
-        binding.monitor.connButton.text = getString(R.string.scan_connect)
-        setConnDot(false); updateControlsEnabled(false); clearReadouts()
+        core.startSimulator()
+        clearReadouts()
+        renderConnectionState()
     }
 
     private fun updateDemoStatusText() {
         binding.monitor.connStatusText.text = "Demo simulator"
-        binding.monitor.connStatusSub.text = "%.1f V · %.3f Ω · tap to edit circuit".format(demoEmf, demoSeriesR)
-    }
-
-    private fun disconnectAll() {
-        if (simulator != null) {
-            stopSimulator()
-            return
-        }
-        // Stop the tester/calibrator BEFORE tearing BLE down, and use the
-        // safe shutdown path so the final LOAD_OFF is written even mid-sweep.
-        val wasTesting = tester.running || calibrator.running
-        if (calibrator.running) { calibrator.stop(); onTestFinishedUi("Calibration stopped") }
-        if (tester.running) {
-            tester.stop()
-            onTestFinishedUi("Test stopped")
-        }
-        if (wasTesting) ble.shutdownAndDisconnect() else ble.disconnect()
+        binding.monitor.connStatusSub.text =
+            "%.1f V · %.3f Ω · tap to edit circuit".format(core.demoEmf, core.demoSeriesR)
     }
 
     private fun showDemoConfigDialog(applyLive: Boolean, onDone: (() -> Unit)?) {
         val view = layoutInflater.inflate(R.layout.dialog_demo_circuit, null)
         val emfIn = view.findViewById<TextInputEditText>(R.id.demoEmfInput)
         val resIn = view.findViewById<TextInputEditText>(R.id.demoResInput)
-        emfIn.setText(fmtField(demoEmf)); resIn.setText(fmtField(demoSeriesR))
+        emfIn.setText(fmtField(core.demoEmf)); resIn.setText(fmtField(core.demoSeriesR))
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.demo_cfg_title).setView(view)
             .setPositiveButton(if (onDone != null) R.string.demo_cfg_connect else R.string.demo_cfg_apply) { _, _ ->
-                demoEmf = (emfIn.text.toString().trim().toFloatOrNull() ?: demoEmf).coerceIn(0.1f, 100f)
-                demoSeriesR = (resIn.text.toString().trim().toFloatOrNull() ?: demoSeriesR).coerceIn(0f, 100f)
-                Prefs.setDemo(this, demoEmf, demoSeriesR)
-                if (applyLive) { simulator?.let { it.emf = demoEmf; it.seriesR = demoSeriesR }; updateDemoStatusText() }
+                val emf = (emfIn.text.toString().trim().toFloatOrNull() ?: core.demoEmf).coerceIn(0.1f, 100f)
+                val r = (resIn.text.toString().trim().toFloatOrNull() ?: core.demoSeriesR).coerceIn(0f, 100f)
+                Prefs.setDemo(this, emf, r)
+                core.applyDemoCircuit(emf, r)
+                if (applyLive && core.isDemo) updateDemoStatusText()
                 onDone?.invoke()
             }
             .setNegativeButton(R.string.cancel, null).show()
@@ -527,14 +744,17 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         val sb = StringBuilder("time_ms,elapsed_s,voltage_V,current_A,power_W,temp_C,fan\n")
         val t0 = rows.first().tMs
         for (r in rows) sb.append("%d,%.3f,%.4f,%.4f,%.4f,%.2f,%d\n".format(
-            java.util.Locale.US, r.tMs, (r.tMs - t0) / 1000.0, r.v, r.i, r.p, r.temp, r.fan))
+            Locale.US, r.tMs, (r.tMs - t0) / 1000.0, r.v, r.i, r.p, r.temp, r.fan))
         return sb.toString().toByteArray()
     }
 
     private fun waveformExportChooser() {
-        val rows = binding.monitor.waveformView.exportRows()
+        // Prefer the core's recorded log (survives app backgrounding); fall
+        // back to whatever the on-screen waveform holds.
+        val rows = if (core.recordLog.isNotEmpty()) core.recordLog.toList()
+        else binding.monitor.waveformView.exportRows()
         if (rows.isEmpty()) { toast("No waveform data yet"); return }
-        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
             .format(java.util.Date())
         val name = "el15-waveform-$stamp.csv"
         MaterialAlertDialogBuilder(this)
@@ -584,8 +804,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     private fun clearReadouts() = with(binding.monitor) {
         loadToggle.setText(R.string.load_on)
-        loadToggle.backgroundTintList =
-            android.content.res.ColorStateList.valueOf(color(R.color.value_green))
+        loadToggle.backgroundTintList = ColorStateList.valueOf(color(R.color.value_green))
         lockButton.setText(R.string.lock)
         gaugeVoltage.set(0f, 20f, 2, "VOLTS · 0–20V", false)
         gaugeCurrent.set(0f, 12f, 3, "AMPS · 0–12A", false)
@@ -596,54 +815,77 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         waveStats.text = "—"; waveformView.clear()
     }
 
-    override fun onStateChanged(state: El15BleManager.State, info: String) {
-        if (simulator != null) return
-        val connected = state == El15BleManager.State.CONNECTED
-        if (!connected && tester.running) { tester.stop(); onTestFinishedUi("Test stopped (disconnected)") }
-        if (!connected && calibrator.running) { calibrator.stop(); onTestFinishedUi("Calibration stopped (disconnected)") }
-        with(binding.monitor) {
-            when (state) {
-                El15BleManager.State.CONNECTED -> { connStatusText.text = "EL15"; connStatusSub.text = "Connected · FFF0" }
-                El15BleManager.State.CONNECTING -> { connStatusText.text = info; connStatusSub.text = "" }
-                El15BleManager.State.SCANNING -> { connStatusText.text = info; connStatusSub.text = "" }
-                else -> { connStatusText.text = getString(R.string.disconnected); connStatusSub.text = getString(R.string.no_device) }
+    /** Renders connection status, button labels, and control enablement. */
+    private fun renderConnectionState() = with(binding.monitor) {
+        val state = core.ble.state
+        when {
+            core.isDemo -> updateDemoStatusText()
+            state == El15BleManager.State.CONNECTED -> {
+                connStatusText.text = "EL15"; connStatusSub.text = "Connected · FFF0"
             }
-            connButton.text = when (state) {
-                El15BleManager.State.CONNECTED -> getString(R.string.disconnect)
-                El15BleManager.State.CONNECTING -> getString(R.string.cancel)
-                else -> getString(R.string.scan_connect)
+            state == El15BleManager.State.CONNECTING -> {
+                connStatusText.text = "Connecting…"; connStatusSub.text = ""
+            }
+            state == El15BleManager.State.SCANNING -> {
+                connStatusText.text = "Scanning…"; connStatusSub.text = ""
+            }
+            else -> {
+                connStatusText.text = getString(R.string.disconnected)
+                connStatusSub.text = getString(R.string.no_device)
             }
         }
-        setConnDot(connected)
-        updateControlsEnabled(connected)
-        if (state != El15BleManager.State.SCANNING) deviceDialog?.dismiss()
-        if (!connected) { maxVoltageSeen = 0f; clearReadouts() }
-        if (!connected && pendingThemeRecreate && !tester.running) {
-            pendingThemeRecreate = false
-            recreate()
+        connButton.text = when {
+            core.isDemo -> getString(R.string.disconnect)
+            state == El15BleManager.State.CONNECTED -> getString(R.string.disconnect)
+            state == El15BleManager.State.CONNECTING -> getString(R.string.cancel)
+            else -> getString(R.string.scan_connect)
+        }
+        setConnDot(core.isConnected)
+        updateControlsEnabled()
+    }
+
+    // ---- DeviceCore.Ui: transport ---------------------------------------------
+    override fun coreStateChanged() {
+        val connected = core.isConnected
+        renderConnectionState()
+        if (!connected) {
+            with(binding.monitor) {
+                if (core.lastProgressText.isNotEmpty() && testProgressText.visibility == View.VISIBLE) {
+                    testProgressText.text = core.lastProgressText
+                }
+            }
+            onTestFinishedUi(null)
+            onBenchFinishedUi(null)
+            maxVoltageSeen = 0f
+            clearReadouts()
+            if (pendingThemeRecreate && !core.busy) {
+                pendingThemeRecreate = false
+                recreate()
+                return
+            }
+        }
+        if (core.ble.state != El15BleManager.State.SCANNING && !core.isDemo &&
+            core.ble.state != El15BleManager.State.IDLE) {
+            deviceDialog?.dismiss()
         }
     }
 
-    @SuppressLint("MissingPermission")
-    override fun onDeviceFound(device: BluetoothDevice, name: String) {
-        if (foundDevices.put(device.address, device) == null) {
-            deviceListAdapter.add("$name\n${device.address}")
+    override fun coreDeviceFound(address: String, name: String) {
+        if (deviceDialog?.isShowing == true) {
+            deviceListAdapter.add("$name\n$address")
             deviceListAdapter.notifyDataSetChanged()
         }
     }
 
-    override fun onStatus(status: El15Status) = handleIncomingStatus(status)
+    override fun coreStatus(status: El15Status) = renderStatus(status)
 
-    private fun handleIncomingStatus(status: El15Status): Unit = with(binding.monitor) {
+    private fun renderStatus(status: El15Status): Unit = with(binding.monitor) {
         // Packet inspector shows every frame, including corrupt ones…
         packetHex.text = status.raw.ifEmpty { "— no packets —" }
         packetCrc.text = "CRC ${if (status.crcPass) "✓" else "✗"}"
         packetCrc.setTextColor(color(if (status.crcPass) R.color.value_green else R.color.value_red))
         // …but nothing else may consume a corrupt/truncated frame's values.
         if (!status.valid) return
-        lastStatus = status
-        if (tester.running) tester.onStatus(status)
-        if (calibrator.running) calibrator.onStatus(status)
 
         maxVoltageSeen = maxOf(maxVoltageSeen, status.voltage)
         val vMax = maxOf(15f, ceil((maxVoltageSeen + 3f) / 5f) * 5f)
@@ -665,7 +907,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
             warningText.text = getString(R.string.protection, status.warning)
         } else warningBox.visibility = View.GONE
 
-        if (!rtestActive) {
+        if (panel == Panel.DEVICE) {
             val chipId = chipToMode.entries.firstOrNull { it.value == status.mode }?.key
             updatingChips = true
             if (chipId != null) modeChipGroup.check(chipId) else modeChipGroup.clearCheck()
@@ -676,7 +918,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         if (!userEditingSetpoint && status.setpointInPacket) {
             // Locale.US: this text is re-parsed by toFloatOrNull on SET, which
             // rejects comma decimals.
-            setpointInput.setText("%.${status.setpointDecimals}f".format(java.util.Locale.US, status.setpoint))
+            setpointInput.setText("%.${status.setpointDecimals}f".format(Locale.US, status.setpoint))
         }
 
         waveformView.add(status.voltage, curr, status.power, status.temperature, status.fanSpeed, System.currentTimeMillis())
@@ -703,23 +945,28 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
     }
 
-    override fun onLog(message: String) {}
-
-    private fun updateControlsEnabled(connected: Boolean) = with(binding.monitor) {
-        val busy = tester.running || calibrator.running
+    private fun updateControlsEnabled() = with(binding.monitor) {
+        val connected = core.isConnected
+        val busy = core.busy
         val idle = connected && !busy
-        val deviceMode = idle && !rtestActive
+        val deviceMode = idle && panel == Panel.DEVICE
         for (id in chipToMode.keys) findViewById<Chip>(id).isEnabled = idle
         chipRtest.isEnabled = idle
+        chipBench.isEnabled = idle
         setpointInput.isEnabled = deviceMode; setSetpointButton.isEnabled = deviceMode
         lockButton.isEnabled = deviceMode
         // Enabled while disconnected on purpose: tapping it opens the scan
         // dialog (see the click handler). Only a running sweep locks it.
         loadToggle.isEnabled = !busy
         fuseInput.isEnabled = idle; stepsInput.isEnabled = idle; settleInput.isEnabled = idle; sampleInput.isEnabled = idle
-        startTestButton.isEnabled = connected && !calibrator.running
-        calibrateButton.isEnabled = connected && !tester.running
-        calibrateButton.setText(if (calibrator.running) R.string.rt_cal_stop else R.string.rt_calibrate)
+        startTestButton.isEnabled = connected && !core.calibrator.running && !core.session.running
+        calibrateButton.isEnabled = connected && !core.tester.running && !core.session.running
+        calibrateButton.setText(if (core.calibrator.running) R.string.rt_cal_stop else R.string.rt_calibrate)
+        benchCapacity.isEnabled = idle
+        benchRuntime.isEnabled = idle
+        benchStep.isEnabled = idle
+        benchOcp.isEnabled = idle
+        benchStopButton.visibility = if (core.session.running) View.VISIBLE else View.GONE
     }
 
     private fun toast(msg: String) = android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()

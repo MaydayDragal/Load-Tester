@@ -64,6 +64,32 @@
             app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
+    <PreferenceCategory app:title="Monitoring &amp; alarms">
+        <EditTextPreference
+            app:key="pref_alarm_low_v"
+            app:title="Low-voltage alarm (V)"
+            app:summary="Beep and notify when the source drops below this while loaded. 0 = off."
+            app:defaultValue="0" />
+        <EditTextPreference
+            app:key="pref_alarm_high_t"
+            app:title="High-temperature alarm (°C)"
+            app:summary="Beep and notify when the load unit exceeds this. 0 = off."
+            app:defaultValue="0" />
+        <EditTextPreference
+            app:key="pref_snapshot_min"
+            app:title="Periodic CSV snapshot (minutes)"
+            app:summary="While connected, append a reading to a rolling CSV log every N minutes. 0 = off."
+            app:defaultValue="0" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Archive">
+        <EditTextPreference
+            app:key="pref_retention"
+            app:title="Keep newest N tests"
+            app:summary="Older archived tests are deleted automatically. 0 = keep everything."
+            app:defaultValue="0" />
+    </PreferenceCategory>
+
     <PreferenceCategory app:title="About">
         <!-- Summary is set at runtime from BuildConfig.VERSION_NAME. -->
         <Preference

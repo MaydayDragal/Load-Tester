@@ -43,6 +43,10 @@ class SettingsActivity : BaseActivity() {
                 Prefs.SAMPLE_MS to integer,
                 Prefs.DEMO_EMF to decimal,
                 Prefs.DEMO_R to decimal,
+                Prefs.ALARM_LOW_V to decimal,
+                Prefs.ALARM_HIGH_T to decimal,
+                Prefs.SNAPSHOT_MIN to integer,
+                Prefs.RETENTION to integer,
             ).forEach { (key, type) ->
                 findPreference<EditTextPreference>(key)?.setOnBindEditTextListener { it.inputType = type }
             }

@@ -6,11 +6,21 @@
     android:clipToPadding="false"
     android:scrollbars="none">
 
-    <LinearLayout
+    <!-- Width-capped, centered column: full-bleed on phones, a readable
+         instrument panel (not a stretched one) in landscape / on tablets. -->
+    <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="13dp">
+        android:padding="13dp"
+        app:layout_constraintWidth_max="640dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
 
         <!-- Connection -->
         <com.loadtester.el15.BlueprintFrame
@@ -155,6 +165,8 @@
                         android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="DCR" />
                     <com.google.android.material.chip.Chip android:id="@+id/chipRtest" style="@style/ModeChip"
                         android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="R-TEST" />
+                    <com.google.android.material.chip.Chip android:id="@+id/chipBench" style="@style/ModeChip"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="BENCH" />
                 </com.google.android.material.chip.ChipGroup>
 
                 <!-- Device-mode controls -->
@@ -262,6 +274,45 @@
                         android:layout_marginTop="8dp" android:fontFamily="monospace"
                         android:textColor="@color/accent" android:textSize="12sp" android:visibility="gone" />
                 </LinearLayout>
+
+                <!-- BENCH panel: long-running battery / dynamics tests -->
+                <LinearLayout android:id="@+id/benchPanel"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical" android:visibility="gone">
+
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="13dp" android:text="@string/bench_explain"
+                        android:textColor="@color/muted" android:textSize="12sp" />
+
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp" android:orientation="horizontal">
+                        <com.google.android.material.button.MaterialButton android:id="@+id/benchCapacity"
+                            style="@style/BtnSecondary" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_weight="1" android:text="@string/bench_capacity" />
+                        <com.google.android.material.button.MaterialButton android:id="@+id/benchRuntime"
+                            style="@style/BtnSecondary" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp" android:layout_weight="1" android:text="@string/bench_runtime" />
+                    </LinearLayout>
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:orientation="horizontal">
+                        <com.google.android.material.button.MaterialButton android:id="@+id/benchStep"
+                            style="@style/BtnSecondary" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_weight="1" android:text="@string/bench_step" />
+                        <com.google.android.material.button.MaterialButton android:id="@+id/benchOcp"
+                            style="@style/BtnSecondary" android:layout_width="0dp" android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp" android:layout_weight="1" android:text="@string/bench_ocp" />
+                    </LinearLayout>
+
+                    <com.google.android.material.button.MaterialButton android:id="@+id/benchStopButton"
+                        style="@style/BtnPrimary" android:layout_width="match_parent" android:layout_height="50dp"
+                        android:layout_marginTop="12dp" android:text="@string/bench_stop" android:textSize="15sp"
+                        android:visibility="gone" app:backgroundTint="@color/value_red" />
+
+                    <TextView android:id="@+id/benchProgressText"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:fontFamily="monospace"
+                        android:textColor="@color/accent" android:textSize="12sp" android:visibility="gone" />
+                </LinearLayout>
             </LinearLayout>
         </com.loadtester.el15.BlueprintFrame>
 
@@ -331,4 +382,5 @@
             </LinearLayout>
         </com.loadtester.el15.BlueprintFrame>
     </LinearLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
 </androidx.core.widget.NestedScrollView>

@@ -99,6 +99,43 @@ object Exporter {
             }
         }
 
+    /**
+     * Paginate a tall report bitmap into an A4 PDF (multi-page, fit-to-width).
+     * Rendering to PDF here keeps report generation in one place — the same
+     * bitmap drives print, PNG and PDF outputs.
+     */
+    fun pdfFromBitmap(bitmap: Bitmap): ByteArray {
+        val pageW = 595
+        val pageH = 842
+        val margin = 26f
+        val availW = pageW - margin * 2
+        val availH = pageH - margin * 2
+        val scale = availW / bitmap.width
+        val sliceHpx = (availH / scale).toInt().coerceAtLeast(1)
+        val doc = android.graphics.pdf.PdfDocument()
+        val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        try {
+            var top = 0
+            var pageNum = 1
+            while (top < bitmap.height) {
+                val h = minOf(sliceHpx, bitmap.height - top)
+                val page = doc.startPage(
+                    android.graphics.pdf.PdfDocument.PageInfo.Builder(pageW, pageH, pageNum).create())
+                val src = android.graphics.Rect(0, top, bitmap.width, top + h)
+                val dst = android.graphics.RectF(margin, margin, margin + availW, margin + h * scale)
+                page.canvas.drawBitmap(bitmap, src, dst, paint)
+                doc.finishPage(page)
+                top += h
+                pageNum++
+            }
+            val out = java.io.ByteArrayOutputStream()
+            doc.writeTo(out)
+            return out.toByteArray()
+        } finally {
+            doc.close()
+        }
+    }
+
     /** Share [bytes] as [fileName] via the system share sheet (cache + FileProvider). */
     fun share(context: Context, fileName: String, mime: String, bytes: ByteArray, subject: String) {
         val dir = File(context.cacheDir, "shared").apply { mkdirs() }

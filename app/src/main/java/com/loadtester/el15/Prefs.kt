@@ -15,6 +15,12 @@ object Prefs {
     const val DEMO_EMF = "pref_demo_emf"
     const val DEMO_R = "pref_demo_r"
     const val KEEP_SCREEN_ON = "pref_keep_screen_on"
+    const val ALARM_LOW_V = "pref_alarm_low_v"
+    const val ALARM_HIGH_T = "pref_alarm_high_t"
+    const val SNAPSHOT_MIN = "pref_snapshot_min"
+    const val RETENTION = "pref_retention"
+    const val LAST_DEV_ADDR = "pref_last_dev_addr"
+    const val LAST_DEV_NAME = "pref_last_dev_name"
 
     private fun p(ctx: Context) = PreferenceManager.getDefaultSharedPreferences(ctx)
 
@@ -49,4 +55,23 @@ object Prefs {
     }
 
     fun keepScreenOn(ctx: Context): Boolean = p(ctx).getBoolean(KEEP_SCREEN_ON, true)
+
+    /** 0 disables the alarm. */
+    fun alarmLowV(ctx: Context): Float = str(ctx, ALARM_LOW_V, "0").toFloatOrNull()?.coerceAtLeast(0f) ?: 0f
+    fun alarmHighTemp(ctx: Context): Float = str(ctx, ALARM_HIGH_T, "0").toFloatOrNull()?.coerceAtLeast(0f) ?: 0f
+
+    /** Periodic CSV snapshot interval in minutes; 0 = off. */
+    fun snapshotMinutes(ctx: Context): Int = str(ctx, SNAPSHOT_MIN, "0").toIntOrNull()?.coerceIn(0, 1440) ?: 0
+
+    /** Keep newest N archived tests; 0 = unlimited. */
+    fun retention(ctx: Context): Int = str(ctx, RETENTION, "0").toIntOrNull()?.coerceAtLeast(0) ?: 0
+
+    fun lastDevice(ctx: Context): Pair<String, String>? {
+        val a = p(ctx).getString(LAST_DEV_ADDR, null) ?: return null
+        return a to (p(ctx).getString(LAST_DEV_NAME, null) ?: "EL15")
+    }
+
+    fun setLastDevice(ctx: Context, addr: String, name: String) {
+        p(ctx).edit().putString(LAST_DEV_ADDR, addr).putString(LAST_DEV_NAME, name).apply()
+    }
 }

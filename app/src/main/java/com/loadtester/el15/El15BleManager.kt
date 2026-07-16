@@ -131,6 +131,22 @@ class El15BleManager(private val context: Context) : El15Controller {
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
+    /**
+     * Quick-reconnect to a previously bonded/seen device by MAC address, with
+     * no scan. Returns false if Bluetooth is off or the address is malformed.
+     */
+    fun connect(address: String): Boolean {
+        val a = adapter ?: return false
+        if (!a.isEnabled) return false
+        val device = try {
+            a.getRemoteDevice(address)
+        } catch (e: IllegalArgumentException) {
+            return false
+        }
+        connect(device)
+        return true
+    }
+
     fun disconnect() {
         stopPolling()
         shuttingDown = false

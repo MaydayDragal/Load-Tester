@@ -98,4 +98,53 @@
     <string name="demo_cfg_apply">Apply</string>
     <string name="demo_source">Source voltage</string>
     <string name="demo_resistance">Series resistance</string>
+
+    <!-- Quick reconnect -->
+    <string name="reconnect_row">↻ Reconnect: %1$s\n%2$s</string>
+
+    <!-- Bench tests (battery / dynamics) -->
+    <string name="bench_explain">Long-running bench tests: battery capacity with state-of-health, runtime at constant power, step-load transients, and an over-current trip finder. Tests keep running in the background — progress lives in the notification.</string>
+    <string name="bench_capacity">Battery capacity</string>
+    <string name="bench_runtime">Runtime (CP)</string>
+    <string name="bench_step">Step load</string>
+    <string name="bench_ocp">OCP finder</string>
+    <string name="bench_stop">Stop bench test</string>
+    <string name="bench_next">Next</string>
+    <string name="bench_confirm_title">Start bench test?</string>
+    <string name="bench_confirm_msg">%1$s.\n\nCurrent is capped at %2$.2f A (safety factor applied), within the EL15\'s 12 A / 150 W ratings. The load switches off automatically when the test completes, is stopped, or protection trips.</string>
+    <string name="bench_capacity_chem">Battery chemistry</string>
+    <string name="bench_capacity_msg">Open-circuit voltage now: %1$.2f V (%2$s). Cell count and cutoff are pre-filled from it — adjust if needed. Enter the rated capacity to grade state of health.</string>
+    <string name="bench_runtime_msg">Discharges at constant power until the cutoff voltage, reporting runtime and energy delivered.</string>
+    <string name="bench_step_msg">Square-waves the current between two levels and measures worst-case voltage droop and recovery time.</string>
+    <string name="bench_ocp_msg">Ramps current step by step until the source voltage collapses or protection trips — finds the real deliverable current.</string>
+
+    <!-- Session results -->
+    <string name="session_results_title">Bench Test Results</string>
+    <string name="session_health">Battery health</string>
+    <string name="session_chart_hint">Pinch to zoom · drag to pan · tap to inspect a sample</string>
+    <string name="session_reset_zoom">Reset</string>
+    <string name="record_tag_hint">Tag (e.g. “Pack A”, “cell 3” — searchable in History)</string>
+    <string name="save_pdf">Report (PDF)</string>
+
+    <!-- Widget / tile -->
+    <string name="widget_title">EL15 LOAD</string>
+    <string name="widget_description">Live voltage, current and power, with an emergency Load-OFF button.</string>
+    <string name="widget_tap_to_open">Tap to open</string>
+    <string name="widget_load_off">LOAD OFF</string>
+    <string name="tile_load_off">Load OFF</string>
+
+    <!-- History additions -->
+    <string name="history_search_hint">Search notes, tags, devices…</string>
+    <string name="history_tab_sweeps">R-Tests</string>
+    <string name="history_tab_sessions">Bench</string>
+    <string name="history_compare">Compare</string>
+    <string name="history_trends">Trends</string>
+    <string name="history_export_all">Export all</string>
+    <string name="history_compare_hint">Select exactly two archived tests of the same kind (long-press to select), then tap Compare.</string>
+    <string name="history_delete_session">Delete session</string>
+    <string name="history_delete_session_msg">Delete the archived %1$s? This cannot be undone.</string>
+    <string name="history_edit_tag">Edit tag</string>
+    <string name="trends_title">Trends</string>
+    <string name="trends_empty">Not enough data for a trend yet — archive at least two comparable tests.</string>
+    <string name="compare_title">Compare</string>
 </resources>

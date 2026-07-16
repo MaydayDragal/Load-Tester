@@ -477,10 +477,21 @@ class ResultActivity : BaseActivity() {
     }
 
     private fun shareReport() {
-        try {
-            Exporter.shareBitmap(this, "${baseName()}.png", buildReportBitmap(),
-                "Circuit resistance: ${formatResistance(record?.resistanceOhm ?: 0f)}")
-        } catch (e: Exception) { toast("Share failed: ${e.message}") }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.rt_share)
+            .setItems(arrayOf(getString(R.string.rt_save_report), getString(R.string.save_pdf))) { _, which ->
+                try {
+                    val subject = "Circuit resistance: ${formatResistance(record?.resistanceOhm ?: 0f)}"
+                    if (which == 0) {
+                        Exporter.shareBitmap(this, "${baseName()}.png", buildReportBitmap(), subject)
+                    } else {
+                        Exporter.share(this, "${baseName()}.pdf", "application/pdf",
+                            Exporter.pdfFromBitmap(buildReportBitmap()), subject)
+                    }
+                } catch (e: Exception) { toast("Share failed: ${e.message}") }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun exportCsvChooser() {
@@ -494,6 +505,7 @@ class ResultActivity : BaseActivity() {
     private fun saveChooser() {
         val options = arrayOf(
             getString(R.string.rt_save_report),
+            getString(R.string.save_pdf),
             getString(R.string.rt_save_csv),
             getString(R.string.rt_save_both),
         )
@@ -519,11 +531,18 @@ class ResultActivity : BaseActivity() {
     private fun doSave(which: Int) {
         val results = ArrayList<String>()
         var failed = false
-        if (which == 0 || which == 2) {
+        if (which == 0 || which == 3) {
             Exporter.saveBitmapToDownloads(this, "${baseName()}.png", buildReportBitmap())
                 ?.let { results.add(it) } ?: run { failed = true }
         }
-        if (which == 1 || which == 2) {
+        if (which == 1) {
+            try {
+                Exporter.saveToDownloads(this, "${baseName()}.pdf", "application/pdf",
+                    Exporter.pdfFromBitmap(buildReportBitmap()))
+                    ?.let { results.add(it) } ?: run { failed = true }
+            } catch (e: Exception) { failed = true }
+        }
+        if (which == 2 || which == 3) {
             Exporter.saveToDownloads(this, "${baseName()}.csv", "text/csv", buildCsv().toByteArray())
                 ?.let { results.add(it) } ?: run { failed = true }
         }

@@ -67,6 +67,16 @@ class TestRepository(context: Context) {
 
     fun count(): Int = dir.listFiles { f -> f.name.endsWith(".json") }?.size ?: 0
 
+    /** Delete oldest records beyond [keep]; 0 keeps everything. */
+    fun applyRetention(keep: Int) {
+        if (keep <= 0) return
+        val all = list()
+        if (all.size > keep) all.drop(keep).forEach { delete(it.id) }
+    }
+
+    fun files(): List<File> =
+        (dir.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: emptyArray()).toList()
+
     /** Update just the notes of an existing record. */
     fun updateNotes(id: String, notes: String): Boolean {
         val rec = load(id) ?: return false
