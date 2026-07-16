@@ -76,6 +76,12 @@
     <string name="rt_steps">Steps</string>
     <string name="rt_settle">Settle ms</string>
     <string name="rt_sample">Sample ms</string>
+    <string name="rt_calibrate">Auto-tune sweep settings</string>
+    <string name="rt_cal_stop">Stop calibration</string>
+    <string name="rt_cal_confirm_title">Auto-tune sweep settings?</string>
+    <string name="rt_cal_confirm_msg">Calibration probes the connected circuit to find a good balance of accuracy, speed and detail:\n\n1. Measures how long readings take to settle after a load step\n2. Measures the voltage noise floor to size the averaging window\n3. Runs short sweeps (5 → 8 → 12 steps) until the measured resistance converges\n\nIt will briefly draw up to %1$.2f A, takes roughly %2$s, and always switches the load off when done.</string>
+    <string name="rt_cal_result_title">Recommended sweep settings</string>
+    <string name="rt_cal_apply">Apply</string>
     <string name="cd_steps_info">What does Steps do?</string>
     <string name="cd_settle_info">What does Settle do?</string>
     <string name="cd_sample_info">What does Sample do?</string>

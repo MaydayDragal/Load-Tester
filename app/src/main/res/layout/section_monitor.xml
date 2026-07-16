@@ -246,6 +246,10 @@
                         android:layout_marginTop="14dp" android:text="@string/rt_start" android:textSize="15sp"
                         app:icon="@drawable/ic_play" app:iconGravity="textStart" />
 
+                    <com.google.android.material.button.MaterialButton android:id="@+id/calibrateButton"
+                        style="@style/BtnSecondary" android:layout_width="match_parent" android:layout_height="42dp"
+                        android:layout_marginTop="8dp" android:text="@string/rt_calibrate" />
+
                     <ProgressBar android:id="@+id/testBar"
                         style="?android:attr/progressBarStyleHorizontal"
                         android:layout_width="match_parent" android:layout_height="5dp"

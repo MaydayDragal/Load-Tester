@@ -28,6 +28,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     private lateinit var binding: ActivityMainBinding
     private lateinit var ble: El15BleManager
     private lateinit var tester: CircuitResistanceTester
+    private lateinit var calibrator: SweepCalibrator
 
     private val foundDevices = LinkedHashMap<String, BluetoothDevice>()
     private var lastStatus: El15Status? = null
@@ -79,6 +80,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
         ble = El15BleManager(this).also { it.listener = this }
         tester = CircuitResistanceTester(activeController, this)
+        calibrator = SweepCalibrator(activeController, calCallback)
         nightMode = resources.configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK
         demoEmf = Prefs.demoEmf(this)
@@ -112,6 +114,8 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         ble.pollIntervalMs = poll; simulator?.pollIntervalMs = poll
         tester.pollIntervalMs = poll
         tester.safetyFactor = Prefs.safetyFactor(this)
+        calibrator.pollIntervalMs = poll
+        calibrator.safetyFactor = Prefs.safetyFactor(this)
         // Demo circuit may have been edited in Settings; apply it live.
         val newEmf = Prefs.demoEmf(this); val newR = Prefs.demoR(this)
         if (newEmf != demoEmf || newR != demoSeriesR) {
@@ -139,8 +143,9 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
 
     override fun onDestroy() {
         super.onDestroy()
-        val wasTesting = tester.running
-        if (wasTesting) tester.stop()
+        val wasTesting = tester.running || calibrator.running
+        if (calibrator.running) calibrator.stop()
+        if (tester.running) tester.stop()
         simulator?.stop()
         // shutdownAndDisconnect writes LOAD_OFF directly on the GATT before
         // teardown — the queued writes from tester.stop() would otherwise be
@@ -237,6 +242,29 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         info(stepsLayout, R.string.rt_steps, R.string.rt_steps_info)
         info(settleLayout, R.string.rt_settle, R.string.rt_settle_info)
         info(sampleLayout, R.string.rt_sample, R.string.rt_sample_info)
+
+        calibrateButton.setOnClickListener {
+            if (calibrator.running) {
+                calibrator.stop()
+                onTestFinishedUi("Calibration stopped")
+                return@setOnClickListener
+            }
+            if (!isConnected()) { toast("Connect to the EL15 (or the demo) first"); return@setOnClickListener }
+            val fuse = fuseInput.text.toString().trim().toFloatOrNull()
+            if (fuse == null || fuse <= 0f) { toast("Enter the circuit's fuse rating in amps"); return@setOnClickListener }
+            if (fuse > 200f) { toast("That fuse rating looks too high — double-check it"); return@setOnClickListener }
+            val (peak, _) = predictedPeak(fuse)
+            val poll = Prefs.pollMs(this@MainActivity)
+            // Probes (~6s+6s) + priming + three short sweeps at default-ish timing.
+            val estS = (12_000L + 3 * (2 * poll + 300) + 25 * 2300L) / 1000L
+            val estStr = if (estS >= 120) "~${estS / 60} min" else "~${estS}s"
+            MaterialAlertDialogBuilder(this@MainActivity)
+                .setTitle(R.string.rt_cal_confirm_title)
+                .setMessage(getString(R.string.rt_cal_confirm_msg, peak * 0.5f, estStr))
+                .setPositiveButton(R.string.rt_calibrate) { _, _ -> startCalibration(fuse) }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+        }
         startTestButton.setOnClickListener {
             if (tester.running) { tester.stop(); onTestFinishedUi("Test stopped"); return@setOnClickListener }
             if (!isConnected()) { toast("Connect to the EL15 (or the demo) first"); return@setOnClickListener }
@@ -337,6 +365,54 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
             .setPositiveButton(android.R.string.ok, null).show()
     }
 
+    private fun startCalibration(fuse: Float) = with(binding.monitor) {
+        fuseInput.clearFocus()
+        testBar.visibility = View.GONE
+        testProgressText.visibility = View.VISIBLE
+        testProgressText.text = "Calibrating…"
+        calibrator.start(fuse)
+        updateControlsEnabled(true)
+    }
+
+    private val calCallback = object : SweepCalibrator.Callback {
+        override fun onCalProgress(message: String) {
+            binding.monitor.testProgressText.text = message
+        }
+
+        override fun onCalComplete(result: SweepCalibrator.CalResult) {
+            onTestFinishedUi("Calibration done — recommended ${result.steps} steps")
+            val sweeps = result.sweepResistances.joinToString(" → ") { formatOhm(it) }
+            val body = StringBuilder()
+                .append("Steps: ${result.steps}")
+                .append(if (result.converged) "  (resistance converged: $sweeps)" else "  (did not fully converge: $sweeps — using extra headroom)")
+                .append("\n\nSettle: ${result.settleMs} ms  (measured stabilization)")
+                .append("\nSample: ${result.sampleMs} ms  (noise σ %.1f mV)".format(result.noiseVolts * 1000f))
+                .append("\n\nEstimated test duration: ~${result.estimatedTestS}s")
+                .toString()
+            MaterialAlertDialogBuilder(this@MainActivity)
+                .setTitle(R.string.rt_cal_result_title)
+                .setMessage(body)
+                .setPositiveButton(R.string.rt_cal_apply) { _, _ ->
+                    with(binding.monitor) {
+                        stepsInput.setText(result.steps.toString())
+                        settleInput.setText(result.settleMs.toString())
+                        sampleInput.setText(result.sampleMs.toString())
+                    }
+                    toast("Sweep settings applied")
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+        }
+
+        override fun onCalError(message: String) {
+            onTestFinishedUi(null)
+            binding.monitor.testProgressText.text = message
+            MaterialAlertDialogBuilder(this@MainActivity)
+                .setTitle("Calibration stopped").setMessage(message)
+                .setPositiveButton(android.R.string.ok, null).show()
+        }
+    }
+
     private fun formatOhm(ohm: Float) = when {
         ohm <= 0f -> "n/a"; ohm < 1f -> "%.1f mΩ".format(ohm * 1000f); else -> "%.3f Ω".format(ohm)
     }
@@ -416,10 +492,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
             stopSimulator()
             return
         }
-        // Stop the tester BEFORE tearing BLE down, and use the safe shutdown
-        // path so the final LOAD_OFF is written even mid-sweep.
-        val wasTesting = tester.running
-        if (wasTesting) {
+        // Stop the tester/calibrator BEFORE tearing BLE down, and use the
+        // safe shutdown path so the final LOAD_OFF is written even mid-sweep.
+        val wasTesting = tester.running || calibrator.running
+        if (calibrator.running) { calibrator.stop(); onTestFinishedUi("Calibration stopped") }
+        if (tester.running) {
             tester.stop()
             onTestFinishedUi("Test stopped")
         }
@@ -523,6 +600,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         if (simulator != null) return
         val connected = state == El15BleManager.State.CONNECTED
         if (!connected && tester.running) { tester.stop(); onTestFinishedUi("Test stopped (disconnected)") }
+        if (!connected && calibrator.running) { calibrator.stop(); onTestFinishedUi("Calibration stopped (disconnected)") }
         with(binding.monitor) {
             when (state) {
                 El15BleManager.State.CONNECTED -> { connStatusText.text = "EL15"; connStatusSub.text = "Connected · FFF0" }
@@ -565,6 +643,7 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         if (!status.valid) return
         lastStatus = status
         if (tester.running) tester.onStatus(status)
+        if (calibrator.running) calibrator.onStatus(status)
 
         maxVoltageSeen = maxOf(maxVoltageSeen, status.voltage)
         val vMax = maxOf(15f, ceil((maxVoltageSeen + 3f) / 5f) * 5f)
@@ -627,7 +706,8 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
     override fun onLog(message: String) {}
 
     private fun updateControlsEnabled(connected: Boolean) = with(binding.monitor) {
-        val idle = connected && !tester.running
+        val busy = tester.running || calibrator.running
+        val idle = connected && !busy
         val deviceMode = idle && !rtestActive
         for (id in chipToMode.keys) findViewById<Chip>(id).isEnabled = idle
         chipRtest.isEnabled = idle
@@ -635,9 +715,11 @@ class MainActivity : BaseActivity(), El15BleManager.Listener, CircuitResistanceT
         lockButton.isEnabled = deviceMode
         // Enabled while disconnected on purpose: tapping it opens the scan
         // dialog (see the click handler). Only a running sweep locks it.
-        loadToggle.isEnabled = !tester.running
+        loadToggle.isEnabled = !busy
         fuseInput.isEnabled = idle; stepsInput.isEnabled = idle; settleInput.isEnabled = idle; sampleInput.isEnabled = idle
-        startTestButton.isEnabled = !tester.running || connected
+        startTestButton.isEnabled = connected && !calibrator.running
+        calibrateButton.isEnabled = connected && !tester.running
+        calibrateButton.setText(if (calibrator.running) R.string.rt_cal_stop else R.string.rt_calibrate)
     }
 
     private fun toast(msg: String) = android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
