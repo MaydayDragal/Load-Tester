@@ -624,8 +624,12 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
             }
             if (cutoff > 0f) parts += "stops at %.2f V".format(cutoff)
             val floor = n * chem.cutoffPerCell
-            val warn = if (cutoff in 0.01f..floor && cutoff < floor)
+            var warn = if (cutoff in 0.01f..floor && cutoff < floor)
                 "\n⚠ below the %s safe floor of %.2f V".format(chem.name, floor) else ""
+            val liveV = core.lastStatus?.voltage ?: 0f
+            if (cutoff > 0f && liveV > El15Protocol.MIN_VOLTAGE_V && cutoff >= liveV) {
+                warn += "\n⚠ battery reads %.2f V now — the test would stop immediately".format(liveV)
+            }
             summary.text = (if (parts.isEmpty()) getString(R.string.cap_enter_hint)
             else parts.joinToString(" · ")) + warn
         }
@@ -821,8 +825,16 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
                     which == 0 -> showDemoConfigDialog(applyLive = false) { startSimulator() }
                     which == 1 && pickerLastDevice != null -> {
                         val (addr, name) = pickerLastDevice!!
-                        core.ble.stopScan()
-                        if (!core.ble.connect(addr)) toast("Could not reconnect to $name")
+                        when {
+                            !hasPermissions() -> {
+                                toast("Grant the Bluetooth permission, then scan to reconnect")
+                                permissionLauncher.launch(requiredPermissions())
+                            }
+                            else -> {
+                                core.ble.stopScan()
+                                if (!core.ble.connect(addr)) toast("Could not reconnect to $name — is Bluetooth on?")
+                            }
+                        }
                     }
                     else -> core.foundDevices.values.toList().getOrNull(which - fixedRows)?.let { dev ->
                         Prefs.setLastDevice(this, dev.address,
@@ -979,12 +991,24 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
     override fun coreStateChanged() {
         val connected = core.isConnected
         renderConnectionState()
-        if (!connected) {
-            with(binding.monitor) {
+        // A test may have been stopped from outside this UI (notification,
+        // widget, QS tile) — resync the Start/Stop controls with the engines.
+        with(binding.monitor) {
+            if (!core.tester.running && !core.calibrator.running) {
+                startTestButton.setText(R.string.rt_start)
+                testBar.visibility = View.GONE
                 if (core.lastProgressText.isNotEmpty() && testProgressText.visibility == View.VISIBLE) {
                     testProgressText.text = core.lastProgressText
                 }
             }
+            if (!core.session.running) {
+                benchStopButton.visibility = View.GONE
+                if (core.lastProgressText.isNotEmpty() && benchProgressText.visibility == View.VISIBLE) {
+                    benchProgressText.text = core.lastProgressText
+                }
+            }
+        }
+        if (!connected) {
             onTestFinishedUi(null)
             onBenchFinishedUi(null)
             maxVoltageSeen = 0f

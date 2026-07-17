@@ -105,7 +105,12 @@ class El15BleManager(private val context: Context) : El15Controller {
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-        scanner.startScan(null, settings, scanCallback)
+        try {
+            scanner.startScan(null, settings, scanCallback)
+        } catch (e: SecurityException) {
+            setState(State.IDLE, "Bluetooth permission missing")
+            return
+        }
         val timeout = Runnable { if (state == State.SCANNING) stopScanInternal() }
         scanTimeout = timeout
         main.postDelayed(timeout, SCAN_TIMEOUT_MS)
@@ -118,7 +123,11 @@ class El15BleManager(private val context: Context) : El15Controller {
     private fun stopScanInternal() {
         scanTimeout?.let { main.removeCallbacks(it) }
         scanTimeout = null
-        adapter?.bluetoothLeScanner?.stopScan(scanCallback)
+        try {
+            adapter?.bluetoothLeScanner?.stopScan(scanCallback)
+        } catch (e: SecurityException) {
+            // Permission revoked mid-session; the scan is dead anyway.
+        }
         if (state == State.SCANNING) setState(State.IDLE, "Idle")
     }
 
@@ -127,8 +136,17 @@ class El15BleManager(private val context: Context) : El15Controller {
         stopScanInternal()
         gatt?.close() // drop any stale connection before opening a new one
         resetSession()
-        setState(State.CONNECTING, "Connecting to ${device.name ?: device.address}…")
-        gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        // device.name and connectGatt both throw SecurityException without
+        // BLUETOOTH_CONNECT (API 31+) — reachable via the quick-reconnect row,
+        // which doesn't pass through the scan permission gate.
+        val label = try { device.name ?: device.address } catch (e: SecurityException) { device.address }
+        setState(State.CONNECTING, "Connecting to $label…")
+        gatt = try {
+            device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        } catch (e: SecurityException) {
+            setState(State.IDLE, "Bluetooth permission missing")
+            null
+        }
     }
 
     /**

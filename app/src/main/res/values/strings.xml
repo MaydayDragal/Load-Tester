@@ -115,7 +115,6 @@
     <string name="bench_capacity_chem">Battery chemistry</string>
     <string name="bench_capacity_battery">Select battery</string>
     <string name="bench_capacity_custom">Custom (pick chemistry)…</string>
-    <string name="bench_capacity_msg">Open-circuit voltage now: %1$.2f V (%2$s). Cell count and cutoff are pre-filled from it — adjust if needed. Enter the rated capacity to grade state of health.</string>
     <string name="cap_cells">Cells in series</string>
     <string name="cap_rated">Rated capacity (Ah, 0 = skip state of health)</string>
     <string name="cap_current">Discharge current (A)</string>

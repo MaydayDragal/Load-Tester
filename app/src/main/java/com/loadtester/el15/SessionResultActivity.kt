@@ -13,7 +13,11 @@ import android.os.Bundle
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.print.PrintHelper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.loadtester.el15.databinding.ActivitySessionResultBinding
@@ -181,6 +185,9 @@ class SessionResultActivity : BaseActivity() {
     // ---- Battery health ------------------------------------------------------
     private data class Health(val grade: String, val color: Int, val lines: List<String>)
 
+    /** Paired R-test, loaded off the main thread in [bindHealth]. */
+    private var pairedRTest: TestRecord? = null
+
     private fun buildHealth(r: SessionRecord): Health? {
         if (r.type != SessionRecord.TYPE_CAPACITY) return null
         val soh = r.metrics["sohPct"] ?: return null
@@ -196,9 +203,7 @@ class SessionResultActivity : BaseActivity() {
             r.metrics["capacityAh"] ?: 0f, r.params["ratedAh"] ?: 0f, soh)
         // Pair with the most recent resistance test on record: internal
         // resistance + capacity together give the full health picture.
-        val rTest = TestRepository(this).list().firstOrNull {
-            it.reliable && kotlin.math.abs(it.timestampMs - r.timestampMs) < 48L * 3600_000L
-        }
+        val rTest = pairedRTest
         if (rTest != null) {
             lines += "Internal resistance %.1f mΩ (R-test %s)".format(
                 rTest.resistanceOhm * 1000f,
@@ -210,11 +215,24 @@ class SessionResultActivity : BaseActivity() {
     }
 
     private fun bindHealth(r: SessionRecord) {
-        val h = buildHealth(r) ?: run { binding.healthFrame.visibility = View.GONE; return }
-        binding.healthFrame.visibility = View.VISIBLE
-        binding.healthGrade.text = h.grade
-        binding.healthGrade.setTextColor(h.color)
-        binding.healthText.text = h.lines.joinToString("\n")
+        fun render() {
+            val h = buildHealth(r) ?: run { binding.healthFrame.visibility = View.GONE; return }
+            binding.healthFrame.visibility = View.VISIBLE
+            binding.healthGrade.text = h.grade
+            binding.healthGrade.setTextColor(h.color)
+            binding.healthText.text = h.lines.joinToString("\n")
+        }
+        render()
+        // The R-test pairing parses the whole test archive — do it off the
+        // main thread, then re-render with the internal-resistance line.
+        lifecycleScope.launch {
+            pairedRTest = withContext(Dispatchers.IO) {
+                TestRepository(this@SessionResultActivity).list().firstOrNull {
+                    it.reliable && kotlin.math.abs(it.timestampMs - r.timestampMs) < 48L * 3600_000L
+                }
+            }
+            if (pairedRTest != null) render()
+        }
     }
 
     // ---- Report --------------------------------------------------------------

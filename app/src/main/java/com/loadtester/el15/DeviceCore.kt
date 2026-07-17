@@ -164,7 +164,9 @@ class DeviceCore private constructor(private val app: Context) :
         val now = System.currentTimeMillis()
         if (now - lastAlarmMs < ALARM_COOLDOWN_MS) return
         val message = when {
-            lowV > 0f && s.voltage in 0.05f..lowV ->
+            // Only while sinking current: the alarm is for sag under load, not
+            // for a resting source that happens to sit below the threshold.
+            lowV > 0f && s.loadOn && s.voltage in 0.05f..lowV ->
                 "Voltage %.2f V is below the %.2f V alarm threshold".format(s.voltage, lowV)
             highT > 0f && s.temperature >= highT ->
                 "Load temperature %.1f °C exceeds the %.1f °C alarm threshold".format(s.temperature, highT)
@@ -313,9 +315,17 @@ class DeviceCore private constructor(private val app: Context) :
 
     /** Emergency load-off from notification / widget / tile. */
     fun emergencyLoadOff() {
+        val wasBusy = busy
         stopEngines()
         controller.setLoad(false)
         controller.setSetpoint(0f)
+        if (wasBusy) lastProgressText = "Stopped — emergency load OFF"
+        // Engines were stopped without their normal completion callbacks;
+        // broadcast a state change so any attached UI resets its Start/Stop
+        // buttons instead of showing a phantom running test.
+        each { it.coreStateChanged() }
+        MonitorService.refresh(app)
+        LiveWidget.refresh(app)
     }
 
     companion object {

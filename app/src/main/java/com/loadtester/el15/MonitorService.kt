@@ -48,16 +48,34 @@ class MonitorService : Service() {
             else -> "EL15"
         }
         val n = Notifications.monitor(this, title, sub)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(Notifications.ID_MONITOR, n,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
-        } else {
-            startForeground(Notifications.ID_MONITOR, n)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(Notifications.ID_MONITOR, n,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } else {
+                startForeground(Notifications.ID_MONITOR, n)
+            }
+        } catch (e: Exception) {
+            // API 34 gates the connectedDevice type on holding a Bluetooth (or
+            // similar) runtime permission — demo mode may hold none. Fall back
+            // to a plain notification; the core keeps running either way.
+            if (Notifications.canPost(this)) {
+                try {
+                    (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                        .notify(Notifications.ID_MONITOR, n)
+                } catch (ignored: Exception) {}
+            }
         }
     }
 
     private fun stopSelfSafely() {
         stopForeground(STOP_FOREGROUND_REMOVE)
+        // Also clear the plain-notification fallback (API 34 demo mode), which
+        // stopForeground doesn't own.
+        try {
+            (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                .cancel(Notifications.ID_MONITOR)
+        } catch (ignored: Exception) {}
         stopSelf()
     }
 

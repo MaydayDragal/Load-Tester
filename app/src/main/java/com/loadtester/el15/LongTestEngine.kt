@@ -83,6 +83,7 @@ class LongTestEngine(
     private var stepFlips = 0
     private var stepNext = 0L
     private var droopMin = Float.MAX_VALUE
+    private var droopWorst = 0f
     private var vBeforeStep = 0f
     private var recoverySumMs = 0.0
     private var recoveryCount = 0
@@ -105,7 +106,8 @@ class LongTestEngine(
         vOc = 0f
         points.clear(); ah = 0.0; wh = 0.0; cutoffHits = 0
         sampleCounter = 0; decimation = 1
-        stepHigh = false; stepFlips = 0; droopMin = Float.MAX_VALUE
+        stepHigh = false; stepFlips = 0; droopMin = Float.MAX_VALUE; droopWorst = 0f
+        vBeforeStep = 0f
         recoverySumMs = 0.0; recoveryCount = 0; awaitingRecovery = false
         rampI = 0f
 
@@ -131,6 +133,15 @@ class LongTestEngine(
         if (!running) return
         if (vOc < El15Protocol.MIN_VOLTAGE_V) { abort("No reading from the load."); return }
         if (vOc > El15Protocol.MAX_VOLTAGE_V) { abort("Source exceeds the EL15's 60 V rating."); return }
+        if (type == SessionRecord.TYPE_CAPACITY || type == SessionRecord.TYPE_RUNTIME) {
+            // A cutoff at/above the resting voltage would "complete" instantly
+            // with ~0 Ah — reject it with a message the user can act on.
+            val cutoff = params["cutoffV"] ?: 0f
+            if (cutoff > 0f && cutoff >= vOc) {
+                abort("Stop voltage (%.2f V) is at or above the battery's current %.2f V — check cells/cutoff.".format(cutoff, vOc))
+                return
+            }
+        }
 
         startedMs = System.currentTimeMillis()
         lastSampleMs = startedMs
@@ -229,12 +240,18 @@ class LongTestEngine(
         val cycles = (params["cycles"] ?: 10f).toInt()
 
         if (stepHigh) {
+            // Droop is measured against the settled pre-step voltage, so the
+            // low-load IR drop isn't misattributed to the transient.
             droopMin = min(droopMin, s.voltage)
-            if (awaitingRecovery && abs(s.voltage - vBeforeStep) <= 0.02f * vBeforeStep) {
-                recoverySumMs += (now - stepFlipMs).toDouble()
-                recoveryCount++
-                awaitingRecovery = false
-            }
+            if (vBeforeStep > 0f) droopWorst = max(droopWorst, vBeforeStep - s.voltage)
+        } else if (awaitingRecovery && vBeforeStep > 0f &&
+            abs(s.voltage - vBeforeStep) <= 0.02f * vBeforeStep) {
+            // Recovery = time from load release back into a 2% band of the
+            // pre-step voltage. (Under high load the voltage sits an IR drop
+            // below the band, so timing it there would never terminate.)
+            recoverySumMs += (now - stepFlipMs).toDouble()
+            recoveryCount++
+            awaitingRecovery = false
         }
         callback.onSessionProgress(
             "Step cycle ${stepFlips / 2 + 1}/$cycles · %.2f V @ %.3f A".format(s.voltage, s.current))
@@ -243,7 +260,12 @@ class LongTestEngine(
             stepHigh = !stepHigh
             stepFlips++
             stepFlipMs = now
-            if (stepHigh) { vBeforeStep = s.voltage; awaitingRecovery = true }
+            if (stepHigh) {
+                vBeforeStep = s.voltage
+                awaitingRecovery = false
+            } else {
+                awaitingRecovery = true
+            }
             ble.setSetpoint(if (stepHigh) params["iHigh"]!! else params["iLow"]!!)
             stepNext = now + periodMs / 2
             if (stepFlips >= cycles * 2) { completeStep(); return }
@@ -302,10 +324,9 @@ class LongTestEngine(
 
     private fun completeStep() {
         finishSafely(); state = State.IDLE
-        val droop = if (droopMin == Float.MAX_VALUE) 0f else max(0f, vOc - droopMin)
         val rec = if (recoveryCount > 0) (recoverySumMs / recoveryCount).toFloat() else 0f
         callback.onSessionComplete(buildRecord(linkedMapOf(
-            "droopV" to droop,
+            "droopV" to max(0f, droopWorst),
             "vMin" to (if (droopMin == Float.MAX_VALUE) 0f else droopMin),
             "recoveryMs" to rec,
             "cycles" to (stepFlips / 2).toFloat(),
