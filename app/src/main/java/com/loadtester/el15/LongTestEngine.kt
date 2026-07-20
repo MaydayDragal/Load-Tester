@@ -2,6 +2,7 @@ package com.loadtester.el15
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -67,7 +68,12 @@ class LongTestEngine(
     private var params = LinkedHashMap<String, Float>()
     private var deviceLabel = ""
     private var sessionTag = ""
+    /** Monotonic run start (SystemClock.elapsedRealtime) for all elapsed/dt math. */
     private var startedMs = 0L
+    /** Wall-clock run start — the only place currentTimeMillis is used, for the record's timestamp. */
+    private var startedWallMs = 0L
+    /** Set when a test is stopped/interrupted early so the archived record is flagged partial. */
+    private var aborted = false
     private val points = ArrayList<SessionRecord.TimePoint>()
     private var decimation = 1
     private var sampleCounter = 0
@@ -110,6 +116,7 @@ class LongTestEngine(
         vBeforeStep = 0f
         recoverySumMs = 0.0; recoveryCount = 0; awaitingRecovery = false
         rampI = 0f
+        aborted = false
 
         state = State.PRIME
         callback.onSessionProgress("Priming…")
@@ -119,10 +126,27 @@ class LongTestEngine(
         schedule({ beginRun() }, maxOf(1200L, 2 * pollIntervalMs + 300))
     }
 
-    fun stop() {
+    /**
+     * Stop the test. By default a run that has gathered meaningful data is
+     * archived as a *partial* record (marked aborted) rather than discarded —
+     * so a BLE dropout or an early Stop hours into a discharge never throws the
+     * accumulated capacity/energy/curve away. Pass savePartial=false to drop it.
+     */
+    fun stop(savePartial: Boolean = true) {
         if (!running) return
-        finishSafely()
-        state = State.IDLE
+        val elapsedMs = if (startedMs > 0L) SystemClock.elapsedRealtime() - startedMs else 0L
+        if (savePartial && state == State.RUN && points.size >= 2 && elapsedMs >= MIN_PARTIAL_MS) {
+            aborted = true
+            when (type) {
+                SessionRecord.TYPE_CAPACITY, SessionRecord.TYPE_RUNTIME -> completeDischarge()
+                SessionRecord.TYPE_STEP -> completeStep()
+                SessionRecord.TYPE_OCP -> completeOcp(tripped = false)
+                else -> { finishSafely(); state = State.IDLE }
+            }
+        } else {
+            finishSafely()
+            state = State.IDLE
+        }
     }
 
     private fun safePeak(): Float =
@@ -143,7 +167,8 @@ class LongTestEngine(
             }
         }
 
-        startedMs = System.currentTimeMillis()
+        startedMs = SystemClock.elapsedRealtime()
+        startedWallMs = System.currentTimeMillis()
         lastSampleMs = startedMs
         state = State.RUN
         when (type) {
@@ -164,13 +189,13 @@ class LongTestEngine(
                 params["iLow"] = min(params["iLow"] ?: 0.2f, safePeak())
                 params["iHigh"] = min(params["iHigh"] ?: 1f, safePeak())
                 stepHigh = false
-                stepNext = startedMs + (params["periodMs"] ?: 2000f).toLong() / 2
+                stepNext = SystemClock.elapsedRealtime() + (params["periodMs"] ?: 2000f).toLong() / 2
                 ble.setSetpoint(params["iLow"]!!)
                 ble.setLoad(true)
             }
             SessionRecord.TYPE_OCP -> {
                 rampI = min(params["startA"] ?: 0.2f, safePeak())
-                rampNext = startedMs + (params["dwellMs"] ?: 1500f).toLong()
+                rampNext = SystemClock.elapsedRealtime() + (params["dwellMs"] ?: 1500f).toLong()
                 ble.setSetpoint(rampI)
                 ble.setLoad(true)
             }
@@ -196,10 +221,12 @@ class LongTestEngine(
     }
 
     private fun sampleAndDrive(s: El15Status) {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         val dtH = (now - lastSampleMs) / 3_600_000.0
         lastSampleMs = now
-        if (s.loadOn) {
+        // dtH can only be <= 0 on a duplicate/reordered sample; never integrate
+        // backwards. (elapsedRealtime is monotonic, so a clock step can't do it.)
+        if (s.loadOn && dtH > 0.0) {
             ah += s.current * dtH
             wh += s.power * dtH
         }
@@ -220,6 +247,13 @@ class LongTestEngine(
         val elapsedS = (now - startedMs) / 1000
         when (type) {
             SessionRecord.TYPE_CAPACITY, SessionRecord.TYPE_RUNTIME -> {
+                // CP draws I = P/V, so current rises as the battery sags. Re-clamp
+                // the commanded power to keep current within the safety limit —
+                // the one-shot clamp in beginRun() only bounds the starting point.
+                if (type == SessionRecord.TYPE_RUNTIME && s.loadOn &&
+                    s.current > safePeak() * 1.05f) {
+                    ble.setSetpoint(max(0.1f, s.voltage * safePeak()))
+                }
                 val cutoff = params["cutoffV"] ?: 0f
                 callback.onSessionProgress(
                     "%s · %.2f V · %.3f Ah · %.2f Wh".format(
@@ -231,7 +265,7 @@ class LongTestEngine(
                 if (elapsedS > 86_400) completeDischarge()
             }
             SessionRecord.TYPE_STEP -> driveStep(s, now, elapsedS)
-            SessionRecord.TYPE_OCP -> driveOcp(s, now)
+            SessionRecord.TYPE_OCP -> driveOcp(s, now, elapsedS)
         }
     }
 
@@ -273,7 +307,10 @@ class LongTestEngine(
         if (elapsedS > 3600) completeStep()
     }
 
-    private fun driveOcp(s: El15Status, now: Long) {
+    private fun driveOcp(s: El15Status, now: Long, elapsedS: Long) {
+        // Backstop: OCP is the only ramp with no cutoff of its own, so bound it
+        // in time as well so a non-collapsing source can't sink current forever.
+        if (elapsedS > 3600) { completeOcp(tripped = false); return }
         val collapseFrac = params["collapseFrac"] ?: 0.7f
         callback.onSessionProgress("OCP ramp · %.2f A · %.2f V".format(rampI, s.voltage))
         if (s.loadOn && s.voltage < vOc * collapseFrac) {
@@ -293,21 +330,22 @@ class LongTestEngine(
     // ---- Completions ---------------------------------------------------------
     private fun buildRecord(metrics: Map<String, Float>): SessionRecord {
         val rec = SessionRecord(
-            id = "s${System.currentTimeMillis()}",
-            timestampMs = startedMs,
+            id = "s$startedWallMs",
+            timestampMs = startedWallMs,
             type = type,
             deviceLabel = deviceLabel,
         )
         rec.tag = sessionTag
         rec.params.putAll(params)
         rec.metrics.putAll(metrics)
+        if (aborted) rec.metrics["aborted"] = 1f
         rec.points.addAll(points)
         return rec
     }
 
     private fun completeDischarge() {
         finishSafely(); state = State.IDLE
-        val runtimeS = ((System.currentTimeMillis() - startedMs) / 1000).toFloat()
+        val runtimeS = ((SystemClock.elapsedRealtime() - startedMs) / 1000).toFloat()
         val metrics = linkedMapOf(
             "capacityAh" to ah.toFloat(),
             "energyWh" to wh.toFloat(),
@@ -316,7 +354,9 @@ class LongTestEngine(
             "startV" to vOc,
         )
         val rated = params["ratedAh"] ?: 0f
-        if (type == SessionRecord.TYPE_CAPACITY && rated > 0f) {
+        // A partial (aborted) discharge never reached cutoff, so its Ah is not a
+        // true capacity — don't report a misleadingly low state of health.
+        if (type == SessionRecord.TYPE_CAPACITY && rated > 0f && !aborted) {
             metrics["sohPct"] = (ah.toFloat() / rated * 100f).coerceIn(0f, 150f)
         }
         callback.onSessionComplete(buildRecord(metrics))
@@ -362,6 +402,9 @@ class LongTestEngine(
 
     companion object {
         private const val MAX_POINTS = 4000
+
+        /** Below this run time an interrupted test isn't worth archiving. */
+        private const val MIN_PARTIAL_MS = 30_000L
 
         val CHEMISTRIES = listOf(
             Chemistry("Li-ion (3.7 V)", cutoffPerCell = 3.0f, nominalPerCell = 3.7f),

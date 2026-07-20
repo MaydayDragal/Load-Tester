@@ -106,7 +106,11 @@ class SessionResultActivity : BaseActivity() {
     // ---- Text builders ------------------------------------------------------
     private fun buildSummary(r: SessionRecord): String {
         val lines = ArrayList<String>()
-        for ((k, v) in r.metrics) lines += "%-14s: %s".format(metricLabel(k), metricValue(k, v))
+        if (r.isPartial) lines += "⚠ Partial — the test was stopped or interrupted early."
+        for ((k, v) in r.metrics) {
+            if (k == "aborted") continue // surfaced as the partial banner above
+            lines += "%-14s: %s".format(metricLabel(k), metricValue(k, v))
+        }
         return lines.joinToString("\n")
     }
 

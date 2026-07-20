@@ -201,6 +201,27 @@ class El15BleManager(private val context: Context) : El15Controller {
         main.postDelayed({ if (shuttingDown) disconnect() }, SHUTDOWN_TIMEOUT_MS)
     }
 
+    /**
+     * Emergency LOAD_OFF that jumps the op queue: clears any pending/in-flight
+     * writes and pushes LOAD_OFF straight onto the GATT, so a Load-OFF from the
+     * notification / widget / tile isn't stuck behind a backlog of queued
+     * setpoint writes. Stays connected (unlike [shutdownAndDisconnect]).
+     * Returns true if the write was accepted by the stack.
+     */
+    fun emergencyOff(): Boolean {
+        val g = gatt
+        val c = writeChar
+        if (state != State.CONNECTED || g == null || c == null) return false
+        opQueue.clear()
+        opGen++            // invalidate outstanding op timeouts
+        opInFlight = false
+        return try {
+            writeFrame(g, c, El15Protocol.LOAD_OFF)
+        } catch (e: SecurityException) {
+            false
+        }
+    }
+
     private fun resetSession() {
         writeChar = null
         notifyChar = null

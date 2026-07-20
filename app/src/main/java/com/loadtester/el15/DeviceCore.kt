@@ -78,6 +78,12 @@ class DeviceCore private constructor(private val app: Context) :
 
     // ---- Connection management ---------------------------------------------
     fun startSimulator() {
+        // Tear down any real BLE link first — otherwise a connection that is
+        // still CONNECTING/CONNECTED keeps polling and its frames interleave
+        // with the simulator's through onStatus, corrupting the readouts.
+        if (ble.state != El15BleManager.State.IDLE) {
+            if (busy) ble.shutdownAndDisconnect() else ble.disconnect()
+        }
         simulator?.stop()
         val sim = El15Simulator({ s -> onStatus(s) }, demoEmf, demoSeriesR)
         sim.pollIntervalMs = Prefs.pollMs(app)
@@ -317,6 +323,9 @@ class DeviceCore private constructor(private val app: Context) :
     fun emergencyLoadOff() {
         val wasBusy = busy
         stopEngines()
+        // On a real link, push LOAD_OFF straight onto the GATT ahead of any
+        // queued writes; the queued setpoint(0) still follows as a backstop.
+        if (simulator == null) ble.emergencyOff()
         controller.setLoad(false)
         controller.setSetpoint(0f)
         if (wasBusy) lastProgressText = "Stopped — emergency load OFF"

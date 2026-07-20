@@ -35,19 +35,25 @@ data class SessionRecord(
         else -> "Session"
     }
 
-    fun headline(): String = when (type) {
-        TYPE_CAPACITY -> {
-            val ah = metrics["capacityAh"] ?: 0f
-            val soh = metrics["sohPct"]
-            if (soh != null && soh > 0f) "%.2f Ah · SoH %.0f%%".format(ah, soh)
-            else "%.2f Ah".format(ah)
+    /** True when the test was stopped/interrupted before its natural end. */
+    val isPartial: Boolean get() = (metrics["aborted"] ?: 0f) > 0f
+
+    fun headline(): String {
+        val prefix = if (isPartial) "Partial · " else ""
+        return prefix + when (type) {
+            TYPE_CAPACITY -> {
+                val ah = metrics["capacityAh"] ?: 0f
+                val soh = metrics["sohPct"]
+                if (soh != null && soh > 0f) "%.2f Ah · SoH %.0f%%".format(ah, soh)
+                else "%.2f Ah".format(ah)
+            }
+            TYPE_RUNTIME -> "Runtime %s".format(fmtDuration(metrics["runtimeS"]?.toLong() ?: 0L))
+            TYPE_STEP -> "Droop %.0f mV · rec %.0f ms".format(
+                (metrics["droopV"] ?: 0f) * 1000f, metrics["recoveryMs"] ?: 0f)
+            TYPE_OCP -> if ((metrics["tripA"] ?: 0f) > 0f) "Trip at %.2f A".format(metrics["tripA"])
+            else "No trip up to %.2f A".format(metrics["maxA"] ?: 0f)
+            else -> ""
         }
-        TYPE_RUNTIME -> "Runtime %s".format(fmtDuration(metrics["runtimeS"]?.toLong() ?: 0L))
-        TYPE_STEP -> "Droop %.0f mV · rec %.0f ms".format(
-            (metrics["droopV"] ?: 0f) * 1000f, metrics["recoveryMs"] ?: 0f)
-        TYPE_OCP -> if ((metrics["tripA"] ?: 0f) > 0f) "Trip at %.2f A".format(metrics["tripA"])
-        else "No trip up to %.2f A".format(metrics["maxA"] ?: 0f)
-        else -> ""
     }
 
     fun toJson(): JSONObject = JSONObject().apply {
