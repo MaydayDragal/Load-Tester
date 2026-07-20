@@ -12,9 +12,12 @@
 
 // ---- Colour ---------------------------------------------------------------
 #define LV_COLOR_DEPTH 16
-// Arduino_GFX draw16bitRGBBitmap expects big-endian 565; if colours look
-// swapped on your panel, flip this to 0.
-#define LV_COLOR_16_SWAP 1
+// This panel wants NO byte-swap paired with draw16bitRGBBitmap (verified against
+// Waveshare's own lv_conf.h for the C6-Touch-AMOLED-1.8, which sets SWAP 0 and
+// uses draw16bitRGBBitmap in its flush). SWAP 1 with that draw call byte-swaps
+// every pixel → garbled colours. If you ever switch flushCb to the big-endian
+// draw16bitBeRGBBitmap variant, set this back to 1.
+#define LV_COLOR_16_SWAP 0
 
 // ---- Memory ---------------------------------------------------------------
 #define LV_MEM_CUSTOM 0
@@ -51,6 +54,7 @@
 #define LV_USE_BTN 1
 #define LV_USE_LABEL 1
 #define LV_USE_TEXTAREA 1
+#define LV_USE_BTNMATRIX 1   // required by LV_USE_KEYBOARD
 #define LV_USE_KEYBOARD 1
 
 #endif  // LV_CONF_H

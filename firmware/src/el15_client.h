@@ -3,9 +3,19 @@
 // status notifications, writes command frames to FFF3, and polls at a fixed
 // rate. Reassembles status frames chunked across notifications, exactly like
 // the Android manager.
+//
+// Threading: NimBLE runs its host in its own FreeRTOS task, so the scan,
+// connect/disconnect, and notification callbacks fire OFF the Arduino loop
+// task. They must not touch LVGL or the resistance-test engine directly (LVGL
+// is not reentrant, and the test engine's buffers are pumped from loop()).
+// Instead each callback marshals a small event onto evtQueue_; drainEvents(),
+// called from loopTick() on the loop task, dispatches to onState/onStatus/
+// onDeviceFound. So every downstream consumer runs single-threaded on loop().
 #pragma once
 
 #include <NimBLEDevice.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <functional>
 #include "el15_controller.h"
 
@@ -13,7 +23,7 @@ class El15Client : public El15Controller {
  public:
   enum State { IDLE, SCANNING, CONNECTING, CONNECTED };
 
-  // Callbacks are invoked from the NimBLE/loop context on the main task.
+  // Callbacks are dispatched from drainEvents()/loopTick() on the loop task.
   std::function<void(State, const char *)> onState;
   std::function<void(const el15::Status &)> onStatus;
   // Reports each discovered EL15 candidate during a scan (address, name).
@@ -36,16 +46,28 @@ class El15Client : public El15Controller {
                                               on ? sizeof(el15::LOAD_ON) : sizeof(el15::LOAD_OFF)); }
   void setLock() override { writeFixed(el15::LOCK, sizeof(el15::LOCK)); }
 
-  // Pump periodic work (polling). Call from loop().
+  // Pump periodic work: drain queued BLE events, then poll. Call from loop().
   void loopTick();
 
-  // Internal — invoked by NimBLE callbacks (public so the callback structs reach them).
-  void handleNotify(const uint8_t *data, size_t len);
-  void handleConnect(bool ok);
-  void handleDisconnect();
-  void handleScanResult(NimBLEAdvertisedDevice *dev);
+  // Invoked by NimBLE callbacks on the HOST task — these ONLY enqueue.
+  void enqueueNotify(const uint8_t *data, size_t len);
+  void enqueueDeviceFound(const NimBLEAdvertisedDevice *dev);
+  void enqueueDisconnected();
 
  private:
+  // A BLE event marshalled from the NimBLE host task to the loop task.
+  struct Event {
+    enum Kind : uint8_t { NOTIFY, DISCONNECTED, DEVICE_FOUND } kind;
+    uint8_t len;              // NOTIFY: payload length
+    uint8_t data[64];         // NOTIFY: raw notification bytes
+    char addr[24];            // DEVICE_FOUND
+    char name[40];            // DEVICE_FOUND
+  };
+
+  void drainEvents();                                 // loop task
+  void handleNotify(const uint8_t *data, size_t len); // loop task (reassembly)
+  void handleDisconnect();                            // loop task
+
   void setState(State s, const char *info);
   void write(const el15::Frame &f) { writeRaw(f.data(), f.size()); }
   void writeFixed(const uint8_t *d, size_t n) { writeRaw(d, n); }
@@ -56,6 +78,8 @@ class El15Client : public El15Controller {
   NimBLEClient *client_ = nullptr;
   NimBLERemoteCharacteristic *writeChar_ = nullptr;
   NimBLERemoteCharacteristic *notifyChar_ = nullptr;
+
+  QueueHandle_t evtQueue_ = nullptr;
 
   // Frame reassembly buffer for status packets split across notifications.
   uint8_t frameBuf_[64];

@@ -3,31 +3,40 @@
 // NimBLE-Arduino 2.x. If you are on 1.x, the callback signatures differ
 // slightly (NimBLEAdvertisedDevice* vs const&, connect/onResult prototypes) —
 // see the README's version note.
+//
+// All NimBLE callbacks below run on the NimBLE HOST task. They do the minimum
+// possible — copy the payload and push it onto El15Client's event queue — and
+// let drainEvents() (loop task) do the parsing and fan-out. Nothing here may
+// touch LVGL or the resistance-test engine.
 
 static El15Client *g_self = nullptr;
 
 // ---- Scan callback ---------------------------------------------------------
 class ScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice *dev) override {
-    if (g_self) g_self->handleScanResult(const_cast<NimBLEAdvertisedDevice *>(dev));
+    if (g_self) g_self->enqueueDeviceFound(dev);
   }
 };
 static ScanCallbacks g_scanCallbacks;
 
 // ---- Client (connection) callback -----------------------------------------
 class ClientCallbacks : public NimBLEClientCallbacks {
-  void onConnect(NimBLEClient *) override { if (g_self) g_self->handleConnect(true); }
-  void onDisconnect(NimBLEClient *, int) override { if (g_self) g_self->handleDisconnect(); }
+  // Service discovery is done synchronously in connectTo() on the loop task, so
+  // onConnect has nothing to do here (running a blocking GATT discovery from
+  // this host-task callback can wedge the NimBLE host).
+  void onConnect(NimBLEClient *) override {}
+  void onDisconnect(NimBLEClient *, int) override { if (g_self) g_self->enqueueDisconnected(); }
 };
 static ClientCallbacks g_clientCallbacks;
 
 // ---- Notification trampoline ----------------------------------------------
 static void notifyCb(NimBLERemoteCharacteristic *, uint8_t *data, size_t len, bool) {
-  if (g_self) g_self->handleNotify(data, len);
+  if (g_self) g_self->enqueueNotify(data, len);
 }
 
 void El15Client::begin() {
   g_self = this;
+  evtQueue_ = xQueueCreate(16, sizeof(Event));
   NimBLEDevice::init("EL15-Controller");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 }
@@ -35,6 +44,52 @@ void El15Client::begin() {
 void El15Client::setState(State s, const char *info) {
   state_ = s;
   if (onState) onState(s, info);
+}
+
+// ---- Event queue (host task -> loop task) ---------------------------------
+void El15Client::enqueueNotify(const uint8_t *data, size_t len) {
+  if (!evtQueue_) return;
+  Event e;
+  e.kind = Event::NOTIFY;
+  if (len > sizeof(e.data)) len = sizeof(e.data);
+  e.len = (uint8_t)len;
+  memcpy(e.data, data, len);
+  xQueueSend(evtQueue_, &e, 0);  // drop if full; the next poll refreshes state
+}
+
+void El15Client::enqueueDeviceFound(const NimBLEAdvertisedDevice *dev) {
+  if (!evtQueue_) return;
+  // The EL15 often omits FFF0 from its advert, so surface every *named* device
+  // and verify the service after connecting (like the Android scan).
+  std::string name = dev->getName();
+  if (name.empty()) return;
+  Event e;
+  e.kind = Event::DEVICE_FOUND;
+  std::string addr = dev->getAddress().toString();
+  snprintf(e.addr, sizeof(e.addr), "%s", addr.c_str());
+  snprintf(e.name, sizeof(e.name), "%s", name.c_str());
+  xQueueSend(evtQueue_, &e, 0);  // dropping a duplicate advert is harmless
+}
+
+void El15Client::enqueueDisconnected() {
+  if (!evtQueue_) return;
+  Event e;
+  e.kind = Event::DISCONNECTED;
+  // Disconnect is rare and must not be lost, so allow a brief wait if the queue
+  // is momentarily full.
+  xQueueSend(evtQueue_, &e, pdMS_TO_TICKS(20));
+}
+
+void El15Client::drainEvents() {
+  if (!evtQueue_) return;
+  Event e;
+  while (xQueueReceive(evtQueue_, &e, 0) == pdTRUE) {
+    switch (e.kind) {
+      case Event::NOTIFY:       handleNotify(e.data, e.len); break;
+      case Event::DISCONNECTED: handleDisconnect(); break;
+      case Event::DEVICE_FOUND: if (onDeviceFound) onDeviceFound(e.addr, e.name); break;
+    }
+  }
 }
 
 // ---- Scanning --------------------------------------------------------------
@@ -53,14 +108,6 @@ void El15Client::stopScan() {
   if (state_ == SCANNING) setState(IDLE, "Idle");
 }
 
-void El15Client::handleScanResult(NimBLEAdvertisedDevice *dev) {
-  // The EL15 often omits FFF0 from its advert, so surface every *named*
-  // device and verify the service after connecting (like the Android scan).
-  std::string name = dev->getName();
-  if (name.empty()) return;
-  if (onDeviceFound) onDeviceFound(dev->getAddress().toString().c_str(), name.c_str());
-}
-
 // ---- Connection ------------------------------------------------------------
 bool El15Client::connectTo(const char *address) {
   stopScan();
@@ -74,20 +121,18 @@ bool El15Client::connectTo(const char *address) {
     setState(IDLE, "Connect failed");
     return false;
   }
-  return true;  // service discovery continues in handleConnect
-}
-
-void El15Client::handleConnect(bool) {
-  // Resolve the FFF0 service and its notify/write characteristics.
+  // Connected. Resolve the FFF0 service and its notify/write characteristics
+  // here on the loop task — never from the host-task onConnect callback.
   NimBLERemoteService *svc = client_->getService(el15::SERVICE_UUID);
-  if (!svc) { disconnect(); setState(IDLE, "Not an EL15 (no FFF0)"); return; }
+  if (!svc) { disconnect(); setState(IDLE, "Not an EL15 (no FFF0)"); return false; }
   notifyChar_ = svc->getCharacteristic(el15::NOTIFY_UUID);
   writeChar_ = svc->getCharacteristic(el15::WRITE_UUID);
-  if (!notifyChar_ || !writeChar_) { disconnect(); setState(IDLE, "EL15 characteristics missing"); return; }
+  if (!notifyChar_ || !writeChar_) { disconnect(); setState(IDLE, "EL15 characteristics missing"); return false; }
   if (notifyChar_->canNotify()) notifyChar_->subscribe(true, notifyCb);
   frameLen_ = 0;
   lastPollMs_ = 0;
   setState(CONNECTED, "Connected · FFF0");
+  return true;
 }
 
 void El15Client::handleDisconnect() {
@@ -140,6 +185,7 @@ void El15Client::handleNotify(const uint8_t *data, size_t len) {
 void El15Client::poll() { writeFixed(el15::POLL, sizeof(el15::POLL)); }
 
 void El15Client::loopTick() {
+  drainEvents();  // process queued BLE events on THIS (loop) task
   if (state_ != CONNECTED) return;
   uint32_t now = millis();
   if (now - lastPollMs_ >= pollIntervalMs) {

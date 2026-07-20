@@ -62,12 +62,17 @@ static void startDemo() {
 }
 
 static void stopAll() {
-  if (g_test.running()) g_test.stop();
+  // Capture whether a test was mid-run BEFORE stopping it: stopping the test
+  // clears the flag, so checking it afterwards would always be false and the
+  // safe LOAD_OFF-then-flush teardown would never run (mirrors the Android
+  // DeviceCore.disconnect() `wasBusy` capture).
+  bool wasBusy = g_test.running();
+  if (wasBusy) g_test.stop();
   if (g_demo) {
     g_demo = false;
     ui::onConnState(0 /* IDLE */, "Disconnected");
   } else {
-    if (g_test.running()) g_ble.shutdownAndDisconnect();
+    if (wasBusy) g_ble.shutdownAndDisconnect();  // push LOAD_OFF and let it flush
     else g_ble.disconnect();
   }
 }

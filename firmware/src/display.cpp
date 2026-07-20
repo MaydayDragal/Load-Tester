@@ -14,8 +14,11 @@ static Arduino_DataBus *g_bus = new Arduino_ESP32QSPI(
     LCD_QSPI_CS, LCD_QSPI_SCK, LCD_QSPI_D0, LCD_QSPI_D1, LCD_QSPI_D2, LCD_QSPI_D3);
 // Keep the typed SH8601 pointer so we can call its setBrightness(); g_gfx is
 // the base-class view used for drawing.
+// Arduino_GFX 1.6.x signature: (bus, rst, rotation, w, h, col/row offsets…).
+// (Older versions had a `bool ips` before w/h; passing it here shifts w/h into
+// the wrong slots and truncates the height into a uint8_t offset.)
 static Arduino_SH8601 *g_amoled = new Arduino_SH8601(
-    g_bus, LCD_RST_GPIO, 0 /* rotation */, false /* IPS */, LCD_WIDTH, LCD_HEIGHT);
+    g_bus, LCD_RST_GPIO, 0 /* rotation */, LCD_WIDTH, LCD_HEIGHT);
 static Arduino_GFX *g_gfx = g_amoled;
 
 namespace display {
@@ -72,21 +75,53 @@ void setBrightness(uint8_t level) {
   g_amoled->setBrightness(level);
 }
 
+// The AMOLED's reset/enable lines are on the on-board TCA9554 I/O expander, not
+// a GPIO. Drive expander bits 4 & 5 high (read-modify-write on the config +
+// output registers) to power/enable the panel and release it from reset, then
+// let it settle — exactly what Waveshare's demo does before gfx->begin().
+static void expanderPanelEnable() {
+#if LCD_RST_VIA_EXPANDER
+  const uint8_t bits = LCD_EXPANDER_PWR_BITS;
+  auto rmw = [&](uint8_t reg, uint8_t setMask, uint8_t clrMask) {
+    Wire.beginTransmission(IO_EXPANDER_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return;
+    Wire.requestFrom((int)IO_EXPANDER_ADDR, 1);
+    uint8_t v = Wire.available() ? Wire.read() : 0x00;
+    v = (uint8_t)((v & ~clrMask) | setMask);
+    Wire.beginTransmission(IO_EXPANDER_ADDR);
+    Wire.write(reg);
+    Wire.write(v);
+    Wire.endTransmission();
+  };
+  rmw(0x03, 0x00, bits);  // config reg: 0 = output → make bits 4,5 outputs
+  rmw(0x01, bits, 0x00);  // output reg: drive bits 4,5 high
+  delay(500);             // let the panel power rail / reset settle
+#endif
+}
+
 void begin() {
+  // I2C first: the panel reset/enable is on the TCA9554 expander, so the panel
+  // must be released from reset over I2C *before* the SH8601 bring-up.
+  Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL);
+  Wire.setClock(400000);
+  expanderPanelEnable();
+
   if (!g_gfx->begin()) {
     // Panel bring-up failed — most often a QSPI pin mismatch. Check board_config.h.
     Serial.println("[display] Arduino_GFX begin() failed — verify QSPI pins");
   }
-  g_gfx->fillScreen(BLACK);
+  g_gfx->fillScreen(RGB565_BLACK);
   setBrightness(LCD_DEFAULT_BRIGHTNESS);
-
-  Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL);
-  Wire.setClock(400000);
 
   lv_init();
   size_t bufPx = (size_t)LCD_WIDTH * BUF_LINES;
   g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
   g_buf2 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  if (!g_buf1 || !g_buf2) {
+    Serial.println("[display] LVGL draw-buffer alloc failed — reduce BUF_LINES");
+    return;  // don't hand LVGL null buffers
+  }
   lv_disp_draw_buf_init(&g_drawBuf, g_buf1, g_buf2, bufPx);
 
   lv_disp_drv_init(&g_dispDrv);

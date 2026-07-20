@@ -27,6 +27,7 @@ static lv_obj_t *btnLoad, *lblLoad, *taSetpoint, *lblSetHint;        // control
 static lv_obj_t *modeBtns[6];
 static lv_obj_t *taFuse, *taSteps, *btnStart, *lblStart, *barTest, *lblTestStatus;  // r-test
 static lv_obj_t *listDevices, *dlgConnect;
+static lv_obj_t *kb;             // shared numeric on-screen keyboard
 static bool lastLoadOn = false;  // live load state, for the toggle button
 
 static const int MODE_IDS[6] = {el15::MODE_CC, el15::MODE_CV, el15::MODE_CR,
@@ -54,6 +55,51 @@ static lv_obj_t *label(lv_obj_t *parent, const char *txt, lv_color_t color, cons
   lv_obj_set_style_text_color(l, color, 0);
   if (font) lv_obj_set_style_text_font(l, font, 0);
   return l;
+}
+
+// ---- On-screen keyboard ----------------------------------------------------
+// The board is touch-only, so numeric text fields (setpoint, fuse rating,
+// steps) need an on-screen keyboard — without one they can't be filled in and
+// the resistance test can't be started. One shared NUMBER-mode keyboard is
+// attached to whichever field is focused, and hidden when editing ends.
+static void showKeyboard(lv_obj_t *ta) {
+  if (!kb) return;
+  lv_keyboard_set_textarea(kb, ta);
+  lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(kb);
+}
+
+static void hideKeyboard() {
+  if (!kb) return;
+  lv_keyboard_set_textarea(kb, nullptr);
+  lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Shared field handler: pop the keyboard up while a field is focused and pause
+// live setpoint refresh so what the user types isn't overwritten by a poll.
+static void taFocusCb(lv_event_t *e) {
+  lv_obj_t *ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED) {
+    if (ta == taSetpoint) userEditingSetpoint = true;
+    showKeyboard(ta);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    if (ta == taSetpoint) userEditingSetpoint = false;
+    hideKeyboard();
+  } else if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    if (ta == taSetpoint) userEditingSetpoint = false;
+    hideKeyboard();
+  }
+}
+
+// The keyboard's own OK/close (checkmark / close) sends READY/CANCEL to the
+// keyboard object — dismiss it and resume live refresh.
+static void kbEventCb(lv_event_t *e) {
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    hideKeyboard();
+    userEditingSetpoint = false;
+  }
 }
 
 // ---- Connect dialog --------------------------------------------------------
@@ -168,10 +214,7 @@ static lv_obj_t *buildControlTab(lv_obj_t *tab) {
   lv_textarea_set_one_line(taSetpoint, true);
   lv_textarea_set_accepted_chars(taSetpoint, "0123456789.");
   lv_obj_set_width(taSetpoint, LV_PCT(100));
-  lv_obj_add_event_cb(taSetpoint, [](lv_event_t *e) {
-    if (lv_event_get_code(e) == LV_EVENT_FOCUSED) userEditingSetpoint = true;
-    else if (lv_event_get_code(e) == LV_EVENT_DEFOCUSED) userEditingSetpoint = false;
-  }, LV_EVENT_ALL, nullptr);
+  lv_obj_add_event_cb(taSetpoint, taFocusCb, LV_EVENT_ALL, nullptr);
   lv_obj_t *setBtn = lv_btn_create(spCard);
   label(setBtn, "Set", COL_INK, nullptr);
   lv_obj_add_event_cb(setBtn, setpointCb, LV_EVENT_CLICKED, nullptr);
@@ -201,6 +244,7 @@ static lv_obj_t *makeField(lv_obj_t *parent, const char *hint, const char *def, 
   lv_textarea_set_accepted_chars(ta, accept);
   lv_textarea_set_text(ta, def);
   lv_obj_set_width(ta, LV_PCT(100));
+  lv_obj_add_event_cb(ta, taFocusCb, LV_EVENT_ALL, nullptr);
   return ta;
 }
 
@@ -259,6 +303,15 @@ void begin(const UiActions &actions) {
   buildMonitorTab(lv_tabview_add_tab(tv, "Monitor"));
   buildControlTab(lv_tabview_add_tab(tv, "Control"));
   buildRTestTab(lv_tabview_add_tab(tv, "R-Test"));
+
+  // Shared numeric keyboard, floating over the bottom half and hidden until a
+  // text field is focused (see taFocusCb / kbEventCb).
+  kb = lv_keyboard_create(scrMain);
+  lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_NUMBER);
+  lv_obj_add_flag(kb, LV_OBJ_FLAG_FLOATING);   // keep it out of the flex layout
+  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(kb, kbEventCb, LV_EVENT_ALL, nullptr);
 }
 
 // ---- Live data in ----------------------------------------------------------
