@@ -1,0 +1,36 @@
+# ESP-IDF defaults for the EL15 controller on ESP32-C6.
+# `idf.py` seeds sdkconfig from this on first configure; tweak the rest in
+# `idf.py menuconfig`.
+
+CONFIG_IDF_TARGET="esp32c6"
+
+# Run the Arduino setup()/loop() automatically (arduino-esp32 as a component),
+# so main.cpp needs no app_main().
+CONFIG_AUTOSTART_ARDUINO=y
+CONFIG_ARDUINO_LOOP_STACK_SIZE=16384
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_FREERTOS_HZ=1000
+
+# BLE central via the NimBLE host (used by NimBLE-Arduino).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+
+# Flash + partitions. Adjust FLASHSIZE to your board (4 MB assumed).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Compiler
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- PSRAM -----------------------------------------------------------------
+# The LVGL draw buffers in display.cpp deliberately use INTERNAL DMA RAM, so
+# PSRAM is NOT required. If your board variant has quad PSRAM and you want the
+# headroom, uncomment:
+# CONFIG_SPIRAM=y
+# CONFIG_SPIRAM_MODE_QUAD=y
+# CONFIG_SPIRAM_SPEED_80M=y

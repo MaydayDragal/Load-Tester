@@ -13,6 +13,11 @@ test as the Android app in this repo.
 > iterate on your device. The [hardware checklist](#before-you-flash-verify)
 > below lists the handful of board-specific things to confirm first.
 
+Builds **two ways from one source tree** (`src/`): with **PlatformIO** or with
+**ESP-IDF** (`idf.py`). The ESP-IDF build uses arduino-esp32 as a component, so
+the same `setup()`/`loop()` code compiles unchanged either way — pick whichever
+toolchain you prefer.
+
 ## What's implemented in this pass
 
 | Feature | Status |
@@ -47,7 +52,7 @@ main.cpp            ← owns objects + routes events   (≈ DeviceCore)
 The protocol and test engines are line-for-line ports of the Kotlin, so the
 firmware talks to the load identically to the phone.
 
-## Build & flash (PlatformIO — recommended)
+## Build & flash → PlatformIO
 
 ```bash
 # from the firmware/ directory
@@ -59,19 +64,44 @@ pio device monitor      # serial log @ 115200
 The ESP32-C6 needs **arduino-esp32 3.x** (IDF 5.1+), which mainline PlatformIO
 doesn't ship yet — `platformio.ini` therefore uses the community
 [pioarduino](https://github.com/pioarduino/platform-espressif32) platform fork.
-Libraries are pinned in `lib_deps`:
+Libraries are pinned in `lib_deps` and resolved automatically:
 
 - `lvgl/lvgl @ ^8.3` — UI toolkit (config in `include/lv_conf.h`)
 - `moononournation/GFX Library for Arduino @ ^1.4` — SH8601 AMOLED driver
 - `h2zero/NimBLE-Arduino @ ^2.1` — BLE central
 
+## Build & flash → ESP-IDF
+
+The ESP-IDF project (`CMakeLists.txt`, `main/`, `sdkconfig.defaults`,
+`partitions.csv`) compiles the same `src/` tree with arduino-esp32 as a
+component. LVGL and arduino-esp32 are pulled by the component manager
+(`main/idf_component.yml`); the two Arduino-only libraries are vendored once:
+
+```bash
+cd firmware
+# one-time: drop the Arduino-only libs into components/ (see components/README.md)
+git clone --depth 1 https://github.com/moononournation/Arduino_GFX.git /tmp/agfx
+git clone --depth 1 https://github.com/h2zero/NimBLE-Arduino.git        /tmp/nimble
+cp -r /tmp/agfx/src   components/Arduino_GFX/
+cp -r /tmp/nimble/src components/NimBLE-Arduino/
+
+idf.py set-target esp32c6
+idf.py build flash monitor
+```
+
+`CONFIG_AUTOSTART_ARDUINO=y` (in `sdkconfig.defaults`) makes IDF run the
+Arduino `setup()`/`loop()`, so no `app_main()` is needed. LVGL is configured
+from `include/lv_conf.h` via `LV_CONF_INCLUDE_SIMPLE` (set in
+`main/CMakeLists.txt`); alternatively configure it through
+`idf.py menuconfig → Component config → LVGL`.
+
 ### Arduino IDE alternative
 
 Install **esp32 by Espressif 3.0.0+** (Boards Manager), select an ESP32-C6
-board, and add the three libraries above via Library Manager. Copy
+board, add the three libraries above via Library Manager, copy
 `include/lv_conf.h` next to your LVGL library folder (or keep
 `LV_CONF_INCLUDE_SIMPLE` on the include path), then open `src/*` as a sketch.
-Note NimBLE-Arduino 2.x is required — the 1.x callback signatures differ.
+NimBLE-Arduino 2.x is required — the 1.x callback signatures differ.
 
 ## Before you flash: verify
 

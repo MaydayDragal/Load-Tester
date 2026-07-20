@@ -1,0 +1,7 @@
+# Single-app layout (no OTA) sized for a 4 MB flash. The Arduino + NimBLE +
+# LVGL image is large, so the app slot is generous. Bump offsets/sizes if you
+# switch to an 8/16 MB module.
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000,
+phy_init,   data, phy,      0xf000,   0x1000,
+factory,    app,  factory,  0x10000,  0x300000,

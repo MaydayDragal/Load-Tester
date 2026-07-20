@@ -1,0 +1,13 @@
+# Managed dependencies pulled by the ESP-IDF component manager on first build.
+#
+# arduino-esp32 and LVGL come from the ESP Component Registry. Arduino_GFX and
+# NimBLE-Arduino are Arduino-only libraries not in the registry — vendor them
+# under firmware/components/ (see firmware/components/README.md); the wrapper
+# CMakeLists there build them as ESP-IDF components.
+dependencies:
+  idf:
+    version: ">=5.1"
+  espressif/arduino-esp32:
+    version: "^3.0.0"
+  lvgl/lvgl:
+    version: "~8.3.0"
