@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">EL15 Load Simulator</string>
+    <string name="subtitle">BLE peripheral · pretends to be an EL15 load</string>
+    <string name="start_adv">Start advertising</string>
+    <string name="stop_adv">Stop advertising</string>
+    <string name="circuit">Virtual circuit</string>
+    <string name="emf">Source voltage (V)</string>
+    <string name="series_r">Series resistance (Ω)</string>
+    <string name="apply">Apply circuit</string>
+    <string name="state">Simulated load state</string>
+    <string name="log_title">Received commands</string>
+    <string name="clear_log">Clear</string>
+    <string name="perm_needed">Bluetooth permission is required to advertise</string>
+    <string name="adv_name">Advertised name</string>
+</resources>

@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "EL15LoadControl"
 include(":app")
+include(":simulator")

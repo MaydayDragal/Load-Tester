@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ground"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textColor="@color/ink" android:textSize="22sp"
+            android:fontFamily="sans-serif-condensed" android:textStyle="bold" />
+        <TextView
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="@string/subtitle"
+            android:textColor="@color/steel" android:textSize="12sp"
+            android:layout_marginBottom="14dp" />
+
+        <!-- Advertise control + status -->
+        <LinearLayout
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:background="@color/surface" android:orientation="vertical" android:padding="14dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:gravity="center_vertical" android:orientation="horizontal">
+                <View android:id="@+id/advDot"
+                    android:layout_width="12dp" android:layout_height="12dp"
+                    android:background="@drawable/dot" android:backgroundTint="@color/red" />
+                <TextView android:id="@+id/advStatus"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:layout_marginStart="10dp" android:text="Idle"
+                    android:textColor="@color/ink" android:textSize="14sp" />
+            </LinearLayout>
+            <com.google.android.material.button.MaterialButton android:id="@+id/advButton"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="10dp" android:text="@string/start_adv"
+                app:backgroundTint="@color/green" android:textColor="@color/ground" />
+            <TextView android:id="@+id/connInfo"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:fontFamily="monospace"
+                android:textColor="@color/muted" android:textSize="12sp"
+                android:text="No central connected" />
+        </LinearLayout>
+
+        <!-- Virtual circuit -->
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:text="@string/circuit"
+            android:textColor="@color/muted" android:textSize="12sp"
+            android:textAllCaps="true" android:letterSpacing="0.1" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="6dp" android:background="@color/surface"
+            android:orientation="vertical" android:padding="14dp">
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:hint="@string/emf">
+                <com.google.android.material.textfield.TextInputEditText android:id="@+id/emfInput"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:inputType="numberDecimal" android:fontFamily="monospace" />
+            </com.google.android.material.textfield.TextInputLayout>
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:hint="@string/series_r">
+                <com.google.android.material.textfield.TextInputEditText android:id="@+id/resInput"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:inputType="numberDecimal" android:fontFamily="monospace" />
+            </com.google.android.material.textfield.TextInputLayout>
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:hint="@string/adv_name">
+                <com.google.android.material.textfield.TextInputEditText android:id="@+id/nameInput"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:inputType="text" android:maxLines="1" android:fontFamily="monospace" />
+            </com.google.android.material.textfield.TextInputLayout>
+            <com.google.android.material.button.MaterialButton android:id="@+id/applyButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:text="@string/apply" />
+        </LinearLayout>
+
+        <!-- Live simulated state -->
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:text="@string/state"
+            android:textColor="@color/muted" android:textSize="12sp"
+            android:textAllCaps="true" android:letterSpacing="0.1" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="6dp" android:background="@color/surface"
+            android:orientation="vertical" android:padding="14dp">
+            <TextView android:id="@+id/stateReadout"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:fontFamily="monospace" android:textColor="@color/ink" android:textSize="15sp"
+                android:text="—" />
+            <TextView android:id="@+id/stateSub"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="6dp" android:fontFamily="monospace"
+                android:textColor="@color/muted" android:textSize="12sp" android:text="" />
+        </LinearLayout>
+
+        <!-- Command log -->
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:gravity="center_vertical" android:orientation="horizontal">
+            <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                android:text="@string/log_title" android:textColor="@color/muted" android:textSize="12sp"
+                android:textAllCaps="true" android:letterSpacing="0.1" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/clearLogButton"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:minWidth="0dp" android:text="@string/clear_log" android:textSize="12sp" />
+        </LinearLayout>
+        <TextView android:id="@+id/logView"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="6dp" android:background="@color/surface"
+            android:fontFamily="monospace" android:padding="12dp"
+            android:textColor="@color/muted" android:textSize="11sp" android:text="" />
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

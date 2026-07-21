@@ -39,6 +39,10 @@ void El15Client::begin() {
   evtQueue_ = xQueueCreate(16, sizeof(Event));
   NimBLEDevice::init("EL15-Controller");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  // Request a larger ATT MTU so a 28-byte status frame arrives in a single
+  // notification. At the default 23-byte MTU the payload caps at 20 bytes and
+  // the frame would be truncated (the peripheral notify isn't auto-fragmented).
+  NimBLEDevice::setMTU(247);
 }
 
 void El15Client::setState(State s, const char *info) {
