@@ -17,6 +17,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <functional>
+#include <vector>
 #include "el15_controller.h"
 
 class El15Client : public El15Controller {
@@ -59,6 +60,7 @@ class El15Client : public El15Controller {
   struct Event {
     enum Kind : uint8_t { NOTIFY, DISCONNECTED, DEVICE_FOUND } kind;
     uint8_t len;              // NOTIFY: payload length
+    uint8_t addrType;         // DEVICE_FOUND: BLE address type (public/random)
     uint8_t data[64];         // NOTIFY: raw notification bytes
     char addr[24];            // DEVICE_FOUND
     char name[40];            // DEVICE_FOUND
@@ -80,6 +82,11 @@ class El15Client : public El15Controller {
   NimBLERemoteCharacteristic *notifyChar_ = nullptr;
 
   QueueHandle_t evtQueue_ = nullptr;
+
+  // Addresses seen during the current scan, WITH their real type (public vs
+  // random). connectTo() reuses the discovered type instead of forcing public,
+  // so random-address peers (phones, some EL15 units) connect. Loop task only.
+  std::vector<NimBLEAddress> scanAddrs_;
 
   // Frame reassembly buffer for status packets split across notifications.
   uint8_t frameBuf_[64];

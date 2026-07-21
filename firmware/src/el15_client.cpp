@@ -69,7 +69,9 @@ void El15Client::enqueueDeviceFound(const NimBLEAdvertisedDevice *dev) {
   if (name.empty()) return;
   Event e;
   e.kind = Event::DEVICE_FOUND;
-  std::string addr = dev->getAddress().toString();
+  NimBLEAddress a = dev->getAddress();
+  e.addrType = a.getType();
+  std::string addr = a.toString();
   snprintf(e.addr, sizeof(e.addr), "%s", addr.c_str());
   snprintf(e.name, sizeof(e.name), "%s", name.c_str());
   xQueueSend(evtQueue_, &e, 0);  // dropping a duplicate advert is harmless
@@ -91,13 +93,25 @@ void El15Client::drainEvents() {
     switch (e.kind) {
       case Event::NOTIFY:       handleNotify(e.data, e.len); break;
       case Event::DISCONNECTED: handleDisconnect(); break;
-      case Event::DEVICE_FOUND: if (onDeviceFound) onDeviceFound(e.addr, e.name); break;
+      case Event::DEVICE_FOUND: {
+        // Remember the address WITH its type, and surface each address only once
+        // (advertisements repeat many times per second).
+        NimBLEAddress a(std::string(e.addr), e.addrType);
+        bool known = false;
+        for (auto &x : scanAddrs_) if (x == a) { known = true; break; }
+        if (!known) {
+          scanAddrs_.push_back(a);
+          if (onDeviceFound) onDeviceFound(e.addr, e.name);
+        }
+        break;
+      }
     }
   }
 }
 
 // ---- Scanning --------------------------------------------------------------
 void El15Client::startScan(uint32_t seconds) {
+  scanAddrs_.clear();
   setState(SCANNING, "Scanning...");
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(&g_scanCallbacks, false);
@@ -120,7 +134,12 @@ bool El15Client::connectTo(const char *address) {
     client_ = NimBLEDevice::createClient();
     client_->setClientCallbacks(&g_clientCallbacks, false);
   }
-  NimBLEAddress addr(address, BLE_ADDR_PUBLIC);
+  // Reuse the address type discovered during the scan (public vs random); phones
+  // and some EL15 units advertise a random address, which a forced-public
+  // connect can't reach. Fall back to public only if we don't have it.
+  NimBLEAddress addr(std::string(address), BLE_ADDR_PUBLIC);
+  for (auto &x : scanAddrs_) if (x.toString() == std::string(address)) { addr = x; break; }
+  Serial.printf("[ble] connecting to %s (addr type %d)\n", address, addr.getType());
   if (!client_->connect(addr)) {
     setState(IDLE, "Connect failed");
     return false;
