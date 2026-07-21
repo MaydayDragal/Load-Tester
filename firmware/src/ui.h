@@ -19,6 +19,7 @@ struct UiActions {
   std::function<void()> lock;
   std::function<void(float fuse, int steps)> startRTest;
   std::function<void()> stopRTest;
+  std::function<void()> saveRTest;   // persist the last R-Test result (e.g. to SD)
 };
 
 namespace ui {

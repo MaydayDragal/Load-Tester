@@ -1,11 +1,11 @@
 #include "el15_client.h"
 
 // NimBLE-Arduino 2.x. If you are on 1.x, the callback signatures differ
-// slightly (NimBLEAdvertisedDevice* vs const&, connect/onResult prototypes) —
+// slightly (NimBLEAdvertisedDevice* vs const&, connect/onResult prototypes) -
 // see the README's version note.
 //
 // All NimBLE callbacks below run on the NimBLE HOST task. They do the minimum
-// possible — copy the payload and push it onto El15Client's event queue — and
+// possible - copy the payload and push it onto El15Client's event queue - and
 // let drainEvents() (loop task) do the parsing and fan-out. Nothing here may
 // touch LVGL or the resistance-test engine.
 
@@ -98,7 +98,7 @@ void El15Client::drainEvents() {
 
 // ---- Scanning --------------------------------------------------------------
 void El15Client::startScan(uint32_t seconds) {
-  setState(SCANNING, "Scanning…");
+  setState(SCANNING, "Scanning...");
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(&g_scanCallbacks, false);
   scan->setActiveScan(true);
@@ -115,7 +115,7 @@ void El15Client::stopScan() {
 // ---- Connection ------------------------------------------------------------
 bool El15Client::connectTo(const char *address) {
   stopScan();
-  setState(CONNECTING, "Connecting…");
+  setState(CONNECTING, "Connecting...");
   if (!client_) {
     client_ = NimBLEDevice::createClient();
     client_->setClientCallbacks(&g_clientCallbacks, false);
@@ -126,7 +126,7 @@ bool El15Client::connectTo(const char *address) {
     return false;
   }
   // Connected. Resolve the FFF0 service and its notify/write characteristics
-  // here on the loop task — never from the host-task onConnect callback.
+  // here on the loop task - never from the host-task onConnect callback.
   NimBLERemoteService *svc = client_->getService(el15::SERVICE_UUID);
   if (!svc) { disconnect(); setState(IDLE, "Not an EL15 (no FFF0)"); return false; }
   notifyChar_ = svc->getCharacteristic(el15::NOTIFY_UUID);
@@ -135,7 +135,7 @@ bool El15Client::connectTo(const char *address) {
   if (notifyChar_->canNotify()) notifyChar_->subscribe(true, notifyCb);
   frameLen_ = 0;
   lastPollMs_ = 0;
-  setState(CONNECTED, "Connected · FFF0");
+  setState(CONNECTED, "Connected - FFF0");
   return true;
 }
 

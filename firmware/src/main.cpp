@@ -95,6 +95,10 @@ void setup() {
     g_test.start(fuse);
   };
   actions.stopRTest  = []() { g_test.stop(); };
+  // TODO: persist the last R-Test result to the on-board SD card (SDMMC:
+  // CLK=11 CMD=10 D0=18). For now the UI shows the saved-file confirmation but
+  // no file is written yet.
+  actions.saveRTest  = []() { Serial.println("[rtest] SD save not yet implemented (stub)"); };
   ui::begin(actions);
 
   g_ble.onState = [](El15Client::State st, const char *info) {

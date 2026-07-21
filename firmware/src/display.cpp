@@ -42,30 +42,46 @@ static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
 }
 
 // ---- FT3168 capacitive touch (minimal I2C driver) --------------------------
-static bool readTouch(uint16_t &x, uint16_t &y) {
+// Returns: 1 = touch (x,y set), 0 = no touch, -1 = I2C read failed.
+static int readTouch(uint16_t &x, uint16_t &y) {
   // FT3168/FT6x36-family register map: 0x02 = touch count, 0x03.. = point data.
   Wire.beginTransmission(TOUCH_I2C_ADDR);
   Wire.write(0x02);
-  if (Wire.endTransmission(false) != 0) return false;
-  Wire.requestFrom(TOUCH_I2C_ADDR, 5);
-  if (Wire.available() < 5) return false;
+  if (Wire.endTransmission(false) != 0) return -1;
+  if (Wire.requestFrom(TOUCH_I2C_ADDR, 5) < 5) return -1;
   uint8_t touches = Wire.read() & 0x0F;
   uint8_t xh = Wire.read(), xl = Wire.read(), yh = Wire.read(), yl = Wire.read();
-  if (touches == 0) return false;
+  if (touches == 0) return 0;
   x = ((xh & 0x0F) << 8) | xl;
   y = ((yh & 0x0F) << 8) | yl;
-  return true;
+  return 1;
 }
 
 static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
+  // Hold the last reported state on a transient I2C failure: reporting a spurious
+  // RELEASE mid-press makes LVGL drop the click and taps feel unresponsive.
+  static lv_indev_state_t lastState = LV_INDEV_STATE_REL;
+  static lv_point_t lastPt = {0, 0};
   uint16_t x, y;
-  if (readTouch(x, y)) {
-    data->state = LV_INDEV_STATE_PR;
-    data->point.x = x;
-    data->point.y = y;
-  } else {
-    data->state = LV_INDEV_STATE_REL;
-  }
+  int r = readTouch(x, y);
+  if (r == 1) { lastState = LV_INDEV_STATE_PR; lastPt.x = x; lastPt.y = y; }
+  else if (r == 0) { lastState = LV_INDEV_STATE_REL; }
+  // r == -1: keep lastState/lastPt unchanged.
+  data->state = lastState;
+  data->point = lastPt;
+}
+
+// The FT3168 powers up in a low-power state and stops updating its touch
+// registers (0x02 stays 0) until its power mode is configured — Waveshare's
+// driver writes register 0xA5 during init. We set Active mode (continuous scan)
+// so a polled driver always sees the current touch state (0x00=Active,
+// 0x01=Monitor). Without this, touches never register.
+static void touchInit() {
+  Wire.beginTransmission(TOUCH_I2C_ADDR);
+  Wire.write(0xA5);
+  Wire.write(0x00);  // Active mode
+  Wire.endTransmission();
+  delay(20);
 }
 
 void setBrightness(uint8_t level) {
@@ -106,6 +122,7 @@ void begin() {
   Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL);
   Wire.setClock(400000);
   expanderPanelEnable();
+  touchInit();
 
   if (!g_gfx->begin()) {
     // Panel bring-up failed — most often a QSPI pin mismatch. Check board_config.h.

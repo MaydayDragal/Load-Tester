@@ -1,4 +1,4 @@
-// EL15 electronic-load BLE protocol — C++ port of El15Protocol.kt.
+// EL15 electronic-load BLE protocol - C++ port of El15Protocol.kt.
 //
 // Faithful reimplementation of the Android app's protocol layer so the ESP32
 // speaks to the load byte-for-byte identically. Ported from the DM40GUI
@@ -76,7 +76,7 @@ inline SetpointInfo setpointInfo(int mode) {
     case MODE_CAP: return {"A", 3, "Current"};
     case MODE_CV:  return {"V", 3, "Voltage"};
     case MODE_DCR: return {"A", 3, "Current"};
-    case MODE_CR:  return {"\xCE\xA9", 1, "Resistance"};  // UTF-8 Ω
+    case MODE_CR:  return {"\xCE\xA9", 1, "Resistance"};  // UTF-8 ohm
     case MODE_CP:  return {"W", 2, "Power"};
     default:       return {"?", 3, "Setpoint"};
   }

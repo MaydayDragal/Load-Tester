@@ -20,9 +20,15 @@
 #define LV_COLOR_16_SWAP 0
 
 // ---- Memory ---------------------------------------------------------------
-#define LV_MEM_CUSTOM 0
-#define LV_MEM_SIZE (48U * 1024U)
-#define LV_MEM_ADR 0
+// Use the system heap instead of a fixed LVGL pool. The redesigned UI builds
+// ~200 objects up front, which overran the old 48 KB static pool (lv_obj_create
+// returned NULL -> a child created on it dereferenced a null parent and
+// panicked). The ESP32-C6 has ample internal RAM, so let LVGL grow on demand.
+#define LV_MEM_CUSTOM 1
+#define LV_MEM_CUSTOM_INCLUDE <stdlib.h>
+#define LV_MEM_CUSTOM_ALLOC   malloc
+#define LV_MEM_CUSTOM_FREE    free
+#define LV_MEM_CUSTOM_REALLOC realloc
 
 // ---- HAL / tick -----------------------------------------------------------
 // Use the Arduino millis() as the tick source.
@@ -31,6 +37,9 @@
 #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
 
 #define LV_DPI_DEF 130
+
+// Sample the touch panel every 10 ms (default 30) for lower tap latency.
+#define LV_INDEV_DEF_READ_PERIOD 10
 
 // ---- Feature switches -----------------------------------------------------
 #define LV_USE_LOG 0
@@ -44,7 +53,12 @@
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 1
 #define LV_FONT_MONTSERRAT_20 1
+#define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_28 1
+#define LV_FONT_MONTSERRAT_34 1
+#define LV_FONT_MONTSERRAT_40 1
+#define LV_FONT_MONTSERRAT_44 1
+#define LV_FONT_MONTSERRAT_48 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 // ---- Widgets used ---------------------------------------------------------
@@ -56,6 +70,7 @@
 #define LV_USE_TEXTAREA 1
 #define LV_USE_BTNMATRIX 1   // required by LV_USE_KEYBOARD
 #define LV_USE_KEYBOARD 1
+#define LV_USE_CHART 1       // live V/I trend graph on the Home screen
 
 #endif  // LV_CONF_H
 #endif  // "Content enable"
