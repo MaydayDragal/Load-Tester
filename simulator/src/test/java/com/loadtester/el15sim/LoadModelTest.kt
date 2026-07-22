@@ -198,6 +198,47 @@ class LoadModelTest {
     }
 
     @Test
+    fun nonFiniteSetpointIsRejected() {
+        val m = LoadModel()
+        m.decode(byteArrayOf(0xAF.toByte(), 0x07, 0x03, 0x03, 0x01, LoadModel.MODE_CC.toByte()))
+        // NaN as little-endian float32.
+        val bits = java.lang.Float.floatToIntBits(Float.NaN)
+        m.decode(byteArrayOf(0xAF.toByte(), 0x07, 0x03, 0x04, 0x04,
+            bits.toByte(), (bits ushr 8).toByte(), (bits ushr 16).toByte(), (bits ushr 24).toByte()))
+        assertEquals(0f, m.setpoint, 1e-6f)
+        m.decode(byteArrayOf(0xAF.toByte(), 0x07, 0x03, 0x09, 0x01, 0x04)) // load on
+        val pkt = m.buildStatusPacket(500)
+        // Every encoded field must stay finite.
+        assertTrue(f32(pkt, 7).isFinite())
+        assertTrue(f32(pkt, 11).isFinite())
+    }
+
+    @Test
+    fun unknownModeBytesAreIgnored() {
+        val m = LoadModel()
+        val before = m.mode
+        // 0x06 would set the warn-flag bits in the status byte if accepted.
+        val d = m.decode(byteArrayOf(0xAF.toByte(), 0x07, 0x03, 0x03, 0x01, 0x06))
+        assertTrue(!d.known)
+        assertEquals(before, m.mode)
+        // Packet must not carry a forged warning.
+        val pkt = m.buildStatusPacket(0)
+        val b5 = pkt[5].toInt() and 0xFF
+        assertTrue("warn flag must not be set", (b5 and 0x06) != 0x06)
+    }
+
+    @Test
+    fun deadPackCollapsesBelowTheOldFloor() {
+        // With the battery-mode 0.05 V floor, a fully collapsed pack's terminal
+        // voltage falls below 0.1 V, so even absurdly low cutoffs terminate.
+        val m = batteryModel()
+        cc(m, 4.0f)
+        repeat(4 * 3600) { m.buildStatusPacket(1000) }
+        val v = f32(m.buildStatusPacket(1000), 7)
+        assertTrue("collapsed terminal voltage, was $v", v < 0.1f)
+    }
+
+    @Test
     fun batteryPacketsStillChecksumValid() {
         val m = batteryModel()
         cc(m, 1.0f)

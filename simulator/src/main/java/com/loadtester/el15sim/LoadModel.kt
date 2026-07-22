@@ -121,13 +121,20 @@ class LoadModel {
             }
             0x03 -> {
                 val m = cmd.getOrNull(5)?.toInt()?.and(0xFF) ?: return Decoded("MODE (short)", false)
+                // Whitelist known modes: an arbitrary byte with bits 1+2 set
+                // (0x06, 0x0E, …) would forge the warn flag in the status
+                // encoding and fake a protection trip at the central.
+                if (!MODE_NAMES.containsKey(m)) return Decoded("MODE ?%02X (ignored)".format(m), false)
                 mode = m
                 energyWh = 0f; capacityAh = 0f; runtimeSec = 0; runMsAcc = 0
-                Decoded("MODE → ${MODE_NAMES[m] ?: "?%02X".format(m)}", true)
+                Decoded("MODE → ${MODE_NAMES[m]}", true)
             }
             0x04 -> {
                 if (cmd.size < 9) return Decoded("SETPOINT (short)", false)
-                setpoint = max(f32(cmd, 5), 0f)
+                val raw = f32(cmd, 5)
+                // A non-finite float would poison every solved value and the
+                // accumulators (NaN propagates); treat it as zero.
+                setpoint = if (raw.isFinite()) max(raw, 0f) else 0f
                 Decoded("SETPOINT → %.3f".format(setpoint), true)
             }
             else -> Decoded("Unknown op 0x%02X".format(cmd[3].toInt() and 0xFF), false)
@@ -186,8 +193,12 @@ class LoadModel {
 
     private fun solve(e: Float): Pair<Float, Float> {
         if (!loadOn) return e to 0f
-        // Physical ceiling: the terminal can't be pulled below ~0.3 V.
-        val iCeil = max((e - 0.3f) / rEff, 0f)
+        // Physical ceiling: the terminal can't be pulled below a small floor.
+        // Battery mode uses a lower floor (0.05 V) so a collapsing dead pack
+        // can keep draining all the way down — a 0.3 V floor would freeze the
+        // collapse and strand any discharge cutoff set below it.
+        val vFloor = if (batteryMode) 0.05f else 0.3f
+        val iCeil = max((e - vFloor) / rEff, 0f)
         val i = when (mode) {
             MODE_CC, MODE_CAP, MODE_DCR -> min(setpoint, iCeil)
             MODE_CV -> max((e - min(setpoint, e)) / rEff, 0f)

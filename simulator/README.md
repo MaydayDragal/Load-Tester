@@ -53,6 +53,13 @@ so from the ESP's radio it is indistinguishable from a real EL15.
 
 ## Notes
 
+- The advertised name is the phone's Bluetooth adapter name (a system-wide
+  setting); the app remembers your original name and restores it when the
+  simulator stops.
+- Keep the app in the foreground (it holds the screen on while advertising):
+  the peripheral runs inside the Activity, so backgrounding the app mid-test
+  can let Android pause or kill it. Plug the phone in for long discharges.
+
 - Same package family as the main app but a distinct `applicationId`
   (`com.loadtester.el15sim`), so both install side by side.
 - The wire format is covered by unit tests (`LoadModelTest`) — decoding the

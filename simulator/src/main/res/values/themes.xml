@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.El15Sim" parent="Theme.Material3.DayNight.NoActionBar">
+    <!-- Always dark: the layouts hard-code the blueprint dark palette, and a
+         DayNight light theme would render dark text on dark surfaces. -->
+    <style name="Theme.El15Sim" parent="Theme.Material3.Dark.NoActionBar">
         <item name="colorPrimary">@color/steel</item>
         <item name="colorOnPrimary">#0B1016</item>
         <item name="android:statusBarColor">@color/ground</item>

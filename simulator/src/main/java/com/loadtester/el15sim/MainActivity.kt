@@ -30,6 +30,23 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
     /** True once the user edits the SoC field; cleared when its value is applied. */
     private var socDirty = false
 
+    /** Stops the peripheral cleanly if the user turns Bluetooth off. */
+    private val btStateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: android.content.Context?, intent: android.content.Intent?) {
+            val state = intent?.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE,
+                android.bluetooth.BluetoothAdapter.ERROR) ?: return
+            if (state == android.bluetooth.BluetoothAdapter.STATE_TURNING_OFF ||
+                state == android.bluetooth.BluetoothAdapter.STATE_OFF
+            ) {
+                if (server.isAdvertising) {
+                    server.stop()
+                    afterAdvertisingChanged(false, "Bluetooth turned off")
+                    log("✕ Bluetooth turned off — simulator stopped")
+                }
+            }
+        }
+    }
+
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -94,11 +111,18 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         }
         binding.clearLogButton.setOnClickListener { logLines.clear(); binding.logView.text = "" }
 
+        registerReceiver(btStateReceiver, android.content.IntentFilter(
+            android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED))
+
         refreshState()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        try { unregisterReceiver(btStateReceiver) } catch (ignored: Exception) {}
+        // Detach first: GATT callbacks already queued on the main handler must
+        // not call back into a destroyed Activity.
+        server.listener = null
         server.stop()
     }
 
@@ -119,7 +143,9 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
 
     private fun startServer() {
         applyCircuit()
-        if (!server.isPeripheralCapable) {
+        // Only meaningful with Bluetooth on — the capability flag also reads
+        // false while the radio is off, which would show the wrong message.
+        if (server.isBluetoothOn && !server.isPeripheralCapable) {
             binding.advStatus.text = "This phone can't act as a BLE peripheral"
         }
         server.start()
@@ -153,16 +179,24 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
             ?.coerceIn(0.01f, 1000f) ?: model.batteryCapacityAh
         model.batteryR = binding.batteryRInput.text.toString().trim().toFloatOrNull()
             ?.coerceIn(0f, 100f) ?: model.batteryR
-        binding.cellsInput.setText(model.cells.toString())
+        // Don't write the lead-acid 3/6 mapping into the (hidden) cells field —
+        // it holds the user's cell count for the other chemistries.
+        if (model.chemistry != LoadModel.CHEM_LEAD) {
+            binding.cellsInput.setText(model.cells.toString())
+        }
         binding.capacityInput.setText(fmt(model.batteryCapacityAh))
         binding.batteryRInput.setText(fmt(model.batteryR))
         // Only reset the battery's state of charge if the user actually edited
         // the field — re-applying other settings mid-discharge must not
         // silently "recharge" the pack.
         if (socDirty) {
-            binding.socInput.text.toString().trim().toFloatOrNull()?.let { pct ->
+            val pct = binding.socInput.text.toString().trim().toFloatOrNull()
+            if (pct != null) {
                 model.recharge(pct.coerceIn(0f, 100f))
                 binding.socInput.setText(fmt(pct.coerceIn(0f, 100f)))
+            } else {
+                // Unparseable/blank: don't guess — show the live SoC instead.
+                binding.socInput.setText(fmt((model.soc * 100.0).toFloat()))
             }
             socDirty = false
         }
@@ -184,6 +218,10 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         binding.advButton.text = getString(if (active) R.string.stop_adv else R.string.start_adv)
         binding.advButton.backgroundTintList = android.content.res.ColorStateList.valueOf(
             ContextCompat.getColor(this, if (active) R.color.red else R.color.green))
+        // Hold the screen while acting as the load: with the screen off, Doze /
+        // process death could silently end an hours-long simulated discharge.
+        if (active) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     override fun onCentralConnected(address: String) {
