@@ -237,8 +237,15 @@ static bool engineBusy() { return rtPhase == RT_RUN || btPhase == BT_RUN || btPh
 static bool battSaved = false;
 // Downsampled V-vs-time curve: fixed buffer whose sample stride doubles when
 // full, so it always spans the whole test in bounded memory.
-static const int BATT_HIST_N = 120;
-static float btHistV[BATT_HIST_N];
+// Discharge-curve storage: a dense voltage reservoir (halved when it fills, to
+// stay bounded) that is RESAMPLED onto the chart every refresh. Drawing always
+// stretches the whole reservoir across the full chart width against a live
+// [0, elapsed] axis, so the time axis grows continuously in real time instead
+// of jumping when the buffer decimates. The reservoir is much larger than the
+// chart so its (rare) halving never drops the drawn resolution below full.
+static const int BATT_RES_N = 480;    // raw voltage reservoir
+static const int BATT_CHART_N = 120;  // points actually drawn on the chart
+static float btHistV[BATT_RES_N];
 static int btHistN = 0, btHistStride = 1, btHistAcc = 0;
 static uint32_t btLastElapsed = 0;
 
@@ -1351,9 +1358,9 @@ static void battHistReset() { btHistN = 0; btHistStride = 1; btHistAcc = 0; btLa
 static void battHistPush(float v) {
   if (++btHistAcc < btHistStride) return;
   btHistAcc = 0;
-  if (btHistN == BATT_HIST_N) {          // full: halve resolution, double stride
-    for (int k = 0; k < BATT_HIST_N / 2; k++) btHistV[k] = btHistV[k * 2];
-    btHistN = BATT_HIST_N / 2;
+  if (btHistN == BATT_RES_N) {           // full: halve resolution, double stride
+    for (int k = 0; k < BATT_RES_N / 2; k++) btHistV[k] = btHistV[k * 2];
+    btHistN = BATT_RES_N / 2;
     btHistStride *= 2;
   }
   btHistV[btHistN++] = v;
@@ -1366,8 +1373,21 @@ static void battChartRefresh() {
   if (hi - lo < 0.2f) { lo -= 0.1f; hi += 0.1f; }
   float p = (hi - lo) * 0.10f;
   lv_chart_set_range(btChart, LV_CHART_AXIS_PRIMARY_Y, (lv_coord_t)((lo - p) * 100), (lv_coord_t)((hi + p) * 100));
-  for (int k = 0; k < BATT_HIST_N; k++)
-    lv_chart_set_value_by_id(btChart, btSer, k, k < btHistN ? (lv_coord_t)(btHistV[k] * 100) : LV_CHART_POINT_NONE);
+  // Resample the reservoir across the full chart width: chart point j maps to
+  // time fraction j/(BATT_CHART_N-1) of the whole run, so the curve always
+  // spans [0, elapsed] and the time axis grows smoothly every refresh.
+  for (int j = 0; j < BATT_CHART_N; j++) {
+    float v;
+    if (btHistN == 1) {
+      v = btHistV[0];
+    } else {
+      float sf = (float)j * (btHistN - 1) / (BATT_CHART_N - 1);
+      int i0 = (int)sf;
+      if (i0 >= btHistN - 1) v = btHistV[btHistN - 1];
+      else { float f = sf - i0; v = btHistV[i0] * (1 - f) + btHistV[i0 + 1] * f; }
+    }
+    lv_chart_set_value_by_id(btChart, btSer, j, (lv_coord_t)(v * 100));
+  }
   char b[24];
   snprintf(b, sizeof(b), "%.2f-%.2f V", lo, hi); lv_label_set_text(btChartYLbl, b);
   char el[16];
@@ -1547,7 +1567,7 @@ static void buildBatt() {
   lv_obj_set_style_width(btChart, 0, LV_PART_INDICATOR);
   lv_obj_set_style_height(btChart, 0, LV_PART_INDICATOR);
   lv_chart_set_type(btChart, LV_CHART_TYPE_LINE);
-  lv_chart_set_point_count(btChart, BATT_HIST_N);  // fixed capacity, no reallocs
+  lv_chart_set_point_count(btChart, BATT_CHART_N);  // fixed capacity, no reallocs
   lv_chart_set_div_line_count(btChart, 3, 4);
   btSer = lv_chart_add_series(btChart, COL_GREEN, LV_CHART_AXIS_PRIMARY_Y);
   lv_obj_t *chartRng = cont(btChartCard);
