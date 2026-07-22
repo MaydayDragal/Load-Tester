@@ -31,26 +31,38 @@ class El15Simulator : public El15Controller {
   void setLoad(bool on) override { loadOn_ = on; if (!on) { runtimeSec_ = 0; runMsAcc_ = 0; } }
   void setLock() override { lockOn_ = !lockOn_; }
 
+  // Battery emulation for the demo capacity test: while active, the source emf
+  // sags as charge is drawn — a li-ion-ish plateau with a fast tail, ending
+  // ~40 % below full so any sane cutoff voltage is crossed near empty.
+  void battStart(float ah) { battAh_ = ah; battDrawn_ = 0; }
+  void battStop() { battAh_ = 0; }
+
   // Produce a status snapshot for the current state; call at the poll rate.
   el15::Status tick(uint32_t dtMs) {
     float rEff = seriesR < 0.001f ? 0.001f : seriesR;
-    float current = 0, voltage = emf;
+    float e = emf;
+    if (battAh_ > 0) {
+      float soc = 1.0f - battDrawn_ / battAh_;
+      if (soc < 0) soc = 0;
+      e = emf * (0.60f + 0.40f * powf(soc, 0.25f));
+    }
+    float current = 0, voltage = e;
     if (loadOn_) {
-      float iCeil = (emf - 0.3f) / rEff;
+      float iCeil = (e - 0.3f) / rEff;
       switch (mode_) {
         case el15::MODE_CV: {
-          float vSet = setpoint_ < emf ? setpoint_ : emf;
-          current = (emf - vSet) / rEff; if (current < 0) current = 0;
+          float vSet = setpoint_ < e ? setpoint_ : e;
+          current = (e - vSet) / rEff; if (current < 0) current = 0;
           break;
         }
         case el15::MODE_CR: {
           float rLoad = setpoint_ < 0.01f ? 0.01f : setpoint_;
-          current = emf / (rEff + rLoad);
+          current = e / (rEff + rLoad);
           break;
         }
         case el15::MODE_CP: {
-          float disc = emf * emf - 4 * rEff * setpoint_;
-          current = disc <= 0 ? iCeil : min((emf - sqrtf(disc)) / (2 * rEff), iCeil);
+          float disc = e * e - 4 * rEff * setpoint_;
+          current = disc <= 0 ? iCeil : min((e - sqrtf(disc)) / (2 * rEff), iCeil);
           break;
         }
         default:  // CC / CAP / DCR
@@ -59,12 +71,13 @@ class El15Simulator : public El15Controller {
       }
       if (current < 0) current = 0;
       if (current > el15::MAX_CURRENT_A) current = el15::MAX_CURRENT_A;
-      voltage = emf - current * rEff; if (voltage < 0) voltage = 0;
+      voltage = e - current * rEff; if (voltage < 0) voltage = 0;
       runMsAcc_ += dtMs;
       runtimeSec_ = runMsAcc_ / 1000;
       float dtH = dtMs / 3600000.0f;
       energyWh_ += voltage * current * dtH;
       capacityAh_ += current * dtH;
+      if (battAh_ > 0) battDrawn_ += current * dtH;
     }
 
     el15::Status s;
@@ -92,6 +105,7 @@ class El15Simulator : public El15Controller {
   int runtimeSec_ = 0;
   uint32_t runMsAcc_ = 0;
   float energyWh_ = 0, capacityAh_ = 0;
+  float battAh_ = 0, battDrawn_ = 0;
   uint32_t rng_ = 0x2545F491;
 
   float withNoise(float v) {

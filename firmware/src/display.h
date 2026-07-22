@@ -15,5 +15,25 @@ void loopTick();
 
 // AMOLED brightness, 0..255 (SH8601 write-brightness command).
 void setBrightness(uint8_t level);
+uint8_t getBrightness();
+
+// System info for the Settings screen. I2C reads — call from the loop task only.
+// chargeState: 1-3 = charging phases, 4 = charge done, else not charging.
+bool batteryStats(int &percent, int &milliVolt, int &chargeState, bool &present);
+// Returns false when the RTC is absent or its oscillator-stop flag says the
+// time was never set.
+bool rtcTime(int &year, int &mon, int &day, int &hour, int &min, int &sec);
+
+// ---- Physical buttons ------------------------------------------------------
+// BOOT is a GPIO; PWR is read from the PMIC's latched key IRQs. Poll from the
+// loop task; each event is reported exactly once.
+enum ButtonEvent { BTN_NONE, BTN_BOOT_SHORT, BTN_BOOT_LONG, BTN_PWR_SHORT, BTN_PWR_LONG };
+ButtonEvent pollButtons();
+
+// Display sleep: blanks the panel (AMOLED black draws no current) and makes
+// the touch layer inert so blind taps can't change anything. Any button press,
+// or a tap on the dark screen, wakes it.
+void setSleep(bool on);
+bool asleep();
 
 }  // namespace display

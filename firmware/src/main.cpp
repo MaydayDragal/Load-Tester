@@ -17,6 +17,7 @@
 
 #include <Arduino.h>
 
+#include "capacity_test.h"
 #include "display.h"
 #include "el15_client.h"
 #include "el15_controller.h"
@@ -42,11 +43,13 @@ struct RoutingController : El15Controller {
 } g_router;
 
 static ResistanceTest g_test(&g_router);
+static CapacityTest g_batt(&g_router);
 
 // ---- Status routing --------------------------------------------------------
 static void handleStatus(const el15::Status &s) {
   ui::onStatus(s);
   if (g_test.running()) g_test.onStatus(s);
+  if (g_batt.running()) g_batt.onStatus(s);
 }
 
 // ---- Demo simulator pump ---------------------------------------------------
@@ -61,13 +64,28 @@ static void startDemo() {
   ui::onConnState(3 /* CONNECTED */, "Demo simulator");
 }
 
+// Hardware emergency stop (BOOT button): kill the load NOW, from any screen or
+// state, without needing to aim at a touch target. Stops whichever engine is
+// running (each engine's stop() leaves the load OFF) and, if the user was
+// driving the load manually, pushes an explicit LOAD_OFF too.
+static void emergencyStop() {
+  bool acted = false;
+  if (g_test.running()) { g_test.stop(); acted = true; }
+  if (g_batt.running()) { g_batt.stop("Emergency stop"); acted = true; }
+  activeController()->setLoad(false);   // manual-load case (and belt-and-braces)
+  activeController()->setSetpoint(0);
+  Serial.println("[btn] EMERGENCY STOP");
+  ui::onEmergencyStop(acted);
+}
+
 static void stopAll() {
   // Capture whether a test was mid-run BEFORE stopping it: stopping the test
   // clears the flag, so checking it afterwards would always be false and the
   // safe LOAD_OFF-then-flush teardown would never run (mirrors the Android
   // DeviceCore.disconnect() `wasBusy` capture).
-  bool wasBusy = g_test.running();
-  if (wasBusy) g_test.stop();
+  bool wasBusy = g_test.running() || g_batt.running();
+  if (g_test.running()) g_test.stop();
+  if (g_batt.running()) g_batt.stop("Disconnected");
   if (g_demo) {
     g_demo = false;
     ui::onConnState(0 /* IDLE */, "Disconnected");
@@ -81,6 +99,16 @@ void setup() {
   Serial.begin(115200);
   display::begin();
 
+  // Report why the last reset happened — distinguishes a firmware panic from a
+  // brownout or watchdog when chasing spontaneous reboots in the field.
+  esp_reset_reason_t rr = esp_reset_reason();
+  const char *rrs = rr == ESP_RST_POWERON ? "power-on" : rr == ESP_RST_SW ? "software"
+                  : rr == ESP_RST_PANIC ? "PANIC" : rr == ESP_RST_INT_WDT ? "INT-WDT"
+                  : rr == ESP_RST_TASK_WDT ? "TASK-WDT" : rr == ESP_RST_WDT ? "WDT"
+                  : rr == ESP_RST_BROWNOUT ? "BROWNOUT" : rr == ESP_RST_USB ? "USB"
+                  : "other";
+  Serial.printf("[boot] reset reason: %s (%d)\n", rrs, (int)rr);
+
   UiActions actions;
   actions.scan       = []() { ui::clearDevices(); g_ble.startScan(8); };
   actions.connect    = [](const char *addr) { g_demo = false; g_ble.connectTo(addr); };
@@ -90,7 +118,12 @@ void setup() {
   actions.setSetpoint= [](float v) { activeController()->setSetpoint(v); };
   actions.setLoad    = [](bool on) { activeController()->setLoad(on); };
   actions.lock       = []() { activeController()->setLock(); };
+  actions.setPollRate = [](int ms) {
+    g_ble.pollIntervalMs = (uint32_t)ms;   // BLE poll + demo pump cadence
+    g_test.pollIntervalMs = (uint32_t)ms;  // R-test settle/collect floors adapt
+  };
   actions.startRTest = [](float fuse, int steps) {
+    if (g_batt.running()) return;   // never let two engines drive the load
     g_test.steps = steps;
     g_test.start(fuse);
   };
@@ -99,10 +132,22 @@ void setup() {
   // CLK=11 CMD=10 D0=18). For now the UI shows the saved-file confirmation but
   // no file is written yet.
   actions.saveRTest  = []() { Serial.println("[rtest] SD save not yet implemented (stub)"); };
+  actions.startBatt  = [](float cutoffV, float amps) {
+    if (g_test.running()) return;   // never let two engines drive the load
+    if (g_demo) g_sim.battStart(0.25f);  // fresh 0.25 Ah demo pack per run
+    g_batt.cutoffV = cutoffV;
+    g_batt.dischargeA = amps;
+    g_batt.start();
+  };
+  actions.stopBatt   = []() { g_batt.stop(); };
+  actions.saveBatt   = []() { Serial.println("[batt] SD save not yet implemented (stub)"); };
   ui::begin(actions);
 
   g_ble.onState = [](El15Client::State st, const char *info) {
-    if (st != El15Client::CONNECTED && g_test.running()) g_test.stop();  // safe-off on drop
+    if (st != El15Client::CONNECTED) {  // safe-off on drop
+      if (g_test.running()) g_test.stop();
+      if (g_batt.running()) g_batt.stop("Connection lost");
+    }
     ui::onConnState((int)st, info);
   };
   g_ble.onStatus = handleStatus;
@@ -112,12 +157,51 @@ void setup() {
   g_test.onProgress = [](int s, int t, float tgt, float v, float i) { ui::onTestProgress(s, t, tgt, v, i); };
   g_test.onComplete = [](const ResistanceTest::Result &r) { ui::onTestComplete(r); };
   g_test.onError    = [](const char *m) { ui::onTestError(m); };
+
+  g_batt.onProgress = [](float v, float i, float ah, float wh, float temp, uint32_t el, int ph) {
+    ui::onBattProgress(v, i, ah, wh, temp, el, ph);
+  };
+  g_batt.onComplete = [](const CapacityTest::Result &r) {
+    g_sim.battStop();
+    Serial.printf("[batt] done: %.3f Ah, %.1f Wh in %lus (%s)\n",
+                  r.capacityAh, r.energyWh, (unsigned long)r.durationS, r.stopReason);
+    ui::onBattComplete(r);
+  };
+  g_batt.onError = [](const char *m) {
+    g_sim.battStop();
+    Serial.printf("[batt] error: %s\n", m);
+    ui::onBattError(m);
+  };
+}
+
+// ---- Physical buttons ------------------------------------------------------
+static void handleButtons() {
+  switch (display::pollButtons()) {
+    case display::BTN_BOOT_SHORT:
+    case display::BTN_BOOT_LONG:
+      // BOOT = hardware emergency stop. Wake the screen first so the user sees
+      // the acknowledgement, then kill the load.
+      if (display::asleep()) display::setSleep(false);
+      emergencyStop();
+      break;
+    case display::BTN_PWR_SHORT:
+      display::setSleep(!display::asleep());   // toggle display sleep
+      break;
+    case display::BTN_PWR_LONG:
+      // A held PWR key reads as "wake" only; leave hardware power-off to the
+      // PMIC's own long-press handling so we never fight it.
+      if (display::asleep()) display::setSleep(false);
+      break;
+    default: break;
+  }
 }
 
 void loop() {
   display::loopTick();
+  handleButtons();
   g_ble.loopTick();
   g_test.tick();
+  g_batt.tick();
 
   if (g_demo) {
     uint32_t now = millis();

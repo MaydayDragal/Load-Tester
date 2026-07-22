@@ -5,6 +5,7 @@
 #pragma once
 
 #include <functional>
+#include "capacity_test.h"
 #include "el15_protocol.h"
 #include "resistance_test.h"
 
@@ -17,9 +18,13 @@ struct UiActions {
   std::function<void(float value)> setSetpoint;
   std::function<void(bool on)> setLoad;
   std::function<void()> lock;
+  std::function<void(int ms)> setPollRate;   // status sampling interval
   std::function<void(float fuse, int steps)> startRTest;
   std::function<void()> stopRTest;
   std::function<void()> saveRTest;   // persist the last R-Test result (e.g. to SD)
+  std::function<void(float cutoffV, float amps)> startBatt;
+  std::function<void()> stopBatt;
+  std::function<void()> saveBatt;    // persist the last capacity result (stub until SD)
 };
 
 namespace ui {
@@ -35,5 +40,13 @@ void clearDevices();
 void onTestProgress(int step, int total, float target, float v, float i);
 void onTestComplete(const ResistanceTest::Result &r);
 void onTestError(const char *msg);
+
+void onBattProgress(float v, float i, float ah, float wh, float temp, uint32_t elapsedS, int phase);
+void onBattComplete(const CapacityTest::Result &r);
+void onBattError(const char *msg);
+
+// Hardware emergency stop (BOOT button): show the acknowledgement banner and
+// unstick any running-test view.
+void onEmergencyStop(bool wasTestRunning);
 
 }  // namespace ui

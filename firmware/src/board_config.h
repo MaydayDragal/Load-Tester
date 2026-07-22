@@ -1,8 +1,16 @@
 // Board configuration for the Waveshare ESP32-C6-Touch-AMOLED-1.8.
 //
-//   Panel : 1.8" AMOLED, 368 x 448, SH8601 controller over QSPI
-//   Touch : FT3168 capacitive, I2C
-//   MCU   : ESP32-C6 (RISC-V, BLE 5)
+//   Panel : 1.8" AMOLED, 368 x 448, QSPI. Waveshare's spec names the driver
+//           CO5300; we drive it with Arduino_GFX's Arduino_SH8601, whose
+//           command set this controller accepts (verified working on hardware).
+//   Touch : capacitive over I2C. Waveshare's spec names CST820; the part on
+//           this unit answers on the FocalTech (FT3168/FT6x36) register map.
+//           display.cpp initialises for both — see touchInit().
+//   MCU   : ESP32-C6 (RISC-V, Wi-Fi 6 / BLE 5 / 802.15.4)
+//   RAM   : 512 KB on-chip HP SRAM. There is NO PSRAM on this board, which is
+//           why LVGL uses a partial (1/8 frame) draw buffer.
+//   Also on board, currently unused by this firmware: QMI8658 6-axis IMU,
+//   TF/SD card slot, PWR + BOOT programmable buttons, RTC backup-battery pads.
 //
 // ┌─────────────────────────────────────────────────────────────────────────┐
 // │ VERIFY THESE PINS against Waveshare's own Arduino demo for THIS board     │
@@ -47,6 +55,24 @@
 #define TOUCH_I2C_ADDR 0x38
 #define TOUCH_RST_GPIO -1
 #define TOUCH_INT_GPIO 15
+
+// ---- Power management / RTC (same shared I2C bus as touch) ------------------
+#define PMIC_I2C_ADDR 0x34   // AXP2101 battery/power management
+#define RTC_I2C_ADDR  0x51   // PCF85063 real-time clock
+
+// AXP2101 interrupt registers. The PWR key is wired to the PMIC's PWRKEY pin,
+// not to a GPIO, so its presses arrive as IRQ status bits we poll and clear.
+#define PMIC_REG_INTEN2  0x41   // IRQ enable  bank 2
+#define PMIC_REG_INTSTS2 0x49   // IRQ status  bank 2 (write 1 to clear)
+#define PMIC_IRQ_PKEY_SHORT (1 << 3)
+#define PMIC_IRQ_PKEY_LONG  (1 << 2)
+
+// ---- Buttons ---------------------------------------------------------------
+// BOOT is the standard ESP32-C6 strapping button on GPIO9: pulled up, pressed
+// pulls it LOW. Safe to read at runtime (it only matters during reset).
+#define BOOT_BTN_GPIO 9
+#define BTN_DEBOUNCE_MS  40
+#define BTN_LONG_PRESS_MS 1200
 
 // ---- Backlight / brightness ------------------------------------------------
 // AMOLED brightness is a controller command (0x51), handled in display.cpp;

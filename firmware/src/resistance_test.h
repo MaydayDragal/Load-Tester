@@ -113,7 +113,7 @@ class ResistanceTest {
     float fuseCap = fuseRating_ * safetyFactor;
     float powerCap = el15::MAX_POWER_W / voc;
     maxCurrent_ = min(min(fuseCap, el15::MAX_CURRENT_A), min(powerCap, ABS_MAX_CURRENT));
-    if (maxCurrent_ < MIN_TEST_CURRENT) { abort_("Safe test current too low — check the fuse rating."); return; }
+    if (maxCurrent_ < MIN_TEST_CURRENT) { abort_("Safe test current too low - check the fuse rating."); return; }
     int n = constrain(steps, 2, MAX_STEPS);
     for (int k = 1; k <= n; k++) targets_.push_back(maxCurrent_ * k / n);
     beginStep(0);
@@ -151,7 +151,7 @@ class ResistanceTest {
   }
 
   void complete() {
-    if (results_.size() < 2) { abort_("Too few samples — increase the sample window or lower the poll interval."); return; }
+    if (results_.size() < 2) { abort_("Too few samples - increase the sample window or lower the poll interval."); return; }
     finishSafely();
     state_ = IDLE;
     if (onComplete) onComplete(computeResult());

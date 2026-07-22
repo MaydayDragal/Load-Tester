@@ -15,9 +15,11 @@
 namespace el15 {
 
 // ---- GATT UUIDs (16-bit, expanded to the Bluetooth base UUID) -------------
-static const char *SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb";
-static const char *NOTIFY_UUID  = "0000fff1-0000-1000-8000-00805f9b34fb";
-static const char *WRITE_UUID   = "0000fff3-0000-1000-8000-00805f9b34fb";
+// constexpr, not `static const char *`: the latter gave every translation unit
+// its own copy (and an unused-variable warning in the TUs that don't connect).
+inline constexpr const char *SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb";
+inline constexpr const char *NOTIFY_UUID  = "0000fff1-0000-1000-8000-00805f9b34fb";
+inline constexpr const char *WRITE_UUID   = "0000fff3-0000-1000-8000-00805f9b34fb";
 
 // ---- Fixed command frames (captured, replayed verbatim) -------------------
 static const uint8_t POLL[]     = {0xAF, 0x07, 0x03, 0x08, 0x00, 0x3F};
