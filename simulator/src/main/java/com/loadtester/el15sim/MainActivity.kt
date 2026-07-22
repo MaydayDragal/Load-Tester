@@ -60,6 +60,12 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         binding.chemDropdown.setAdapter(android.widget.ArrayAdapter(
             this, android.R.layout.simple_list_item_1, LoadModel.CHEM_NAMES))
         binding.chemDropdown.setText(LoadModel.CHEM_NAMES[model.chemistry], false)
+        binding.chemDropdown.setOnItemClickListener { _, _, _, _ -> updateBatteryFields() }
+
+        binding.leadVoltDropdown.setAdapter(android.widget.ArrayAdapter(
+            this, android.R.layout.simple_list_item_1, LEAD_VOLTAGES))
+        binding.leadVoltDropdown.setText(LEAD_VOLTAGES[1], false)  // 12 V default
+        updateBatteryFields()
 
         binding.sourceToggle.check(if (model.batteryMode) R.id.srcBattery else R.id.srcFixed)
         binding.sourceToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
@@ -119,6 +125,13 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         server.start()
     }
 
+    /** Lead-acid is configured by nominal voltage, everything else by cells. */
+    private fun updateBatteryFields() {
+        val lead = binding.chemDropdown.text.toString() == LoadModel.CHEM_NAMES[LoadModel.CHEM_LEAD]
+        binding.cellsLayout.visibility = if (lead) android.view.View.GONE else android.view.View.VISIBLE
+        binding.leadVoltLayout.visibility = if (lead) android.view.View.VISIBLE else android.view.View.GONE
+    }
+
     // ---- Source editing ----------------------------------------------------
     private fun applyCircuit() {
         // Fixed circuit.
@@ -130,7 +143,12 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         // Battery pack.
         val chemIdx = LoadModel.CHEM_NAMES.indexOf(binding.chemDropdown.text.toString())
         if (chemIdx >= 0) model.chemistry = chemIdx
-        model.cells = binding.cellsInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 30) ?: model.cells
+        model.cells = if (model.chemistry == LoadModel.CHEM_LEAD) {
+            // Lead-acid is picked as a 6 V or 12 V battery (3 or 6 internal cells).
+            if (binding.leadVoltDropdown.text.toString().startsWith("6")) 3 else 6
+        } else {
+            binding.cellsInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 30) ?: model.cells
+        }
         model.batteryCapacityAh = binding.capacityInput.text.toString().trim().toFloatOrNull()
             ?.coerceIn(0.01f, 1000f) ?: model.batteryCapacityAh
         model.batteryR = binding.batteryRInput.text.toString().trim().toFloatOrNull()
@@ -219,4 +237,8 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
     }
 
     private fun fmt(v: Float) = if (v == v.toLong().toFloat()) v.toLong().toString() else v.toString()
+
+    companion object {
+        private val LEAD_VOLTAGES = listOf("6 V", "12 V")
+    }
 }

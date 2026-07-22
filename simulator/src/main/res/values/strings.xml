@@ -10,6 +10,7 @@
     <string name="series_r">Series resistance (Ω)</string>
     <string name="chemistry">Chemistry</string>
     <string name="cells">Cells in series</string>
+    <string name="lead_voltage">Battery voltage</string>
     <string name="capacity">Capacity (Ah)</string>
     <string name="internal_r">Internal resistance (Ω)</string>
     <string name="initial_soc">State of charge (%)</string>

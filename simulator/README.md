@@ -23,8 +23,9 @@ so from the ESP's radio it is indistinguishable from a real EL15.
    - **Fixed circuit** — source voltage (emf) + series resistance. Never
      depletes; a resistance test run against it recovers exactly these values.
    - **Battery** — chemistry (Li-ion / LiFePO₄ / lead-acid / NiMH), cells in
-     series, capacity (Ah), internal resistance (Ω), and starting state of
-     charge. The pack discharges realistically as the controller sinks current.
+     series (lead-acid is simply picked as a **6 V or 12 V** battery), capacity
+     (Ah), internal resistance (Ω), and starting state of charge. The pack
+     discharges realistically as the controller sinks current.
 3. Optionally set the **advertised name** (default `EL15-SIM`), tap **Apply**.
 4. Tap **Start advertising**. Grant the Bluetooth permission if asked.
 5. On the ESP32 (or the phone app), scan and connect — the simulator appears by
