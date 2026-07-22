@@ -64,6 +64,161 @@ class LoadModelTest {
         assertEquals(12.6f, f32(pkt, 7), 0.1f)
     }
 
+    // ---- Battery simulation ------------------------------------------------
+
+    private fun batteryModel(): LoadModel = LoadModel().apply {
+        batteryMode = true
+        chemistry = LoadModel.CHEM_LIION
+        cells = 3
+        batteryCapacityAh = 2.0f
+        batteryR = 0.1f
+        recharge()
+    }
+
+    private fun cc(m: LoadModel, amps: Float) {
+        m.decode(byteArrayOf(0xAF.toByte(), 0x07, 0x03, 0x03, 0x01, LoadModel.MODE_CC.toByte()))
+        val bits = java.lang.Float.floatToIntBits(amps)
+        m.decode(byteArrayOf(0xAF.toByte(), 0x07, 0x03, 0x04, 0x04,
+            bits.toByte(), (bits ushr 8).toByte(), (bits ushr 16).toByte(), (bits ushr 24).toByte()))
+        m.decode(byteArrayOf(0xAF.toByte(), 0x07, 0x03, 0x09, 0x01, 0x04)) // load on
+    }
+
+    @Test
+    fun ocvCurvesAreMonotonicWithKnee() {
+        for (chem in 0..3) {
+            var prev = LoadModel.ocvPerCell(chem, 0f)
+            var soc = 0.05f
+            while (soc <= 1.001f) {
+                val v = LoadModel.ocvPerCell(chem, soc)
+                assertTrue("chem $chem OCV must not decrease as SoC rises", v >= prev)
+                prev = v
+                soc += 0.05f
+            }
+            // The empty-end knee must be steeper than the mid plateau.
+            val knee = LoadModel.ocvPerCell(chem, 0.05f) - LoadModel.ocvPerCell(chem, 0f)
+            val plateau = LoadModel.ocvPerCell(chem, 0.55f) - LoadModel.ocvPerCell(chem, 0.50f)
+            assertTrue("chem $chem knee steeper than plateau", knee > plateau)
+        }
+    }
+
+    @Test
+    fun lifepo4PlateauIsFlat() {
+        val v80 = LoadModel.ocvPerCell(LoadModel.CHEM_LIFEPO4, 0.8f)
+        val v30 = LoadModel.ocvPerCell(LoadModel.CHEM_LIFEPO4, 0.3f)
+        assertTrue("LiFePO4 plateau flat (<0.1 V over 30-80%)", v80 - v30 < 0.10f)
+    }
+
+    @Test
+    fun fullBatteryVoltageMatchesCurveTimesCells() {
+        val m = batteryModel()
+        val pkt = m.buildStatusPacket(0)
+        // 3S Li-ion at 100%: 3 * 4.20 = 12.6 V open circuit.
+        assertEquals(3 * 4.20f, f32(pkt, 7), 0.1f)
+    }
+
+    @Test
+    fun terminalVoltageSagsByInternalResistance() {
+        val m = batteryModel()
+        cc(m, 2.0f)
+        val pkt = m.buildStatusPacket(100)
+        val expected = m.ocvNow() - 2.0f * 0.1f
+        assertEquals(expected, f32(pkt, 7), 0.15f)
+    }
+
+    @Test
+    fun coulombCountingDrainsSocAndFollowsCurve() {
+        val m = batteryModel()
+        cc(m, 2.0f)
+        // Discharge 2 A from a 2 Ah pack for 30 simulated minutes → 1 Ah → 50%.
+        repeat(1800) { m.buildStatusPacket(1000) }
+        assertEquals(1.0, m.drawnAh, 0.02)
+        assertEquals(0.5, m.soc, 0.01)
+        // OCV must now sit on the 50% point of the curve.
+        assertEquals(3 * LoadModel.ocvPerCell(LoadModel.CHEM_LIION, 0.5f), m.ocvNow(), 0.02f)
+        // And the discharge continues into the knee: after ~28 more minutes the
+        // pack is nearly empty and the loaded terminal voltage has collapsed
+        // toward the 0% end of the curve.
+        repeat(1700) { m.buildStatusPacket(1000) }
+        assertTrue("SoC nearly empty, was ${m.soc}", m.soc < 0.06)
+        val vEnd = f32(m.buildStatusPacket(1000), 7)
+        assertTrue("terminal voltage in the knee, was $vEnd", vEnd < 3 * 3.55f)
+    }
+
+    @Test
+    fun socClampsAtZeroAndRechargeRestores() {
+        val m = batteryModel()
+        cc(m, 4.0f)
+        repeat(4000) { m.buildStatusPacket(1000) }  // way past empty
+        assertTrue(m.soc >= 0.0)
+        assertEquals(0.0, m.soc, 0.001)
+        m.recharge()
+        assertEquals(1.0, m.soc, 1e-6)
+        assertEquals(0.0, m.drawnAh, 1e-6)
+        m.recharge(40f)
+        assertEquals(0.4, m.soc, 1e-6)
+    }
+
+    @Test
+    fun leadAcidCapacityTestReachesConventionalCutoff() {
+        // The app's lead-acid preset cuts off at 1.75 V/cell (10.5 V for 6S).
+        // The simulated pack must actually cross that at a gentle 0.2C rate,
+        // or a capacity test against the simulator would never terminate.
+        val m = LoadModel().apply {
+            batteryMode = true
+            chemistry = LoadModel.CHEM_LEAD
+            cells = 6
+            batteryCapacityAh = 2.0f
+            batteryR = 0.05f
+            recharge()
+        }
+        cc(m, 0.4f)  // 0.2C
+        val cutoff = 6 * 1.75f
+        var reached = false
+        // Up to 8 simulated hours in 1 s ticks.
+        for (t in 0 until 8 * 3600) {
+            val v = f32(m.buildStatusPacket(1000), 7)
+            if (v <= cutoff) { reached = true; break }
+        }
+        assertTrue("terminal voltage must reach the 1.75 V/cell cutoff", reached)
+    }
+
+    @Test
+    fun overdrawnPackVoltageCollapses() {
+        // Even with a cutoff set below the chemistry curve's 0 % floor, a dead
+        // pack must not source charge forever — voltage collapses on overdraw.
+        val m = batteryModel()
+        cc(m, 4.0f)
+        repeat(2 * 3600) { m.buildStatusPacket(1000) }  // 8 Ah from a 2 Ah pack
+        assertEquals(0.0, m.soc, 1e-6)
+        val v = f32(m.buildStatusPacket(1000), 7)
+        assertTrue("dead pack voltage collapsed, was $v", v < 1.0f)
+        // Recharge fully restores it.
+        m.recharge()
+        assertEquals(3 * 4.20f, m.ocvNow(), 0.05f)
+    }
+
+    @Test
+    fun batteryPacketsStillChecksumValid() {
+        val m = batteryModel()
+        cc(m, 1.0f)
+        repeat(10) {
+            val pkt = m.buildStatusPacket(500)
+            assertEquals(28, pkt.size)
+            assertEquals(0, pkt.sumOf { it.toInt() and 0xFF } and 0xFF)
+        }
+    }
+
+    @Test
+    fun fixedModeDoesNotDrainBattery() {
+        val m = batteryModel()
+        m.batteryMode = false
+        m.emf = 12.6f; m.seriesR = 0.35f
+        cc(m, 2.0f)
+        repeat(600) { m.buildStatusPacket(1000) }
+        assertEquals(1.0, m.soc, 1e-6)
+        assertEquals(0.0, m.drawnAh, 1e-6)
+    }
+
     @Test
     fun loadedVoltageSagsByIrDrop() {
         val m = LoadModel()

@@ -27,6 +27,9 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
     private val logLines = ArrayDeque<String>()
     private var connectedAddress: String? = null
 
+    /** True once the user edits the SoC field; cleared when its value is applied. */
+    private var socDirty = false
+
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -44,12 +47,45 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         binding.emfInput.setText(fmt(model.emf))
         binding.resInput.setText(fmt(model.seriesR))
         binding.nameInput.setText("EL15-SIM")
+        binding.cellsInput.setText(model.cells.toString())
+        binding.capacityInput.setText(fmt(model.batteryCapacityAh))
+        binding.batteryRInput.setText(fmt(model.batteryR))
+        binding.socInput.setText("100")
+        binding.socInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { socDirty = true }
+        })
+
+        binding.chemDropdown.setAdapter(android.widget.ArrayAdapter(
+            this, android.R.layout.simple_list_item_1, LoadModel.CHEM_NAMES))
+        binding.chemDropdown.setText(LoadModel.CHEM_NAMES[model.chemistry], false)
+
+        binding.sourceToggle.check(if (model.batteryMode) R.id.srcBattery else R.id.srcFixed)
+        binding.sourceToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            model.batteryMode = checkedId == R.id.srcBattery
+            binding.fixedSection.visibility =
+                if (model.batteryMode) android.view.View.GONE else android.view.View.VISIBLE
+            binding.batterySection.visibility =
+                if (model.batteryMode) android.view.View.VISIBLE else android.view.View.GONE
+            refreshState()
+        }
 
         binding.advButton.setOnClickListener {
             if (server.isAdvertising) { server.stop(); afterAdvertisingChanged(false, "Stopped") }
             else requestAndStart()
         }
         binding.applyButton.setOnClickListener { applyCircuit() }
+        binding.rechargeButton.setOnClickListener {
+            model.recharge()
+            binding.socInput.setText("100")
+            // The programmatic setText above fires the TextWatcher; clear the
+            // dirty flag so a later Apply doesn't silently recharge again.
+            socDirty = false
+            log("⚡ battery recharged to 100%")
+            refreshState()
+        }
         binding.clearLogButton.setOnClickListener { logLines.clear(); binding.logView.text = "" }
 
         refreshState()
@@ -83,12 +119,36 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         server.start()
     }
 
-    // ---- Circuit editing ---------------------------------------------------
+    // ---- Source editing ----------------------------------------------------
     private fun applyCircuit() {
+        // Fixed circuit.
         model.emf = binding.emfInput.text.toString().trim().toFloatOrNull()?.coerceIn(0.1f, 100f) ?: model.emf
         model.seriesR = binding.resInput.text.toString().trim().toFloatOrNull()?.coerceIn(0f, 100f) ?: model.seriesR
         binding.emfInput.setText(fmt(model.emf))
         binding.resInput.setText(fmt(model.seriesR))
+
+        // Battery pack.
+        val chemIdx = LoadModel.CHEM_NAMES.indexOf(binding.chemDropdown.text.toString())
+        if (chemIdx >= 0) model.chemistry = chemIdx
+        model.cells = binding.cellsInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 30) ?: model.cells
+        model.batteryCapacityAh = binding.capacityInput.text.toString().trim().toFloatOrNull()
+            ?.coerceIn(0.01f, 1000f) ?: model.batteryCapacityAh
+        model.batteryR = binding.batteryRInput.text.toString().trim().toFloatOrNull()
+            ?.coerceIn(0f, 100f) ?: model.batteryR
+        binding.cellsInput.setText(model.cells.toString())
+        binding.capacityInput.setText(fmt(model.batteryCapacityAh))
+        binding.batteryRInput.setText(fmt(model.batteryR))
+        // Only reset the battery's state of charge if the user actually edited
+        // the field — re-applying other settings mid-discharge must not
+        // silently "recharge" the pack.
+        if (socDirty) {
+            binding.socInput.text.toString().trim().toFloatOrNull()?.let { pct ->
+                model.recharge(pct.coerceIn(0f, 100f))
+                binding.socInput.setText(fmt(pct.coerceIn(0f, 100f)))
+            }
+            socDirty = false
+        }
+
         val name = binding.nameInput.text.toString().trim()
         if (name.isNotEmpty()) server.setAdvertisedName(name)
         refreshState()
@@ -137,12 +197,17 @@ class MainActivity : AppCompatActivity(), El15GattServer.Listener {
         binding.stateReadout.text =
             "%.2f V   %.3f A   %.1f W".format(model.lastVoltage, model.lastCurrent, power)
         val warn = if (model.lastWarning.isNotEmpty()) "  ⚠ ${model.lastWarning}" else ""
+        val battery = if (model.batteryMode)
+            "\nbattery SoC %.1f%% · OCV %.2f V · drawn %.3f / %s Ah".format(
+                model.soc * 100.0, model.ocvNow(), model.drawnAh, fmt(model.batteryCapacityAh))
+        else ""
         binding.stateSub.text =
-            "mode $modeName · setpoint %.3f · load %s · lock %s%s".format(
+            "mode $modeName · setpoint %.3f · load %s · lock %s%s%s".format(
                 model.setpoint,
                 if (model.loadOn) "ON" else "off",
                 if (model.lockOn) "ON" else "off",
                 warn,
+                battery,
             )
     }
 

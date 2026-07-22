@@ -90,8 +90,9 @@ Implications the redesign should embrace:
 The redesign may reorganize these freely, but must not drop functionality.
 
 ### 4.1 Connection
-- Trigger a **scan**; show a **list of found devices** (name + address) plus a
-  **"Demo simulator"** entry at the top. Tapping one connects.
+- Trigger a **scan**; show a **list of found devices** (name + address).
+  Tapping one connects. (There is intentionally no on-device demo entry —
+  hardware-free testing uses the Android EL15 Load Simulator app over real BLE.)
 - Show **connection state** persistently: disconnected / scanning / connecting /
   connected (+ a short status string).
 - A **Connect / Disconnect** affordance.

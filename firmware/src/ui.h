@@ -11,7 +11,6 @@
 struct UiActions {
   std::function<void()> scan;
   std::function<void(const char *addr)> connect;
-  std::function<void()> startDemo;
   std::function<void()> disconnect;
   std::function<void(int mode)> setMode;
   std::function<void(float value)> setSetpoint;

@@ -19,26 +19,36 @@ so from the ESP's radio it is indistinguishable from a real EL15.
 
 1. Install on a second Android phone (one that can act as a BLE peripheral —
    most modern phones can; the app warns if yours can't).
-2. Set the **virtual circuit**: source voltage (emf) and series resistance. A
-   resistance test run against it will recover these values.
-3. Optionally set the **advertised name** (default `EL15-SIM`).
+2. Pick the **simulated source**:
+   - **Fixed circuit** — source voltage (emf) + series resistance. Never
+     depletes; a resistance test run against it recovers exactly these values.
+   - **Battery** — chemistry (Li-ion / LiFePO₄ / lead-acid / NiMH), cells in
+     series, capacity (Ah), internal resistance (Ω), and starting state of
+     charge. The pack discharges realistically as the controller sinks current.
+3. Optionally set the **advertised name** (default `EL15-SIM`), tap **Apply**.
 4. Tap **Start advertising**. Grant the Bluetooth permission if asked.
 5. On the ESP32 (or the phone app), scan and connect — the simulator appears by
    its advertised name.
-6. Watch the **live state** (V / I / P, mode, setpoint, load, lock, protection)
-   and the **command log** update as the controller drives it. Turning the load
-   on, sweeping current in the resistance test, over-power/over-current trips —
-   all behave like the real unit.
+6. Watch the **live state** (V / I / P, mode, setpoint, load, lock, protection,
+   and in battery mode SoC / OCV / Ah drawn) and the **command log** update as
+   the controller drives it. **Recharge battery** resets the pack to 100 %.
 
 ## Behaviour modelled
 
 - All device modes: CC / CV / CR / CP / CAP / DCR (setpoint honoured per mode).
 - Terminal voltage sags by the IR drop under load; CAP integrates Ah/Wh;
-  DCR reports milliohms.
+  DCR reports the configured internal resistance in milliohms.
+- **Battery discharge curve**: open-circuit voltage follows a per-chemistry
+  OCV-vs-SoC lookup table (21 points per chemistry — the charge-top drop, the
+  nominal plateau, and the empty-end knee), scaled by the cell count, with
+  charge depleted by coulomb counting against the configured capacity. A
+  capacity test run from the controller reproduces the full discharge curve
+  down to its cutoff voltage, and a resistance test recovers the configured
+  internal resistance.
 - EL15 ratings enforced: 12 A / 150 W / 60 V, with OPP/OCP protection frames.
 - Fan speed and temperature scale with current, as on hardware.
 - Responds to each poll with a fresh frame and pushes on a timer so the
-  accumulators keep advancing while connected.
+  accumulators (and battery drain) keep advancing while connected.
 
 ## Notes
 

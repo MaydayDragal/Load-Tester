@@ -8,9 +8,13 @@
 // Architecture mirrors the Android app:
 //   el15_protocol  — wire protocol (packet parse + command frames)
 //   El15Client     — BLE central transport (scan/connect/subscribe/poll)
-//   El15Simulator  — built-in demo load (no hardware needed)
 //   ResistanceTest — fuse-aware sweep engine
 //   ui             — LVGL screens
+//
+// There is deliberately no on-device simulator: to bench-test without load
+// hardware, run the Android "EL15 Load Simulator" app (simulator/ in this
+// repo), which impersonates the load over a real BLE link — so the firmware
+// always exercises its actual transport path.
 //
 // main.cpp owns the objects and routes events between them, standing in for the
 // Android DeviceCore.
@@ -19,29 +23,11 @@
 
 #include "display.h"
 #include "el15_client.h"
-#include "el15_controller.h"
 #include "resistance_test.h"
 #include "ui.h"
 
 static El15Client g_ble;
-static El15Simulator g_sim;
-static bool g_demo = false;
-
-// The active controller: simulator when in demo mode, else the BLE client.
-static El15Controller *activeController() {
-  return g_demo ? (El15Controller *)&g_sim : (El15Controller *)&g_ble;
-}
-
-// A thin controller shim so the test engine always talks to whichever transport
-// is active, even if the user switches between demo and BLE.
-struct RoutingController : El15Controller {
-  void setMode(int m) override { activeController()->setMode(m); }
-  void setSetpoint(float v) override { activeController()->setSetpoint(v); }
-  void setLoad(bool on) override { activeController()->setLoad(on); }
-  void setLock() override { activeController()->setLock(); }
-} g_router;
-
-static ResistanceTest g_test(&g_router);
+static ResistanceTest g_test(&g_ble);
 
 // ---- Status routing --------------------------------------------------------
 static void handleStatus(const el15::Status &s) {
@@ -49,32 +35,15 @@ static void handleStatus(const el15::Status &s) {
   if (g_test.running()) g_test.onStatus(s);
 }
 
-// ---- Demo simulator pump ---------------------------------------------------
-static uint32_t g_lastSimMs = 0;
-
-static void startDemo() {
-  // Tear down any live BLE link first so the two transports can't interleave
-  // (same rule as the Android DeviceCore.startSimulator fix).
-  if (g_ble.state() != El15Client::IDLE) g_ble.shutdownAndDisconnect();
-  g_demo = true;
-  g_lastSimMs = millis();
-  ui::onConnState(3 /* CONNECTED */, "Demo simulator");
-}
-
-static void stopAll() {
+static void disconnectAll() {
   // Capture whether a test was mid-run BEFORE stopping it: stopping the test
   // clears the flag, so checking it afterwards would always be false and the
   // safe LOAD_OFF-then-flush teardown would never run (mirrors the Android
   // DeviceCore.disconnect() `wasBusy` capture).
   bool wasBusy = g_test.running();
   if (wasBusy) g_test.stop();
-  if (g_demo) {
-    g_demo = false;
-    ui::onConnState(0 /* IDLE */, "Disconnected");
-  } else {
-    if (wasBusy) g_ble.shutdownAndDisconnect();  // push LOAD_OFF and let it flush
-    else g_ble.disconnect();
-  }
+  if (wasBusy) g_ble.shutdownAndDisconnect();  // push LOAD_OFF and let it flush
+  else g_ble.disconnect();
 }
 
 void setup() {
@@ -83,13 +52,12 @@ void setup() {
 
   UiActions actions;
   actions.scan       = []() { ui::clearDevices(); g_ble.startScan(8); };
-  actions.connect    = [](const char *addr) { g_demo = false; g_ble.connectTo(addr); };
-  actions.startDemo  = startDemo;
-  actions.disconnect = stopAll;
-  actions.setMode    = [](int m) { activeController()->setMode(m); };
-  actions.setSetpoint= [](float v) { activeController()->setSetpoint(v); };
-  actions.setLoad    = [](bool on) { activeController()->setLoad(on); };
-  actions.lock       = []() { activeController()->setLock(); };
+  actions.connect    = [](const char *addr) { g_ble.connectTo(addr); };
+  actions.disconnect = disconnectAll;
+  actions.setMode    = [](int m) { g_ble.setMode(m); };
+  actions.setSetpoint= [](float v) { g_ble.setSetpoint(v); };
+  actions.setLoad    = [](bool on) { g_ble.setLoad(on); };
+  actions.lock       = []() { g_ble.setLock(); };
   actions.startRTest = [](float fuse, int steps) {
     g_test.steps = steps;
     g_test.start(fuse);
@@ -118,14 +86,5 @@ void loop() {
   display::loopTick();
   g_ble.loopTick();
   g_test.tick();
-
-  if (g_demo) {
-    uint32_t now = millis();
-    if (now - g_lastSimMs >= g_ble.pollIntervalMs) {
-      uint32_t dt = now - g_lastSimMs;
-      g_lastSimMs = now;
-      handleStatus(g_sim.tick(dt));
-    }
-  }
   delay(2);
 }
