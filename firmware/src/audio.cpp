@@ -1,0 +1,142 @@
+#include "audio.h"
+
+#include <Arduino.h>
+#include <ESP_I2S.h>
+#include <Wire.h>
+#include <math.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+
+#include "board_config.h"
+
+extern "C" {
+#include "es8311.h"
+}
+
+namespace audio {
+
+static const int SAMPLE_RATE = 16000;
+
+static I2SClass g_i2s;
+static bool g_ready = false;
+static uint8_t g_volume = 70;   // 0..100
+static bool g_muted = false;
+
+static QueueHandle_t g_queue = nullptr;
+
+// One note. freq 0 = a silent gap. amp is 0..100 before volume/mute scaling.
+struct Note { uint16_t freq; uint16_t durMs; uint8_t amp; };
+
+// Drive the speaker-amp enable bit on the shared TCA9554 expander high, without
+// disturbing the panel bits already set there (read-modify-write, same pattern
+// as display.cpp's panel enable).
+static void ampEnable() {
+  auto rmw = [](uint8_t reg, uint8_t setMask, uint8_t clrMask) {
+    Wire.beginTransmission(IO_EXPANDER_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return;
+    Wire.requestFrom((int)IO_EXPANDER_ADDR, 1);
+    uint8_t v = Wire.available() ? Wire.read() : 0x00;
+    v = (uint8_t)((v & ~clrMask) | setMask);
+    Wire.beginTransmission(IO_EXPANDER_ADDR);
+    Wire.write(reg);
+    Wire.write(v);
+    Wire.endTransmission();
+  };
+  rmw(0x03, 0x00, SPK_AMP_EN_BIT);  // config: 0 = output
+  rmw(0x01, SPK_AMP_EN_BIT, 0x00);  // output: drive high (amp on)
+}
+
+static bool es8311Init() {
+  es8311_handle_t h = es8311_create(ES8311_I2C_PORT, ES8311_I2C_ADDR);
+  if (!h) return false;
+  es8311_clock_config_t clk = {};
+  clk.mclk_inverted = false;
+  clk.sclk_inverted = false;
+  clk.mclk_from_mclk_pin = true;
+  clk.mclk_frequency = SAMPLE_RATE * 256;
+  clk.sample_frequency = SAMPLE_RATE;
+  if (es8311_init(h, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) return false;
+  es8311_sample_frequency_config(h, clk.mclk_frequency, clk.sample_frequency);
+  es8311_microphone_config(h, false);        // playback only
+  es8311_voice_volume_set(h, 80, nullptr);   // codec headroom; loudness via PCM
+  return true;
+}
+
+// Synthesise and play a single note (blocking — runs on the audio task only).
+static void playNote(const Note &n) {
+  int total = (int)((uint32_t)n.durMs * SAMPLE_RATE / 1000);
+  if (total < 1) return;
+  float amp = 0;
+  if (!g_muted && g_volume > 0 && n.amp > 0 && n.freq > 0)
+    amp = (n.amp / 100.0f) * (g_volume / 100.0f) * 0.5f * 32767.0f;
+  int atk = min(total / 4, SAMPLE_RATE * 4 / 1000);   // ~4 ms raised edges to
+  int rel = min(total / 4, SAMPLE_RATE * 6 / 1000);   // avoid click transients
+  float dph = 2.0f * (float)M_PI * n.freq / SAMPLE_RATE;
+  float phase = 0;
+  static int16_t buf[256 * 2];   // stereo frames
+  int i = 0;
+  while (i < total) {
+    int chunk = min(256, total - i);
+    for (int k = 0; k < chunk; k++, i++) {
+      float env = 1.0f;
+      if (i < atk) env = (float)i / atk;
+      else if (i > total - rel) env = (float)(total - i) / rel;
+      int16_t s = (int16_t)(amp * env * sinf(phase));
+      phase += dph;
+      if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+      buf[k * 2] = s;
+      buf[k * 2 + 1] = s;
+    }
+    g_i2s.write((uint8_t *)buf, chunk * 4);
+  }
+}
+
+static void audioTask(void *) {
+  Note n;
+  for (;;) {
+    if (xQueueReceive(g_queue, &n, portMAX_DELAY) == pdTRUE) playNote(n);
+  }
+}
+
+void tone(uint16_t freqHz, uint16_t durMs, uint8_t ampPct) {
+  if (!g_ready || !g_queue) return;
+  Note n{freqHz, durMs, ampPct};
+  xQueueSend(g_queue, &n, 0);   // drop if the queue is backed up
+}
+
+void begin() {
+  g_i2s.setPins(I2S_BCLK_GPIO, I2S_WS_GPIO, I2S_DOUT_GPIO, I2S_DIN_GPIO, I2S_MCLK_GPIO);
+  if (!g_i2s.begin(I2S_MODE_STD, SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT,
+                   I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
+    Serial.println("[audio] I2S begin failed — sound disabled");
+    return;
+  }
+  ampEnable();
+  if (!es8311Init()) {
+    Serial.println("[audio] ES8311 init failed — sound disabled");
+    return;
+  }
+  g_queue = xQueueCreate(16, sizeof(Note));
+  if (!g_queue) return;
+  xTaskCreate(audioTask, "audio", 4096, nullptr, 1, nullptr);
+  g_ready = true;
+  Serial.println("[audio] ready (ES8311)");
+}
+
+bool ready() { return g_ready; }
+void setVolume(uint8_t pct) { g_volume = pct > 100 ? 100 : pct; }
+uint8_t getVolume() { return g_volume; }
+void setMuted(bool m) { g_muted = m; }
+bool muted() { return g_muted; }
+
+// ---- Semantic feedback -----------------------------------------------------
+void click()   { tone(2600, 9, 22); }
+void press()   { tone(1900, 28, 45); }
+void success() { tone(880, 90, 55); tone(0, 25, 0); tone(1320, 150, 55); }
+void failure() { tone(660, 110, 55); tone(0, 25, 0); tone(440, 190, 55); }
+void fault()   { tone(1760, 110, 85); tone(0, 60, 0); tone(1245, 110, 85);
+                 tone(0, 60, 0); tone(1760, 140, 85); }
+
+}  // namespace audio

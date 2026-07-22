@@ -74,6 +74,20 @@
 #define BTN_DEBOUNCE_MS  40
 #define BTN_LONG_PRESS_MS 1200
 
+// ---- Audio (ES8311 codec + onboard speaker amp) ----------------------------
+// Verified against waveshareteam/ESP32-C6-Touch-AMOLED-1.8 pin_config.h +
+// the 15_ES8311 example. The codec shares the touch I2C bus (SDA 8 / SCL 7);
+// the speaker amplifier's power-enable is TCA9554 expander bit 7 (same 0x20
+// expander as the panel), driven high to un-mute the speaker.
+#define ES8311_I2C_ADDR   0x18   // CE pin low
+#define ES8311_I2C_PORT   0      // Wire == I2C port 0
+#define I2S_MCLK_GPIO     19
+#define I2S_BCLK_GPIO     20
+#define I2S_DIN_GPIO      21     // codec ASDOUT -> ESP (mic; unused for playback)
+#define I2S_WS_GPIO       22
+#define I2S_DOUT_GPIO     23     // ESP -> codec DSDIN (speaker)
+#define SPK_AMP_EN_BIT    (1 << 7)  // expander bit that powers the speaker amp
+
 // ---- Backlight / brightness ------------------------------------------------
 // AMOLED brightness is a controller command (0x51), handled in display.cpp;
 // no PWM backlight pin. Range 0..255.

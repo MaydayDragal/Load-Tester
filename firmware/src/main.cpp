@@ -22,6 +22,7 @@
 
 #include <Arduino.h>
 
+#include "audio.h"
 #include "capacity_test.h"
 #include "display.h"
 #include "el15_client.h"
@@ -54,6 +55,7 @@ static void emergencyStop() {
   g_ble.setLoad(false);   // manual-load case (and belt-and-braces)
   g_ble.setSetpoint(0);
   Serial.println("[btn] EMERGENCY STOP");
+  audio::fault();
   ui::onEmergencyStop(acted);
 }
 
@@ -72,6 +74,8 @@ static void stopAll() {
 void setup() {
   Serial.begin(115200);
   display::begin();
+  audio::begin();
+  audio::press();   // startup chime — confirms the codec is alive
 
   // Report why the last reset happened — distinguishes a firmware panic from a
   // brownout or watchdog when chasing spontaneous reboots in the field.
@@ -127,8 +131,8 @@ void setup() {
   g_ble.begin();
 
   g_test.onProgress = [](int s, int t, float tgt, float v, float i) { ui::onTestProgress(s, t, tgt, v, i); };
-  g_test.onComplete = [](const ResistanceTest::Result &r) { ui::onTestComplete(r); };
-  g_test.onError    = [](const char *m) { ui::onTestError(m); };
+  g_test.onComplete = [](const ResistanceTest::Result &r) { audio::success(); ui::onTestComplete(r); };
+  g_test.onError    = [](const char *m) { audio::failure(); ui::onTestError(m); };
 
   g_batt.onProgress = [](float v, float i, float ah, float wh, float temp, uint32_t el, int ph) {
     ui::onBattProgress(v, i, ah, wh, temp, el, ph);
@@ -136,10 +140,12 @@ void setup() {
   g_batt.onComplete = [](const CapacityTest::Result &r) {
     Serial.printf("[batt] done: %.3f Ah, %.1f Wh in %lus (%s)\n",
                   r.capacityAh, r.energyWh, (unsigned long)r.durationS, r.stopReason);
+    audio::success();
     ui::onBattComplete(r);
   };
   g_batt.onError = [](const char *m) {
     Serial.printf("[batt] error: %s\n", m);
+    audio::failure();
     ui::onBattError(m);
   };
 }
@@ -155,6 +161,7 @@ static void handleButtons() {
       emergencyStop();
       break;
     case display::BTN_PWR_SHORT:
+      audio::press();
       display::setSleep(!display::asleep());   // toggle display sleep
       break;
     case display::BTN_PWR_LONG:

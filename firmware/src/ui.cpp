@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #include <lvgl.h>
 
+#include "audio.h"
 #include "display.h"
 #include <math.h>
 #include <stdio.h>
@@ -212,6 +213,7 @@ enum { RR_VOC, RR_TOL, RR_R2, RR_PSC, RR_SAG, RR_PKW, RR_TEMP, RR_FAN, RR_SWEEP,
 static lv_obj_t *rrRow[RR_N], *rrKey[RR_N], *rrVal[RR_N];
 static const int RT_CHART_PTS = 20;  // fixed capacity = UI max steps; no reallocs
 static lv_obj_t *setBriVal, *setBattVal, *setBattState, *setRtcVal, *setHeapVal, *setMinHeapVal, *setUptimeVal;
+static lv_obj_t *setVolVal, *setMuteBtn, *setMuteLbl;
 // ---- Battery capacity test state ---------------------------------------------
 struct BattChem { const char *name; float nom, full, cut; int maxCells; };
 static const BattChem BATT_CHEMS[5] = {
@@ -325,6 +327,8 @@ static lv_obj_t *flatBtn(lv_obj_t *p) {
   lv_obj_set_style_pad_all(b, 0, 0);
   lv_obj_set_style_pad_gap(b, 0, 0);
   lv_obj_set_style_opa(b, LV_OPA_60, LV_STATE_PRESSED);  // instant press feedback
+  // A soft tick on every button press — central here so all controls click.
+  lv_obj_add_event_cb(b, [](lv_event_t *) { audio::click(); }, LV_EVENT_PRESSED, nullptr);
   return b;
 }
 static void fmtVal(char *b, int n, float v, int dp) { snprintf(b, n, "%.*f", dp, v); }
@@ -1233,6 +1237,20 @@ static void onBrightness(lv_event_t *e) {
   lv_label_set_text(setBriVal, b);
 }
 
+static void refreshMute() {
+  bool m = audio::muted();
+  lv_label_set_text(setMuteLbl, m ? "Muted" : "Sound on");
+  lv_obj_set_style_border_color(setMuteBtn, m ? COL_RED : COL_GREEN, 0);
+  lv_obj_set_style_text_color(setMuteLbl, m ? COL_RED : COL_GREEN, 0);
+}
+static void onVolume(lv_event_t *e) {
+  int v = lv_slider_get_value(lv_event_get_target(e));
+  audio::setVolume((uint8_t)v);
+  char b[12];
+  snprintf(b, sizeof(b), "%d%%", v);
+  lv_label_set_text(setVolVal, b);
+}
+
 static void buildSettings() {
   setScreen = cont(contentStack);
   lv_obj_set_size(setScreen, LV_PCT(100), LV_PCT(100));
@@ -1275,6 +1293,43 @@ static void buildSettings() {
   lv_obj_set_style_bg_color(sl, COL_ACCENT, LV_PART_INDICATOR);
   lv_obj_set_style_bg_color(sl, COL_ACCENT2, LV_PART_KNOB);
   lv_obj_add_event_cb(sl, onBrightness, LV_EVENT_VALUE_CHANGED, nullptr);
+
+  // audio: volume + mute
+  lv_obj_t *ac = cont(setScreen);
+  lv_obj_set_size(ac, LV_PCT(100), LV_SIZE_CONTENT);
+  styleCard(ac, COL_CARD, COL_BORDER, 12, 12);
+  lv_obj_set_flex_flow(ac, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(ac, 12, 0);
+  lv_obj_t *arow = cont(ac);
+  lv_obj_set_size(arow, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(arow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(arow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lbl(arow, "VOLUME", COL_MUTED, F12);
+  setVolVal = lbl(arow, "--", COL_INK, F14);
+  char vb[12];
+  snprintf(vb, sizeof(vb), "%d%%", audio::getVolume());
+  lv_label_set_text(setVolVal, vb);
+  lv_obj_t *vsl = lv_slider_create(ac);
+  lv_obj_set_width(vsl, LV_PCT(96));
+  lv_obj_set_height(vsl, 14);
+  lv_slider_set_range(vsl, 0, 100);
+  lv_slider_set_value(vsl, audio::getVolume(), LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(vsl, lv_color_hex(0x161d26), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(vsl, COL_ACCENT, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(vsl, COL_ACCENT2, LV_PART_KNOB);
+  lv_obj_add_event_cb(vsl, onVolume, LV_EVENT_VALUE_CHANGED, nullptr);
+  setMuteBtn = flatBtn(ac);
+  lv_obj_set_size(setMuteBtn, LV_PCT(100), 44);
+  styleCard(setMuteBtn, COL_BLACK, COL_GREEN, 11, 0);
+  lv_obj_set_style_bg_opa(setMuteBtn, LV_OPA_TRANSP, 0);
+  setMuteLbl = lbl(setMuteBtn, "Sound on", COL_GREEN, F16);
+  lv_obj_center(setMuteLbl);
+  lv_obj_add_event_cb(setMuteBtn, [](lv_event_t *) {
+    audio::setMuted(!audio::muted());
+    if (!audio::muted()) audio::press();   // audible confirm when un-muting
+    refreshMute();
+  }, LV_EVENT_CLICKED, nullptr);
+  refreshMute();
 
   // sample rate
   lv_obj_t *src2 = settingsCard("SAMPLE RATE");
@@ -2123,7 +2178,10 @@ void onStatus(const el15::Status &s) {
     faultIsEmergency = false;   // a real protection trip supersedes an e-stop ack
     snprintf(b, sizeof(b), LV_SYMBOL_WARNING "  %s - PROTECTION", s.warning); setTextIf(faultTitle, b);
     setTextIf(faultMsg, "Load protection tripped - check the setup");
-    if (lv_obj_has_flag(faultBanner, LV_OBJ_FLAG_HIDDEN)) lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+    if (lv_obj_has_flag(faultBanner, LV_OBJ_FLAG_HIDDEN)) {
+      lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+      audio::fault();   // alarm only on the transition into a new fault
+    }
   } else if (!faultIsEmergency && !lv_obj_has_flag(faultBanner, LV_OBJ_FLAG_HIDDEN)) {
     lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
   }
