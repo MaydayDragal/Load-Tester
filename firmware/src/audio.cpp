@@ -64,47 +64,65 @@ static bool es8311Init() {
   return true;
 }
 
-// Synthesise and play a single note (blocking — runs on the audio task only).
-static void playNote(const Note &n) {
-  int total = (int)((uint32_t)n.durMs * SAMPLE_RATE / 1000);
-  if (total < 1) return;
-  float amp = 0;
-  if (!g_muted && g_volume > 0 && n.amp > 0 && n.freq > 0)
-    amp = (n.amp / 100.0f) * (g_volume / 100.0f) * 0.5f * 32767.0f;
-  int atk = min(total / 4, SAMPLE_RATE * 4 / 1000);   // ~4 ms raised edges to
-  int rel = min(total / 4, SAMPLE_RATE * 6 / 1000);   // avoid click transients
-  float dph = 2.0f * (float)M_PI * n.freq / SAMPLE_RATE;
-  float phase = 0;
-  static const int FRAMES = 512;
-  static int16_t buf[FRAMES * 2];   // stereo frames
-  int i = 0;
-  while (i < total) {
-    int chunk = min(FRAMES, total - i);
-    for (int k = 0; k < chunk; k++, i++) {
-      float env = 1.0f;
-      if (i < atk) env = (float)i / atk;
-      else if (i > total - rel) env = (float)(total - i) / rel;
-      int16_t s = (int16_t)(amp * env * sinf(phase));
-      phase += dph;
-      if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+// Continuous-stream audio task. The I2S is written back-to-back the whole time
+// sound is active — the current tone, then queued tones, then silence — never
+// stopping and restarting the stream between tones. Stopping/restarting the
+// write stream per tone was audible as a glitch (short tones "cut in and out")
+// while one long continuous write was clean; this makes every tone behave like
+// that clean continuous write. After KEEPALIVE_MS of silence the task goes idle
+// (blocks on the queue) so it isn't streaming forever.
+static const int STREAM_FRAMES = 128;        // ~8 ms per write; low latency
+static const uint32_t KEEPALIVE_MS = 2500;   // keep the stream up between bursts
+
+static void audioTask(void *) {
+  static int16_t buf[STREAM_FRAMES * 2];
+  Note cur{};
+  bool haveCur = false;
+  int pos = 0, total = 0, atk = 0, rel = 0;
+  float phase = 0, dph = 0, amp = 0;
+  bool streaming = false;
+  uint32_t lastSoundMs = 0;
+
+  for (;;) {
+    // Get a note to render if we have none. Block when idle; poll when streaming
+    // so a chime's next note is picked up seamlessly within the same stream.
+    if (!haveCur) {
+      Note n;
+      if (xQueueReceive(g_queue, &n, streaming ? 0 : portMAX_DELAY) == pdTRUE) {
+        cur = n;
+        total = (int)((uint32_t)n.durMs * SAMPLE_RATE / 1000);
+        pos = 0; phase = 0;
+        dph = 2.0f * (float)M_PI * n.freq / SAMPLE_RATE;
+        atk = min(total / 4, SAMPLE_RATE * 4 / 1000);
+        rel = min(total / 4, SAMPLE_RATE * 6 / 1000);
+        amp = (!g_muted && g_volume > 0 && n.amp > 0 && n.freq > 0)
+                  ? (n.amp / 100.0f) * (g_volume / 100.0f) * 0.5f * 32767.0f
+                  : 0.0f;   // freq 0 / muted -> in-stream silence of durMs
+        haveCur = total > 0;
+        streaming = true;
+        lastSoundMs = millis();
+      }
+    }
+
+    for (int k = 0; k < STREAM_FRAMES; k++) {
+      int16_t s = 0;
+      if (haveCur && pos < total) {
+        float env = 1.0f;
+        if (pos < atk) env = (float)pos / atk;
+        else if (pos > total - rel) env = (float)(total - pos) / rel;
+        s = (int16_t)(amp * env * sinf(phase));
+        phase += dph;
+        if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+        if (++pos >= total) { haveCur = false; lastSoundMs = millis(); }
+      }
       buf[k * 2] = s;
       buf[k * 2 + 1] = s;
     }
-    // Write the whole chunk; retry any short return so a transient timeout can't
-    // truncate the tone.
-    size_t want = (size_t)chunk * 4, done = 0;
-    while (done < want) {
-      size_t w = g_i2s.write((uint8_t *)buf + done, want - done);
-      if (w == 0) break;   // give up on a hard failure rather than spin
-      done += w;
-    }
-  }
-}
 
-static void audioTask(void *) {
-  Note n;
-  for (;;) {
-    if (xQueueReceive(g_queue, &n, portMAX_DELAY) == pdTRUE) playNote(n);
+    if (streaming) {
+      g_i2s.write((uint8_t *)buf, sizeof(buf));   // paced by the DMA
+      if (!haveCur && (millis() - lastSoundMs) > KEEPALIVE_MS) streaming = false;
+    }
   }
 }
 
