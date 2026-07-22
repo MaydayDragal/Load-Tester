@@ -49,7 +49,7 @@
                 android:text="No central connected" />
         </LinearLayout>
 
-        <!-- Virtual circuit -->
+        <!-- Simulated source -->
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_marginTop="16dp" android:text="@string/circuit"
             android:textColor="@color/muted" android:textSize="12sp"
@@ -57,22 +57,115 @@
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="6dp" android:background="@color/surface"
             android:orientation="vertical" android:padding="14dp">
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/sourceToggle"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:hint="@string/emf">
-                <com.google.android.material.textfield.TextInputEditText android:id="@+id/emfInput"
-                    android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:inputType="numberDecimal" android:fontFamily="monospace" />
-            </com.google.android.material.textfield.TextInputLayout>
-            <com.google.android.material.textfield.TextInputLayout
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                app:singleSelection="true" app:selectionRequired="true">
+                <com.google.android.material.button.MaterialButton android:id="@+id/srcFixed"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="@string/src_fixed" />
+                <com.google.android.material.button.MaterialButton android:id="@+id/srcBattery"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="@string/src_battery" />
+            </com.google.android.material.button.MaterialButtonToggleGroup>
+
+            <!-- Fixed circuit -->
+            <LinearLayout android:id="@+id/fixedSection"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" android:hint="@string/series_r">
-                <com.google.android.material.textfield.TextInputEditText android:id="@+id/resInput"
+                android:layout_marginTop="8dp" android:orientation="vertical">
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                     android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:inputType="numberDecimal" android:fontFamily="monospace" />
-            </com.google.android.material.textfield.TextInputLayout>
+                    android:hint="@string/emf">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/emfInput"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:inputType="numberDecimal" android:fontFamily="monospace" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp" android:hint="@string/series_r">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/resInput"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:inputType="numberDecimal" android:fontFamily="monospace" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+
+            <!-- Battery pack -->
+            <LinearLayout android:id="@+id/batterySection"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:orientation="vertical"
+                android:visibility="gone">
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:hint="@string/chemistry">
+                    <AutoCompleteTextView android:id="@+id/chemDropdown"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:inputType="none" android:fontFamily="monospace" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp" android:orientation="horizontal">
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/cellsLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:hint="@string/cells">
+                        <com.google.android.material.textfield.TextInputEditText android:id="@+id/cellsInput"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:inputType="number" android:fontFamily="monospace" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                    <!-- Lead-acid batteries are picked by nominal voltage (6 V / 12 V),
+                         not by cell count; shown instead of the cells field. -->
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/leadVoltLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                        android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:hint="@string/lead_voltage"
+                        android:visibility="gone">
+                        <AutoCompleteTextView android:id="@+id/leadVoltDropdown"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:inputType="none" android:fontFamily="monospace" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp" android:layout_weight="1"
+                        android:hint="@string/capacity">
+                        <com.google.android.material.textfield.TextInputEditText android:id="@+id/capacityInput"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:inputType="numberDecimal" android:fontFamily="monospace" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp" android:orientation="horizontal">
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_weight="1" android:hint="@string/internal_r">
+                        <com.google.android.material.textfield.TextInputEditText android:id="@+id/batteryRInput"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:inputType="numberDecimal" android:fontFamily="monospace" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="0dp" android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp" android:layout_weight="1"
+                        android:hint="@string/initial_soc">
+                        <com.google.android.material.textfield.TextInputEditText android:id="@+id/socInput"
+                            android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:inputType="numberDecimal" android:fontFamily="monospace" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+                <com.google.android.material.button.MaterialButton android:id="@+id/rechargeButton"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp" android:text="@string/recharge" />
+            </LinearLayout>
+
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent" android:layout_height="wrap_content"

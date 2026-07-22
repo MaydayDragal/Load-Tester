@@ -17,6 +17,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import java.util.UUID
 
 /**
@@ -24,6 +25,24 @@ import java.util.UUID
  * the real load: it accepts command writes on FFF3, and pushes 28-byte status
  * notifications on FFF1 (on every poll, on any state change, and on a steady
  * timer so the load's accumulators keep advancing while the ESP is connected).
+ *
+ * Threading: Android delivers GATT server + advertise callbacks on binder
+ * threads. Every callback here does the minimum — copy its payload, answer
+ * sendResponse (a thread-safe API), and post the real work to the main
+ * handler — so the [LoadModel], subscriber set, notify characteristic, send
+ * queue, and all [Listener] callbacks are main-thread-confined. Reads are
+ * served from volatile snapshots.
+ *
+ * Lifecycle: [start]/[stop] are guarded by a synchronous [started] intent flag
+ * (the async advertise result callbacks alone cannot be trusted for re-entry
+ * guarding — see the double-start / zombie-advert defect class). Advertising
+ * is re-armed after a central disconnects, since many stacks stop legacy
+ * advertising on connection.
+ *
+ * Notifications are chunked to each central's negotiated ATT MTU (payload cap
+ * is MTU−3) and paced by onNotificationSent, so a central that never raises
+ * the default 23-byte MTU still receives the full 28-byte frame split across
+ * notifications — both the ESP and phone-app centrals reassemble splits.
  *
  * All Bluetooth calls need BLUETOOTH_ADVERTISE + BLUETOOTH_CONNECT (API 31+);
  * the Activity gates on those before [start] is called.
@@ -51,48 +70,78 @@ class El15GattServer(private val context: Context, private val model: LoadModel)
     private var server: BluetoothGattServer? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
     private val subscribed = LinkedHashSet<BluetoothDevice>()
-    private var advertising = false
-    private var lastPushMs = 0L
+    private val mtus = HashMap<String, Int>()
 
-    val isAdvertising get() = advertising
+    /** Synchronous "user wants the peripheral running" flag (main thread). */
+    private var started = false
+    /** True once the stack confirms the advert is on air (main thread). */
+    private var advertising = false
+
+    /** Last encoded status frame; read requests answer from this on any thread. */
+    @Volatile private var lastPacket: ByteArray = ByteArray(0)
+    /** Mirror of the subscriber addresses for binder-thread CCC reads. */
+    @Volatile private var subscribedAddrs: Set<String> = emptySet()
+
+    /** Original adapter name, restored on stop so we don't rename the phone. */
+    private var originalAdapterName: String? = null
+    private var requestedName: String? = null
+
+    val isAdvertising get() = started
     val connectedCount get() = subscribed.size
 
     val isBluetoothOn: Boolean get() = adapter?.isEnabled == true
     val isPeripheralCapable: Boolean
         get() = adapter?.isMultipleAdvertisementSupported == true
 
-    // ---- Lifecycle ---------------------------------------------------------
+    // ---- Lifecycle (main thread) -------------------------------------------
     fun start(): Boolean {
-        if (advertising) return true
+        if (started) return true
         val a = adapter ?: run { listener?.onAdvertising(false, "Bluetooth unavailable"); return false }
         if (!a.isEnabled) { listener?.onAdvertising(false, "Bluetooth is off"); return false }
         if (a.bluetoothLeAdvertiser == null) {
             listener?.onAdvertising(false, "This device can't advertise BLE (no peripheral role)")
             return false
         }
-        a.name?.let { /* advertised name comes from the adapter name */ }
-        openServer()
+        if (!openServer()) {
+            listener?.onAdvertising(false, "Could not open a GATT server")
+            return false
+        }
+        started = true
+        applyAdvertisedName()
+        // Seed the read cache so a read-before-first-push isn't empty.
+        lastPacket = model.buildStatusPacket(0)
         startAdvertising()
         startPushLoop()
         return true
     }
 
     fun stop() {
+        started = false
         stopPushLoop()
-        stopAdvertising()
+        // Unconditional: a stop() racing a still-pending advertise start must
+        // still cancel the registration, or the radio keeps a zombie advert.
+        try { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) } catch (ignored: Exception) {}
+        advertising = false
         subscribed.clear()
+        subscribedAddrs = emptySet()
+        mtus.clear()
+        sendQueue.clear()
+        sending = false
         try { server?.close() } catch (ignored: Exception) {}
         server = null
         notifyChar = null
+        restoreAdapterName()
     }
 
     // ---- GATT server -------------------------------------------------------
-    private fun openServer() {
-        val srv = btManager.openGattServer(context, serverCallback) ?: return
+    private fun openServer(): Boolean {
+        // Never stack a second server on a leftover one.
+        try { server?.close() } catch (ignored: Exception) {}
+        server = null
+        val srv = btManager.openGattServer(context, serverCallback) ?: return false
         server = srv
 
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-
         val notify = BluetoothGattCharacteristic(
             NOTIFY_UUID,
             BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
@@ -104,45 +153,60 @@ class El15GattServer(private val context: Context, private val model: LoadModel)
                 BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE,
             )
         )
-
         val write = BluetoothGattCharacteristic(
             WRITE_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or
                 BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
-
         service.addCharacteristic(notify)
         service.addCharacteristic(write)
         srv.addService(service)
         notifyChar = notify
+        return true
     }
 
+    // Binder-thread callbacks: copy, respond, and post the real work to main.
     private val serverCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 main.post { listener?.onCentralConnected(device.address) }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                subscribed.remove(device)
-                main.post { listener?.onCentralDisconnected(device.address) }
+                main.post {
+                    subscribed.remove(device)
+                    subscribedAddrs = subscribed.map { it.address }.toSet()
+                    mtus.remove(device.address)
+                    sendQueue.removeAll { it.first.address == device.address }
+                    listener?.onCentralDisconnected(device.address)
+                    // Many stacks stop legacy advertising once a central
+                    // connects; re-arm so the next central can find us.
+                    if (started && !advertising) startAdvertising()
+                }
             }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            main.post { mtus[device.address] = mtu }
         }
 
         override fun onCharacteristicWriteRequest(
             device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
-            if (characteristic.uuid == WRITE_UUID) {
-                val decoded = model.decode(value)
-                main.post { listener?.onCommand(decoded.description) }
-                if (responseNeeded) {
-                    server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
-                }
+            val isCommand = characteristic.uuid == WRITE_UUID
+            if (responseNeeded) {
+                server?.sendResponse(device, requestId,
+                    if (isCommand) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
+                    offset, null)
+            }
+            if (!isCommand) return
+            val cmd = value.copyOf()
+            main.post {
+                val decoded = model.decode(cmd)
+                listener?.onCommand(decoded.description)
                 // The real device answers a poll (and reflects any change) with a
                 // fresh status frame — push immediately for snappy feedback.
                 pushStatus(force = true)
-            } else if (responseNeeded) {
-                server?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
             }
         }
 
@@ -150,12 +214,30 @@ class El15GattServer(private val context: Context, private val model: LoadModel)
             device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
-            if (descriptor.uuid == CCC_UUID) {
-                val enable = value.isNotEmpty() && value[0].toInt() != 0
-                if (enable) subscribed.add(device) else subscribed.remove(device)
-            }
             if (responseNeeded) {
                 server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+            }
+            if (descriptor.uuid == CCC_UUID) {
+                val enable = value.isNotEmpty() && value[0].toInt() != 0
+                main.post {
+                    if (enable) subscribed.add(device) else subscribed.remove(device)
+                    subscribedAddrs = subscribed.map { it.address }.toSet()
+                }
+            }
+        }
+
+        override fun onDescriptorReadRequest(
+            device: BluetoothDevice, requestId: Int, offset: Int, descriptor: BluetoothGattDescriptor,
+        ) {
+            // Never leave a read unanswered — an unanswered CCC read is an ATT
+            // timeout that drops the whole connection.
+            if (descriptor.uuid == CCC_UUID) {
+                val v = if (device.address in subscribedAddrs)
+                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, v)
+            } else {
+                server?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
             }
         }
 
@@ -164,25 +246,47 @@ class El15GattServer(private val context: Context, private val model: LoadModel)
             characteristic: BluetoothGattCharacteristic,
         ) {
             if (characteristic.uuid == NOTIFY_UUID) {
-                val pkt = model.buildStatusPacket(0)
-                val slice = if (offset in 0..pkt.size) pkt.copyOfRange(offset, pkt.size) else ByteArray(0)
-                server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, slice)
+                // Serve the cached last frame — no model access off the main thread.
+                val pkt = lastPacket
+                if (offset > pkt.size) {
+                    server?.sendResponse(device, requestId, GATT_INVALID_OFFSET, offset, null)
+                } else {
+                    server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
+                        pkt.copyOfRange(offset, pkt.size))
+                }
             } else {
                 server?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
             }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            main.post { sending = false; sendNext() }
         }
     }
 
     // ---- Advertising -------------------------------------------------------
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-            advertising = true
-            main.post { listener?.onAdvertising(true, null) }
+            main.post {
+                if (!started) {
+                    // stop() raced the pending start — cancel the late advert.
+                    try { adapter?.bluetoothLeAdvertiser?.stopAdvertising(this) } catch (ignored: Exception) {}
+                    return@post
+                }
+                advertising = true
+                listener?.onAdvertising(true, null)
+            }
         }
 
         override fun onStartFailure(errorCode: Int) {
-            advertising = false
-            main.post { listener?.onAdvertising(false, "Advertise failed (code $errorCode)") }
+            main.post {
+                advertising = false
+                if (!started) return@post
+                // Tear down fully so a retry starts clean instead of stacking
+                // servers / wedging the toggle.
+                stop()
+                listener?.onAdvertising(false, "Advertise failed (code $errorCode)")
+            }
         }
     }
 
@@ -205,27 +309,45 @@ class El15GattServer(private val context: Context, private val model: LoadModel)
         try {
             advertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
         } catch (e: Exception) {
-            listener?.onAdvertising(false, "Advertise error: ${e.message}")
+            main.post { listener?.onAdvertising(false, "Advertise error: ${e.message}") }
         }
     }
 
-    private fun stopAdvertising() {
-        if (!advertising) return
-        try { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) } catch (ignored: Exception) {}
-        advertising = false
-    }
-
-    /** Rename the advertised peripheral (adapter name; affects all BT). */
+    /**
+     * Name to advertise as. The adapter name is a system-wide setting, so the
+     * phone's original name is remembered and restored on [stop].
+     */
     fun setAdvertisedName(name: String) {
-        try { adapter?.name = name } catch (ignored: Exception) {}
+        requestedName = name
+        if (started) applyAdvertisedName()
     }
 
-    // ---- Status push loop --------------------------------------------------
+    private fun applyAdvertisedName() {
+        val name = requestedName ?: return
+        try {
+            val a = adapter ?: return
+            if (originalAdapterName == null) originalAdapterName = a.name
+            if (a.name != name) a.name = name
+        } catch (ignored: Exception) {}
+    }
+
+    private fun restoreAdapterName() {
+        val orig = originalAdapterName ?: return
+        try { adapter?.name = orig } catch (ignored: Exception) {}
+        originalAdapterName = null
+    }
+
+    // ---- Status push loop + paced, MTU-chunked notify queue (main thread) ---
     private var pushRunnable: Runnable? = null
+    private var lastPushMs = 0L
+    private val sendQueue = ArrayDeque<Pair<BluetoothDevice, ByteArray>>()
+    private var sending = false
 
     private fun startPushLoop() {
         stopPushLoop()
-        lastPushMs = System.currentTimeMillis()
+        // Monotonic clock: a wall-clock step (NTP, timezone) must not corrupt
+        // the battery-drain integration.
+        lastPushMs = SystemClock.elapsedRealtime()
         val r = object : Runnable {
             override fun run() {
                 pushStatus(force = false)
@@ -242,20 +364,46 @@ class El15GattServer(private val context: Context, private val model: LoadModel)
     }
 
     private fun pushStatus(force: Boolean) {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         val dt = (now - lastPushMs).coerceAtLeast(0)
         // Only advance the physics clock on the timed push; a forced push after a
         // command reuses the same instant so accumulators aren't double-counted.
         val pkt = model.buildStatusPacket(if (force) 0 else dt)
         if (!force) lastPushMs = now
-        val notify = notifyChar ?: return
-        notify.value = pkt
+        lastPacket = pkt
+        if (notifyChar == null) return
         val targets = subscribed.toList()
+        if (targets.isEmpty()) return
+        // Bound the queue: if a central stalls, drop the oldest chunks rather
+        // than growing forever — the next frame supersedes them anyway.
+        while (sendQueue.size > MAX_QUEUED_CHUNKS) sendQueue.removeFirst()
         for (device in targets) {
-            try { server?.notifyCharacteristicChanged(device, notify, false) } catch (ignored: Exception) {}
+            val payloadCap = ((mtus[device.address] ?: DEFAULT_MTU) - 3).coerceAtLeast(20)
+            var off = 0
+            while (off < pkt.size) {
+                val end = minOf(off + payloadCap, pkt.size)
+                sendQueue.addLast(device to pkt.copyOfRange(off, end))
+                off = end
+            }
         }
-        if (targets.isNotEmpty()) {
-            listener?.onNotified(model.lastVoltage, model.lastCurrent, model.lastWarning)
+        sendNext()
+        listener?.onNotified(model.lastVoltage, model.lastCurrent, model.lastWarning)
+    }
+
+    private fun sendNext() {
+        if (sending) return
+        val notify = notifyChar ?: return
+        val srv = server ?: return
+        while (sendQueue.isNotEmpty()) {
+            val (device, chunk) = sendQueue.removeFirst()
+            notify.value = chunk
+            val ok = try {
+                srv.notifyCharacteristicChanged(device, notify, false)
+            } catch (e: Exception) {
+                false
+            }
+            if (ok) { sending = true; return }  // wait for onNotificationSent
+            // Failed (device gone / stack busy): drop this chunk and try the next.
         }
     }
 
@@ -264,5 +412,9 @@ class El15GattServer(private val context: Context, private val model: LoadModel)
         val NOTIFY_UUID: UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
         val WRITE_UUID: UUID = UUID.fromString("0000fff3-0000-1000-8000-00805f9b34fb")
         val CCC_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        private const val DEFAULT_MTU = 23
+        private const val GATT_INVALID_OFFSET = 0x07
+        private const val MAX_QUEUED_CHUNKS = 64
     }
 }

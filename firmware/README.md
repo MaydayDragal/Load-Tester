@@ -28,8 +28,13 @@ toolchain you prefer.
 | Live monitor: V / I / P / mode / temp / fan / load / protection | ✅ |
 | Manual control: mode (CC/CV/CR/CP/CAP/DCR), setpoint, Load ON/OFF, Lock | ✅ |
 | Fuse-aware circuit-resistance test with least-squares R + R² | ✅ |
-| Built-in demo simulator (exercise everything with no hardware) | ✅ |
 | LVGL touch UI (top bar + Monitor / Control / R-Test tabs) | ✅ |
+
+There is deliberately **no on-device simulator**: all simulation lives in the
+Android **EL15 Load Simulator** app (`simulator/` in this repo), which
+impersonates the load — including full battery discharge-curve simulation —
+over a *real* BLE link. That way the firmware always exercises its actual
+radio/transport path, never an in-process fake.
 
 **Deferred to later passes** (the Android app has these; the firmware doesn't
 yet): the four bench tests (capacity/runtime/step/OCP), on-device history &
@@ -42,7 +47,7 @@ architecture below is set up so these drop in as new engines + tabs.
 main.cpp            ← owns objects + routes events   (≈ DeviceCore)
 ├─ el15_protocol.h  ← wire protocol                   (= El15Protocol.kt)
 ├─ el15_client.*    ← BLE central transport           (= El15BleManager.kt)
-├─ el15_controller.h← controller interface + demo sim (= El15Controller/El15Simulator)
+├─ el15_controller.h← controller interface           (= El15Controller)
 ├─ resistance_test.h← fuse-aware sweep engine         (= CircuitResistanceTester.kt)
 ├─ display.*        ← SH8601 AMOLED + FT3168 + LVGL glue
 ├─ ui.*             ← LVGL screens
@@ -126,11 +131,12 @@ NimBLE-Arduino 2.x is required — the 1.x callback signatures differ.
 ## Using it
 
 1. Power the board over USB; the instrument UI comes up.
-2. Tap **Connect** → pick your EL15 from the scan list (or **Demo simulator** to
-   try everything with no hardware).
+2. Tap **Connect** → pick your EL15 from the scan list.
 3. **Monitor** tab shows the live readout. **Control** sets mode / setpoint /
    load. **R-Test** runs the fuse-aware resistance sweep and shows R, Voc, R².
 
-The demo simulator models an ideal source behind a series resistance, so a
-resistance test against it recovers ~0.35 Ω / ~12.6 V — a good end-to-end check
-before you wire up real hardware.
+To test with no load hardware, run the Android **EL15 Load Simulator** app on a
+second phone: it advertises as an EL15 over real BLE and models either a fixed
+circuit (a resistance test recovers its configured emf / series R) or a full
+battery with a chemistry-accurate discharge curve. The ESP connects to it
+exactly as it would to the real instrument.
