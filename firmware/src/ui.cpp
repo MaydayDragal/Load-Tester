@@ -1004,7 +1004,11 @@ static void buildRtest() {
   lv_obj_set_style_line_color(rtChart, COL_BORDER2, LV_PART_MAIN);
   lv_obj_set_style_width(rtChart, 5, LV_PART_INDICATOR);
   lv_obj_set_style_height(rtChart, 5, LV_PART_INDICATOR);
-  lv_chart_set_type(rtChart, LV_CHART_TYPE_SCATTER);
+  // LINE, not SCATTER: the current levels are evenly spaced by construction, so
+  // plotting V against step index is truthful, and LVGL 8.4's line renderer
+  // skips LV_CHART_POINT_NONE tail slots cleanly — the scatter renderer draws
+  // them as stray far-off points (the recurring green-streak artifact).
+  lv_chart_set_type(rtChart, LV_CHART_TYPE_LINE);
   lv_chart_set_div_line_count(rtChart, 3, 4);
   rtSerFit = lv_chart_add_series(rtChart, COL_GREEN, LV_CHART_AXIS_PRIMARY_Y);
   rtSerMeas = lv_chart_add_series(rtChart, COL_AMBER, LV_CHART_AXIS_PRIMARY_Y);
@@ -2292,22 +2296,20 @@ void onTestComplete(const ResistanceTest::Result &r) {
   float vHiPlot = LV_MAX(r.openCircuitVoltage, n ? r.samples.front().voltage : 0.0f);
   if (vHiPlot - vLoPlot < 0.2f) { vLoPlot -= 0.1f; vHiPlot += 0.1f; }
   float vPad = (vHiPlot - vLoPlot) * 0.10f;
-  lv_chart_set_range(rtChart, LV_CHART_AXIS_PRIMARY_X, 0, (lv_coord_t)(xHi * 1000));
   lv_chart_set_range(rtChart, LV_CHART_AXIS_PRIMARY_Y,
                      (lv_coord_t)((vLoPlot - vPad) * 100), (lv_coord_t)((vHiPlot + vPad) * 100));
-  // LVGL 8.4's scatter renderer has quirks with empty slots and synthetic
-  // x-vectors (it even tests values against LV_CHART_POINT_CNT_DEF — an
-  // upstream typo). Keep both series structurally identical: the same measured
-  // x-positions, tails padded by repeating the last point (zero-length
-  // segments draw nothing). The fit's y values sit on the least-squares line
-  // at each measured current.
+  // Line chart plotted by step index (levels are evenly spaced). Measured V
+  // (amber) and the least-squares fit V at each level's current (green); unused
+  // tail slots are POINT_NONE, which the line renderer skips — no stray edge.
   for (int k = 0; k < RT_CHART_PTS; k++) {
-    int mi = k < n ? k : n - 1;   // n >= 2 guaranteed by the engine
-    float mx = r.samples[mi].current;
-    lv_chart_set_value_by_id2(rtChart, rtSerMeas, k, (lv_coord_t)(mx * 1000),
-                              (lv_coord_t)(r.samples[mi].voltage * 100));
-    lv_chart_set_value_by_id2(rtChart, rtSerFit, k, (lv_coord_t)(mx * 1000),
-                              (lv_coord_t)((r.openCircuitVoltage - r.resistanceOhm * mx) * 100));
+    if (k < n) {
+      lv_chart_set_value_by_id(rtChart, rtSerMeas, k, (lv_coord_t)(r.samples[k].voltage * 100));
+      lv_chart_set_value_by_id(rtChart, rtSerFit, k,
+                               (lv_coord_t)((r.openCircuitVoltage - r.resistanceOhm * r.samples[k].current) * 100));
+    } else {
+      lv_chart_set_value_by_id(rtChart, rtSerMeas, k, LV_CHART_POINT_NONE);
+      lv_chart_set_value_by_id(rtChart, rtSerFit, k, LV_CHART_POINT_NONE);
+    }
   }
   lv_chart_refresh(rtChart);
   snprintf(v1, sizeof(v1), "%.2f-%.2f V", vLoPlot, vHiPlot); lv_label_set_text(rcYRange, v1);
