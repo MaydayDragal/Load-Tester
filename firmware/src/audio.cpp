@@ -75,10 +75,11 @@ static void playNote(const Note &n) {
   int rel = min(total / 4, SAMPLE_RATE * 6 / 1000);   // avoid click transients
   float dph = 2.0f * (float)M_PI * n.freq / SAMPLE_RATE;
   float phase = 0;
-  static int16_t buf[256 * 2];   // stereo frames
+  static const int FRAMES = 512;
+  static int16_t buf[FRAMES * 2];   // stereo frames
   int i = 0;
   while (i < total) {
-    int chunk = min(256, total - i);
+    int chunk = min(FRAMES, total - i);
     for (int k = 0; k < chunk; k++, i++) {
       float env = 1.0f;
       if (i < atk) env = (float)i / atk;
@@ -89,7 +90,14 @@ static void playNote(const Note &n) {
       buf[k * 2] = s;
       buf[k * 2 + 1] = s;
     }
-    g_i2s.write((uint8_t *)buf, chunk * 4);
+    // Write the whole chunk; retry any short return so a transient timeout can't
+    // truncate the tone.
+    size_t want = (size_t)chunk * 4, done = 0;
+    while (done < want) {
+      size_t w = g_i2s.write((uint8_t *)buf + done, want - done);
+      if (w == 0) break;   // give up on a hard failure rather than spin
+      done += w;
+    }
   }
 }
 
@@ -120,7 +128,12 @@ void begin() {
   }
   g_queue = xQueueCreate(16, sizeof(Note));
   if (!g_queue) return;
-  xTaskCreate(audioTask, "audio", 4096, nullptr, 1, nullptr);
+  // Priority 8 — above the Arduino loop (1) so the task can preempt a long QSPI
+  // redraw to refill the I2S DMA (otherwise tones drop out / sound choppy when a
+  // tap fires a click and a screen redraw at the same time). It only runs in
+  // brief refill bursts (it blocks on the queue when idle and on DMA space while
+  // playing), so it doesn't starve the UI or BLE.
+  xTaskCreate(audioTask, "audio", 4096, nullptr, 8, nullptr);
   g_ready = true;
   Serial.println("[audio] ready (ES8311)");
 }
