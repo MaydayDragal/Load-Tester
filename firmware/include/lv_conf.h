@@ -40,6 +40,9 @@
 
 // Sample the touch panel every 10 ms (default 30) for lower tap latency.
 #define LV_INDEV_DEF_READ_PERIOD 10
+// Start redrawing sooner after a change (default 30 ms) so press-dim and scroll
+// feel more immediate. Redraws are still bounded by their own cost.
+#define LV_DISP_DEF_REFR_PERIOD 16
 
 // ---- Feature switches -----------------------------------------------------
 #define LV_USE_LOG 0

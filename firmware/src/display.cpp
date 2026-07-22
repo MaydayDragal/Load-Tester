@@ -24,12 +24,15 @@ static Arduino_GFX *g_gfx = g_amoled;
 namespace display {
 
 // ---- LVGL draw buffer ------------------------------------------------------
-// Partial buffer: 1/8 of the frame in two banks (double-buffered). AMOLED is
-// 16bpp; a full framebuffer (368*448*2 = ~322 KB) is too large for on-chip RAM,
-// so partial refresh is the right choice here.
-static const uint32_t BUF_LINES = LCD_HEIGHT / 8;
+// Partial buffer: 1/4 of the frame in ONE bank. AMOLED is 16bpp; a full
+// framebuffer (368*448*2 = ~322 KB) is too large for on-chip RAM. A single 1/4
+// buffer is the same RAM as the old 1/8 double buffer but HALVES the number of
+// flush chunks (4 vs 8) — each chunk pays a CASET/PASET/RAMWR overhead, which
+// was the reason effective QSPI throughput sat at ~half theoretical. Double
+// buffering bought nothing here because the flush is synchronous (no overlap of
+// render and transfer), so the second bank is better spent widening the first.
+static const uint32_t BUF_LINES = LCD_HEIGHT / 4;
 static lv_color_t *g_buf1 = nullptr;
-static lv_color_t *g_buf2 = nullptr;
 static lv_disp_draw_buf_t g_drawBuf;
 static lv_disp_drv_t g_dispDrv;
 static lv_indev_drv_t g_indevDrv;
@@ -383,7 +386,10 @@ void begin() {
   // BOOT button: strapping pin, has an external pull-up; INPUT is enough.
   pinMode(BOOT_BTN_GPIO, INPUT_PULLUP);
 
-  if (!g_gfx->begin()) {
+  // Run the QSPI display bus at 80 MHz (the SH8601/CO5300 handle it) instead of
+  // Arduino_GFX's 40 MHz default — the synchronous flush dominates every redraw,
+  // so doubling the pixel clock roughly halves screen-transition time.
+  if (!g_gfx->begin(80000000)) {
     // Panel bring-up failed — most often a QSPI pin mismatch. Check board_config.h.
     Serial.println("[display] Arduino_GFX begin() failed — verify QSPI pins");
   }
@@ -393,12 +399,11 @@ void begin() {
   lv_init();
   size_t bufPx = (size_t)LCD_WIDTH * BUF_LINES;
   g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-  g_buf2 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-  if (!g_buf1 || !g_buf2) {
+  if (!g_buf1) {
     Serial.println("[display] LVGL draw-buffer alloc failed — reduce BUF_LINES");
     return;  // don't hand LVGL null buffers
   }
-  lv_disp_draw_buf_init(&g_drawBuf, g_buf1, g_buf2, bufPx);
+  lv_disp_draw_buf_init(&g_drawBuf, g_buf1, nullptr, bufPx);
 
   lv_disp_drv_init(&g_dispDrv);
   g_dispDrv.hor_res = LCD_WIDTH;
