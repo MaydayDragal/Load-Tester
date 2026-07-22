@@ -206,8 +206,8 @@ static lv_chart_series_t *rtSerMeas, *rtSerFit;
 // completion (lv_obj_clean + ~45 allocations) interleaved frees with the chart
 // buffer reallocs and corrupted the heap -> Load access fault in the next
 // layout pass (see the 2026-07-21 panic capture).
-static const int RR_N = 15;
-enum { RR_VOC, RR_R2, RR_PSC, RR_SAG, RR_PKW, RR_TEMP, RR_FAN, RR_SWEEP,
+static const int RR_N = 16;
+enum { RR_VOC, RR_TOL, RR_R2, RR_PSC, RR_SAG, RR_PKW, RR_TEMP, RR_FAN, RR_SWEEP,
        RR_STEPS, RR_FUSELIM, RR_WIRE, RR_CONN, RR_FUSEEST, RR_ESTTOT, RR_RESID };
 static lv_obj_t *rrRow[RR_N], *rrKey[RR_N], *rrVal[RR_N];
 static const int RT_CHART_PTS = 20;  // fixed capacity = UI max steps; no reallocs
@@ -1022,7 +1022,7 @@ static void buildRtest() {
   lv_obj_set_style_pad_hor(resultList, 13, 0);
   lv_obj_set_flex_flow(resultList, LV_FLEX_FLOW_COLUMN);
   static const char *RR_KEYS[RR_N] = {
-      "Open-circuit voltage", "Fit quality (R2)", "Est. short-circuit I",
+      "Open-circuit voltage", "Uncertainty (+/-)", "Fit quality (R2)", "Est. short-circuit I",
       "Sag at max current", "Peak test power", "Load temp", "Max fan",
       "Current sweep", "Steps / samples", "Fuse limit",
       "Wire", "Contacts", "Fuse (est)", "Est. build R", "Residual vs est."};
@@ -2217,8 +2217,12 @@ void onTestComplete(const ResistanceTest::Result &r) {
   for (auto &sm : r.samples) { pkW = LV_MAX(pkW, sm.voltage * sm.current); fanMax = LV_MAX(fanMax, sm.fanSpeed); }
 
   snprintf(v1, sizeof(v1), "%.2f V", r.openCircuitVoltage); lv_label_set_text(rrVal[RR_VOC], v1);
+  // Uncertainty carries the reliable colour (green ok / amber high); R^2 is now
+  // secondary and stays neutral.
+  fmtOhm(v1, sizeof(v1), r.resistanceStdErr); lv_label_set_text(rrVal[RR_TOL], v1);
+  lv_obj_set_style_text_color(rrVal[RR_TOL], r.reliable ? COL_GREEN : COL_AMBER, 0);
   snprintf(v1, sizeof(v1), "%.4f", r.rSquared); lv_label_set_text(rrVal[RR_R2], v1);
-  lv_obj_set_style_text_color(rrVal[RR_R2], r.reliable ? COL_GREEN : COL_AMBER, 0);
+  lv_obj_set_style_text_color(rrVal[RR_R2], COL_INK, 0);
   if (r.resistanceOhm > 1e-4f) snprintf(v1, sizeof(v1), "%.1f A", r.openCircuitVoltage / r.resistanceOhm);
   else strcpy(v1, "--");
   lv_label_set_text(rrVal[RR_PSC], v1);
