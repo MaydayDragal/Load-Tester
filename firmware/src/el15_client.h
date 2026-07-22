@@ -36,9 +36,23 @@ class El15Client : public El15Controller {
   void startScan(uint32_t seconds = 8);
   void stopScan();
   bool connectTo(const char *address);   // quick-reconnect by MAC
+  // Reconnect to an address that was NOT seen in this session's scan (a stored
+  // one, after a reboot or a link loss). The address type must be supplied
+  // because it can't be recovered from the string, and a random-address peer is
+  // unreachable if we guess "public".
+  bool connectTo(const char *address, int addrType);
   void disconnect();
   void shutdownAndDisconnect();          // write LOAD_OFF, then drop the link
   State state() const { return state_; }
+
+  // The peer of the last successful connect, so a supervisor can get back to it
+  // without a scan. Empty until one succeeds.
+  const char *lastAddress() const { return lastAddr_; }
+  int lastAddressType() const { return lastAddrType_; }
+
+  // How long connectTo() may block before giving up (NimBLE default 30 s). The
+  // recovery path shortens this so a retry loop stays responsive.
+  void setConnectTimeoutMs(uint32_t ms) { connectTimeoutMs_ = ms; }
 
   // El15Controller — command frames identical to the Android app.
   void setMode(int mode) override { write(el15::modeCommand(mode)); }
@@ -93,4 +107,8 @@ class El15Client : public El15Controller {
   size_t frameLen_ = 0;
 
   uint32_t lastPollMs_ = 0;
+
+  char lastAddr_[24] = "";
+  int lastAddrType_ = 0;
+  uint32_t connectTimeoutMs_ = 30000;
 };

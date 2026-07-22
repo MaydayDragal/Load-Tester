@@ -10,7 +10,7 @@
 //   RAM   : 512 KB on-chip HP SRAM. There is NO PSRAM on this board, which is
 //           why LVGL uses a partial (1/8 frame) draw buffer.
 //   Also on board, currently unused by this firmware: QMI8658 6-axis IMU,
-//   TF/SD card slot, PWR + BOOT programmable buttons, RTC backup-battery pads.
+//   RTC backup-battery pads.
 //
 // ┌─────────────────────────────────────────────────────────────────────────┐
 // │ VERIFY THESE PINS against Waveshare's own Arduino demo for THIS board     │
@@ -87,6 +87,26 @@
 #define I2S_WS_GPIO       22
 #define I2S_DOUT_GPIO     23     // ESP -> codec DSDIN (speaker)
 #define SPK_AMP_EN_BIT    (1 << 7)  // expander bit that powers the speaker amp
+
+// ---- TF / microSD slot (SPI mode, SHARED with the panel's SPI2 host) --------
+// Verified against waveshareteam/ESP32-C6-Touch-AMOLED-1.8 pin_config.h, which
+// names them SDMMC_* out of habit — but the ESP32-C6 has NO SDMMC host
+// (soc_caps.h: no SOC_SDMMC_HOST_SUPPORTED), so the slot can only run in SPI
+// mode: CMD = MOSI, DATA/D0 = MISO, CLK = SCK.
+//
+// The C6 also has only ONE general-purpose SPI host (SOC_SPI_PERIPH_NUM = 2,
+// and SPI1 is the flash controller), and the AMOLED owns it in QSPI mode. The
+// card therefore lives on the SAME host as a second device, and sd_card.cpp
+// switches the shared clock/data signals between the panel's pins and these via
+// the GPIO matrix around every card access. Nothing may draw while the card is
+// mounted — see the routing note in sd_card.cpp.
+#define SD_SPI_SCK   11
+#define SD_SPI_MOSI  10   // card CMD
+#define SD_SPI_MISO  18   // card DAT0
+#define SD_SPI_CS     6
+// 20 MHz is the ESP-IDF default (SDMMC_FREQ_DEFAULT). Card init always probes
+// at 400 kHz first, so this only affects the data phase.
+#define SD_SPI_FREQ_KHZ 20000
 
 // ---- Backlight / brightness ------------------------------------------------
 // AMOLED brightness is a controller command (0x51), handled in display.cpp;

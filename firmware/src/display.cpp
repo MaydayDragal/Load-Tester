@@ -10,8 +10,15 @@
 // SH8601 AMOLED over QSPI via Arduino_GFX. Arduino_GFX ships an Arduino_SH8601
 // driver and an Arduino_ESP32QSPI bus; this is the same combination Waveshare's
 // demos use for this panel.
+//
+// is_shared_interface = true is REQUIRED, not cosmetic: with it false the
+// driver acquires the SPI bus lock once in begin() and never releases it, which
+// would block the SD card (a second device on the C6's only SPI host — see
+// sd_card.cpp) forever. Shared mode acquires/releases per draw instead, which
+// costs one lock round-trip per flush chunk.
 static Arduino_DataBus *g_bus = new Arduino_ESP32QSPI(
-    LCD_QSPI_CS, LCD_QSPI_SCK, LCD_QSPI_D0, LCD_QSPI_D1, LCD_QSPI_D2, LCD_QSPI_D3);
+    LCD_QSPI_CS, LCD_QSPI_SCK, LCD_QSPI_D0, LCD_QSPI_D1, LCD_QSPI_D2, LCD_QSPI_D3,
+    true /* is_shared_interface */);
 // Keep the typed SH8601 pointer so we can call its setBrightness(); g_gfx is
 // the base-class view used for drawing.
 // Arduino_GFX 1.6.x signature: (bus, rst, rotation, w, h, col/row offsets…).
@@ -148,12 +155,13 @@ static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
   // invisible, so letting the press through would blind-press whatever sits
   // under the finger. Report a release and swallow the gesture.
   if (g_asleep) {
-    if (r == 1) setSleep(false);
+    if (r == 1) noteActivity();   // wakes; the gesture itself is swallowed
     data->state = LV_INDEV_STATE_REL;
     data->point = lastPt;
     return;
   }
   if (r == 1) {
+    noteActivity();   // also undoes an idle dim before the tap is delivered
     lv_point_t p = {(lv_coord_t)x, (lv_coord_t)y};
     if (lastState == LV_INDEV_STATE_REL) snapOfs = snapOffset(p);  // new gesture
     lastPt.x = (lv_coord_t)(p.x + snapOfs.x);
@@ -322,6 +330,29 @@ bool rtcTime(int &year, int &mon, int &day, int &hour, int &min, int &sec) {
   return true;
 }
 
+bool setRtcTime(int year, int mon, int day, int hour, int min, int sec) {
+  if (year < 2000 || year > 2099) return false;
+  auto bcd = [](int v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); };
+  // Control_1 bit 5 (STOP) must be clear for the oscillator to run; clear it
+  // first in case the part came up halted, then write the time. Writing the
+  // seconds register also clears the OS (oscillator-stop) flag, which is what
+  // rtcTime() reads to decide whether the clock has ever been set.
+  Wire.beginTransmission(RTC_I2C_ADDR);
+  Wire.write(0x00);
+  Wire.write(0x00);
+  if (Wire.endTransmission() != 0) return false;
+  Wire.beginTransmission(RTC_I2C_ADDR);
+  Wire.write(0x04);          // auto-increments through 0x0A
+  Wire.write(bcd(sec) & 0x7F);
+  Wire.write(bcd(min));
+  Wire.write(bcd(hour));     // 24-hour mode (Control_1 bit 1 left at 0)
+  Wire.write(bcd(day));
+  Wire.write(0);             // weekday: unused by rtcTime()
+  Wire.write(bcd(mon));
+  Wire.write(bcd(year - 2000));
+  return Wire.endTransmission() == 0;
+}
+
 // The AMOLED's reset/enable lines are on the on-board TCA9554 I/O expander, not
 // a GPIO. Drive expander bits 4 & 5 high (read-modify-write on the config +
 // output registers) to power/enable the panel and release it from reset, then
@@ -418,8 +449,159 @@ void begin() {
   lv_indev_drv_register(&g_indevDrv);
 }
 
+// ---- AMOLED burn-in mitigation ---------------------------------------------
+// This is a static instrument UI on an OLED: "VOLTAGE", "CURRENT", the status
+// strip and the card outlines sit in exactly the same pixels for hours at a
+// time, and on an AMOLED that is permanent damage, not a temporary artefact.
+// Two cheap defences, both on by default:
+//
+//   1. Pixel shift — the whole UI creeps around a 3x3 px box, one step every
+//      PIXEL_SHIFT_MS. No edge sits over the same subpixel for more than a few
+//      minutes, which is what smears the wear out. Applied as a translate on
+//      the active screen and the overlay layer, so it costs one redraw per step
+//      and needs no cooperation from the UI code.
+//   2. Idle dim, then black — after idleDimS of no touch the panel drops to a
+//      readable-but-dark level; after IDLE_SLEEP_FACTOR x that it blanks
+//      entirely (an AMOLED drawing black uses no backlight power at all).
+//      Either state ends on the first touch. Sleep is suppressed while
+//      inhibitSleep(true) is set, so a long unattended test keeps its (dimmed)
+//      screen instead of going dark mid-run.
+static const uint32_t PIXEL_SHIFT_MS = 90000;
+static const int IDLE_SLEEP_FACTOR = 5;
+static const uint8_t IDLE_DIM_LEVEL = 24;   // out of 255
+
+static bool g_pixelShift = true;
+static uint16_t g_idleDimS = 0;             // 0 = never dim
+static bool g_inhibitSleep = false;
+static bool g_dimmed = false;
+static uint32_t g_lastActivityMs = 0;
+
+void setPixelShift(bool on) {
+  g_pixelShift = on;
+  if (!on) {   // park the layout back at its true position
+    lv_obj_set_style_translate_x(lv_scr_act(), 0, 0);
+    lv_obj_set_style_translate_y(lv_scr_act(), 0, 0);
+    lv_obj_set_style_translate_x(lv_layer_top(), 0, 0);
+    lv_obj_set_style_translate_y(lv_layer_top(), 0, 0);
+  }
+}
+bool pixelShift() { return g_pixelShift; }
+
+void setIdleDim(uint16_t seconds) {
+  g_idleDimS = seconds;
+  noteActivity();
+}
+uint16_t idleDim() { return g_idleDimS; }
+
+void inhibitSleep(bool on) { g_inhibitSleep = on; }
+
+void noteActivity() {
+  g_lastActivityMs = millis();
+  if (g_dimmed) {   // restore the user's brightness on any interaction
+    g_dimmed = false;
+    setBrightness(g_brightness);
+  }
+  if (g_asleep) setSleep(false);
+}
+
+static void pixelShiftTick() {
+  static const lv_coord_t OFS[][2] = {{0, 0}, {2, 0}, {2, 2}, {0, 2}};
+  static uint32_t lastMs = 0;
+  static uint8_t idx = 0;
+  if (!g_pixelShift) return;
+  uint32_t now = millis();
+  if (now - lastMs < PIXEL_SHIFT_MS) return;
+  lastMs = now;
+  idx = (uint8_t)((idx + 1) % (sizeof(OFS) / sizeof(OFS[0])));
+  lv_obj_t *targets[2] = {lv_scr_act(), lv_layer_top()};
+  for (lv_obj_t *t : targets) {
+    lv_obj_set_style_translate_x(t, OFS[idx][0], 0);
+    lv_obj_set_style_translate_y(t, OFS[idx][1], 0);
+  }
+}
+
+static void idleTick() {
+  if (g_idleDimS == 0 || g_asleep) return;
+  uint32_t idleMs = millis() - g_lastActivityMs;
+  if (!g_dimmed && idleMs >= (uint32_t)g_idleDimS * 1000) {
+    g_dimmed = true;
+    // Straight to the panel: g_brightness stays the user's value so any wake
+    // (or a Settings change) restores it without having to remember it here.
+    g_amoled->setBrightness(min(IDLE_DIM_LEVEL, g_brightness));
+  }
+  if (g_dimmed && !g_inhibitSleep &&
+      idleMs >= (uint32_t)g_idleDimS * IDLE_SLEEP_FACTOR * 1000) {
+    setSleep(true);
+  }
+}
+
+// ---- Low-memory mode (Wi-Fi window) ----------------------------------------
+// This board has 320 KB of RAM and no PSRAM. The full LVGL UI (LVGL allocates
+// from the system heap), NimBLE, and the 82 KB 1/4-frame draw buffer together
+// leave only ~1.5 KB free — so esp_wifi_init's ~50 KB fails with NO_MEM and the
+// Wi-Fi scan/NTP path can't run. Rather than tear BLE down (which would strand
+// a live load), we shrink the draw buffer for the duration of a Wi-Fi op: the
+// 82 KB buffer is swapped for a tiny one, freeing enough for Wi-Fi while the UI
+// keeps rendering (just in more, smaller flush chunks — slower, fine for a
+// settings screen). Restored the moment Wi-Fi is done.
+static const uint32_t SMALL_BUF_LINES = 16;   // ~11.5 KB vs the full ~82 KB
+static bool g_lowMem = false;
+
+static bool allocDrawBuf(uint32_t lines) {
+  size_t bufPx = (size_t)LCD_WIDTH * lines;
+  lv_color_t *nb = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t),
+                                                  MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  if (!nb) return false;
+  g_buf1 = nb;
+  lv_disp_draw_buf_init(&g_drawBuf, g_buf1, nullptr, bufPx);
+  return true;
+}
+
+// Swap the draw buffer. Frees the current one FIRST so the replacement (and, in
+// low-mem mode, Wi-Fi) has room — we only have ~1.5 KB spare, nowhere near
+// enough to hold both buffers at once. Safe because we run on the loop task and
+// never from inside flushCb.
+//
+// Restoring is best-effort: once Wi-Fi has churned the heap, the original 82 KB
+// contiguous block usually can't be reassembled (largest free block ~18-40 KB),
+// so we probe DOWN from full and take the biggest buffer that still allocs. The
+// UI ends up as fast as the fragmented heap allows and fully recovers on the
+// next reboot. Entering low-mem always uses the smallest buffer to free the
+// most for Wi-Fi.
+void setLowMemMode(bool on) {
+  if (on == g_lowMem) return;
+  heap_caps_free(g_buf1);
+  g_buf1 = nullptr;
+  uint32_t got = 0;
+  if (on) {
+    got = allocDrawBuf(SMALL_BUF_LINES) ? SMALL_BUF_LINES : 0;
+  } else {
+    // Largest-first ladder, capped at the build-time full size.
+    static const uint32_t LADDER[] = {BUF_LINES, 96, 80, 64, 48, 32, 24, SMALL_BUF_LINES};
+    for (uint32_t lines : LADDER) {
+      if (lines > BUF_LINES) continue;
+      if (allocDrawBuf(lines)) { got = lines; break; }
+    }
+  }
+  if (!got) {
+    Serial.println("[display] FATAL: no draw buffer after swap");
+    return;   // next flush would deref null; nothing safe to do here
+  }
+  g_lowMem = got < BUF_LINES;
+  lv_obj_invalidate(lv_scr_act());
+  lv_obj_invalidate(lv_layer_top());
+  lv_refr_now(NULL);
+  Serial.printf("[display] draw buffer -> %u lines (%s), heap now %u free\n",
+                (unsigned)got, g_lowMem ? "reduced" : "full",
+                (unsigned)ESP.getFreeHeap());
+}
+
+bool lowMemMode() { return g_lowMem; }
+
 void loopTick() {
   lv_timer_handler();
+  pixelShiftTick();
+  idleTick();
 }
 
 }  // namespace display

@@ -43,15 +43,21 @@ main.cpp            owns objects, routes events, buttons, emergency stop
 el15_protocol.h     wire protocol (header-only, pure): parse + command frames
 el15_client.{h,cpp} BLE central (NimBLE 2.5): scan/connect/subscribe/poll/reassemble
 el15_controller.h   El15Controller interface ONLY (demo simulator removed — see §5)
-resistance_test.h   fuse-aware sweep engine — bidirectional + slope uncertainty (§6)
+resistance_test.h   fuse-aware sweep engine — bidirectional + slope uncertainty +
+                    4-wire/tare correction (§6)
 capacity_test.h     battery discharge / capacity engine
 display.{h,cpp}     CO5300/SH8601 AMOLED (QSPI 80 MHz) + touch + LVGL + touch-snap
-                    engine + PMIC/RTC reads + buttons + display sleep
+                    engine + PMIC/RTC read+set + buttons + sleep + burn-in shift/dim
 audio.{h,cpp}       ES8311 codec feedback (continuous-stream I2S tone synth)
 es8311.{c,h},        vendored Espressif/Waveshare ES8311 driver (Arduino I²C HAL)
   es8311_reg.h
-ui.{cpp,h}          LVGL UI (~2400 lines) — all screens, overlays, result rows
-board_config.h      ALL board pins (display, touch, PMIC, RTC, audio, buttons)
+sd_card.{h,cpp}     microSD over the shared SPI host (mount/write/unmount per op)
+report.h            CSV test reports (RTEST_/BATT_) written via sd_card
+prefs.{h,cpp}       NVS persistence (debounced) + synchronous in-flight/creds flags
+link_guard.h        link-loss auto-stop supervisor + crash-recovery (header-only)
+netclock.{h,cpp}    Wi-Fi scan + NTP → PCF85063 (radio powered only per op)
+ui.{cpp,h}          LVGL UI (~2700 lines) — all screens, overlays, result rows
+board_config.h      ALL board pins (display, touch, PMIC, RTC, audio, buttons, SD)
 include/lv_conf.h   LVGL config (fonts, chart, refr period 16 ms, indev 10 ms)
 platformio.ini      pioarduino platform, qio_qspi, huge_app.csv, -Wall -Wextra
 ```
@@ -86,10 +92,13 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 - **PMIC:** AXP2101 at 0x34. VBAT ADC enabled at boot (reg 0x30 bit0). Battery %
   reg 0xA4, VBAT reg 0x34/0x35. **PWR key** arrives as PMIC IRQ bits (INTSTS2
   0x49, bits 3=short/2=long; enable INTEN2 0x41).
-- **RTC:** PCF85063 at 0x51 (read-only; honors oscillator-stop flag → "Not set").
+- **RTC:** PCF85063 at 0x51. Read via `rtcTime()`; now also settable via
+  `setRtcTime()` (clears the oscillator-stop flag), driven by the NTP sync.
+- **SD/TF slot:** SPI mode (C6 has no SDMMC), SCK=11 MOSI=10 MISO=18 **CS=6**,
+  on the panel's SPI2 host with signals re-routed per access. See `sd_card.cpp`.
 - **Buttons:** **BOOT = GPIO9** (active-low strapping pin). **PWR = PMIC key**.
-- Unused hardware still on the board: QMI8658 IMU, SD/TF slot, Wi-Fi 6 / 802.15.4
-  radios, RTC backup-battery pads. See `FEATURE_IDEAS.md`.
+- Unused hardware still on the board: QMI8658 IMU, 802.15.4 radio, RTC
+  backup-battery pads. Wi-Fi is now used (NTP only). See `FEATURE_IDEAS.md`.
 
 ---
 
@@ -171,6 +180,22 @@ line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
 - Full R-test / capacity runs against the **phone simulator or a real EL15**
   (no on-device demo now, so these can't be auto-driven from firmware).
 - **Real ALIENTEK EL15** still untested in-house.
+- **SD card**: written but never run against a card. Check (a) the panel still
+  draws normally after a save — that path re-routes the shared SPI bus, (b)
+  `RTEST_NNN.CSV` appears and opens in a spreadsheet, (c) with no card in the
+  slot the button says "No card detected" rather than claiming a save.
+- **Persistence / burn-in / NTP / Kelvin (this session):** all compile and the
+  board boots clean, but none is confirmed working end-to-end. To verify:
+  change brightness/volume/sample-rate → reboot → they stick; leave it idle and
+  watch the dim→blank, tap to wake; Settings ▸ Clock → tap "Wi-Fi network" to
+  scan, pick one, type the password → "Sync clock now" sets the RTC row;
+  R-test ▸ 2-wire ▸ "Measure (short the probes)"
+  stores a tare that then subtracts from a real run; toggle 4-wire and confirm
+  the result shows the wiring. Then re-run an R-test/capacity save and confirm
+  the CSV header now carries the probe wiring + timestamp.
+- **Link-loss / crash recovery:** kill the simulator mid-discharge → expect the
+  red locked banner + repeating alarm + reconnect attempts; pull power mid-test
+  → on reboot expect the amber "LOAD MAY STILL BE ON" recovery offer.
 
 ---
 
@@ -179,10 +204,12 @@ line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
 **Safety / correctness**
 - **Triage the rest of the QA audit** (task `wyoedvuk0` output; only the top 2
   were fixed). Re-run `/code-review` or the workflow if needed.
-- **BLE-drop supervisor during a capacity discharge:** on link loss the engine
-  aborts, but a real pack keeps being sunk until the EL15's own UVP — document /
-  recommend setting the hardware UVP; consider reconnect-and-stop (CAPACITY_PLAN
-  §3).
+- ~~BLE-drop supervisor during a capacity discharge~~ **done** — `link_guard.h`
+  now reconnects and force-pushes LOAD OFF on any hot link loss, with a locked
+  alarm banner, and an NVS in-flight flag offers the same recovery after a
+  crash/reboot. Still recommend setting the EL15's hardware UVP as a backstop
+  (the guard needs a working radio to act). **Untested against a real drop** —
+  verify by killing the simulator mid-discharge.
 
 **Biggest felt improvements**
 - **Async `esp_lcd` DMA flush** — the real fix for UI lag. Arduino exposes
@@ -191,12 +218,19 @@ line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
   done-callback calling `lv_disp_flush_ready`, restore double buffering. Roughly
   halves redraw cost. (User asked about Arduino vs IDF — conclusion: stay
   Arduino, drop to IDF APIs only here and for I²S if needed.)
-- **SD card save** (Phase 0 of CAPACITY_PLAN): the "Save to SD" button is a stub
-  for BOTH R-test and capacity. C6 has **no SDMMC** → must use SPI mode
-  (SCK=11 MOSI=10 MISO=18; **CS pin unverified**). Unblocks logging/history/export.
-- **NVS persistence:** brightness, volume/mute, sample rate, last battery config
-  all reset on reboot. Highest quality-of-life-per-hour.
-- **RTC set-time UI** (or NTP over the unused Wi-Fi) so logs get real timestamps.
+- ~~SD card save~~ **done** (Phase 0 of CAPACITY_PLAN): `sd_card.cpp` + `report.h`
+  write real `RTEST_NNN.CSV` / `BATT_NNN.CSV` files, and both Save buttons now
+  report the file name or the actual failure. **Untested on hardware** — needs a
+  card in the slot. Read the shared-bus note in `sd_card.cpp` before touching
+  either the panel or the card: pins are SPI SCK=11 MOSI=10 MISO=18 **CS=6**
+  (verified against Waveshare's `pin_config.h`).
+- ~~NVS persistence~~ **done** — `prefs.cpp` persists brightness, volume/mute,
+  sample rate, screen-protection, R-test + battery setup, Wi-Fi creds and the
+  last device; debounced commit from `loop()`, restored in `ui::begin()` before
+  the widgets are built. Named/recallable profiles are the remaining stretch.
+- ~~RTC set-time~~ **done via NTP** — Settings ▸ Clock: enter Wi-Fi + UTC
+  offset, "Sync clock now" (`netclock.cpp`) sets the PCF85063. A manual
+  stepper set-time UI is still a nice-to-have for when there's no Wi-Fi.
 
 **R-Test accuracy tier 2** (RTEST_ACCURACY.md §5, items 4–6, not done)
 - Tare/zero step (subtract lead+contact resistance) — biggest low-R absolute-
@@ -225,6 +259,34 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
   ui.cpp + guards in main.cpp). Keep these guards.
 - **Board pin/chip names** in Waveshare's marketing (CO5300/CST820) differ from
   what the code drives (SH8601/FocalTech) — both documented in `board_config.h`.
+- **Wi-Fi and BLE share one antenna path** on the C6. NTP powers the radio only
+  for the sync and turns it off again (`netclock.cpp` always `radioOff()`s), and
+  a sync is refused while a test runs — the BLE link is the only way to stop the
+  load, so it must not be starved. Keep both rules if you add more Wi-Fi.
+- **Wi-Fi is RAM-starved, not coex-limited.** 320 KB, no PSRAM: the LVGL UI
+  (LV_MEM_CUSTOM → system heap), NimBLE, and the 82 KB 1/4-frame draw buffer
+  leave only **~1.5 KB free**, so `esp_wifi_init` (~50 KB) fails with NO_MEM.
+  Fix: `display::setLowMemMode(true)` shrinks the draw buffer to 16 lines for the
+  duration of a scan/sync, freeing ~70 KB; the UI keeps rendering (more, smaller
+  flush chunks). The full 82 KB block can NOT be reassembled afterwards (heap is
+  fragmented to ~18-40 KB max), so a successful **clock sync auto-reboots** to
+  get the fast buffer back (RTC + NVS persist, so nothing is lost). If you add
+  any other Wi-Fi feature, wrap it in the same low-mem window and expect the
+  post-op reboot. Do NOT try to raise the draw buffer back to full at runtime.
+- **Loop stack is 12 KB** (`ARDUINO_LOOP_STACK_SIZE`), raised from 8 KB for
+  FATFS's on-stack long-filename buffer. NVS, Wi-Fi and the SD writes all run on
+  the loop task; don't drop it back.
+- **NVS commits are debounced** (`prefs::tick()`, 1.5 s settle) so a slider drag
+  is one flash write, but the in-flight recovery flag and Wi-Fi creds are
+  written synchronously on purpose — they have to survive the very next event.
+- **One SPI host, two peripherals:** the C6 has a single general-purpose SPI
+  controller (SPI2) and the AMOLED owns it. The SD card is a second *device* on
+  it, and `sd_card.cpp` swings the clock/data signals between the two pin sets
+  through the GPIO matrix around each card access. Consequences to preserve:
+  Arduino_GFX must be constructed with `is_shared_interface = true` (otherwise
+  it holds the bus lock forever and the card hangs), the card is never left
+  mounted, and nothing may draw while it is — the UI paints its "Writing to
+  card..." state and calls `lv_refr_now()` *before* the blocking save.
 
 ---
 
@@ -235,7 +297,7 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
   extend it as features land).
 - `QA_REPORT.md` — earlier defect report (some items since fixed).
 - `RTEST_ACCURACY.md` — R-test measurement methodology & remaining improvements.
-- `CAPACITY_PLAN.md` — battery-test roadmap (SD phase still open).
+- `CAPACITY_PLAN.md` — battery-test roadmap (Phase 0 SD now landed).
 - `FEATURE_IDEAS.md` — full feature/UX/audio/buttons backlog.
 - `UI_DESIGN_BRIEF.md` — v2 "Focus" UI spec.
 

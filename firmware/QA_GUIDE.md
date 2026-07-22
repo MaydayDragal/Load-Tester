@@ -283,11 +283,35 @@ mode-specific tail (temp/setpoint, or CAP energy/capacity, or DCR I1/I2/mΩ).
 ## 8. Known gaps, stubs & risk areas
 
 **Stubs / not implemented:**
-- **SD-card save** — the R-Test "Save to SD card" button flips to a
-  `Saved — RTEST_NNN.csv` confirmation but **writes no file** (SDMMC:
-  CLK=11 CMD=10 D0=18 — wired in `main.cpp` as a TODO). Do not treat the
-  confirmation as a real save.
-- **R-Test result "Timestamp"** row omitted (no RTC on-device yet).
+- **SD-card save** — now real (`sd_card.cpp`, SPI mode: SCK=11 MOSI=10 MISO=18
+  CS=6) but **not yet exercised against a card**. It writes `RTEST_NNN.CSV` /
+  `BATT_NNN.CSV` at the card root. Test: with a FAT32 card, Save should turn
+  green with the file name; with the slot empty it must turn red with "No card
+  detected" — a confirmation is only ever shown for a file that really landed.
+  Also confirm the panel keeps drawing normally afterwards (the card and the
+  display share one SPI host). Settings ▸ SD CARD ▸ *Check card* probes the slot
+  without writing.
+- **Capacity CSV holds the summary only** — the per-sample discharge curve is
+  Phase 3 of CAPACITY_PLAN.md.
+- **CSV timestamps** fall back to uptime seconds until the RTC is set (Settings
+  ▸ Clock ▸ Wi-Fi NTP sync sets it); the R-Test result *screen* has no
+  Timestamp row.
+
+**New this session (compile-clean, hardware-unverified):**
+- **NVS persistence** (`prefs`) — brightness, volume/mute, sample rate, screen
+  protection, R-test + battery setup, Wi-Fi, last device. Verify by changing a
+  setting, rebooting, and confirming it stuck.
+- **Screen protection** (`display`) — pixel shift on by default; idle dim then
+  blank, waking on any touch/button; blank suppressed while a test runs.
+- **Link-loss supervisor + crash recovery** (`link_guard`) — locked red alarm
+  banner + reconnect-and-force-LOAD-OFF on a hot drop; amber recovery offer on
+  the next boot after a crash left the load on.
+- **4-wire / lead tare** (`resistance_test`) — 2-wire/4-wire toggle; a shorted-
+  probe tare sweep that subtracts from later 2-wire results (raw shown too).
+- **NTP clock sync** (`netclock`) — Settings ▸ Clock ▸ tap "Wi-Fi network"
+  scans and lists nearby SSIDs (signal bars, "Hidden/manual" for unlisted ones);
+  pick one, type the password, "Sync clock now". Radio up only for the
+  scan/sync, both refused while a test runs.
 - Android-app features **not ported**: capacity/runtime/step/OCP bench tests,
   on-device history, settings, alarms, calibration sweep.
 

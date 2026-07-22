@@ -128,17 +128,23 @@ void El15Client::stopScan() {
 
 // ---- Connection ------------------------------------------------------------
 bool El15Client::connectTo(const char *address) {
+  // Reuse the address type discovered during the scan (public vs random); phones
+  // and some EL15 units advertise a random address, which a forced-public
+  // connect can't reach. Fall back to public only if we don't have it.
+  int type = BLE_ADDR_PUBLIC;
+  for (auto &x : scanAddrs_) if (x.toString() == std::string(address)) { type = x.getType(); break; }
+  return connectTo(address, type);
+}
+
+bool El15Client::connectTo(const char *address, int addrType) {
   stopScan();
   setState(CONNECTING, "Connecting...");
   if (!client_) {
     client_ = NimBLEDevice::createClient();
     client_->setClientCallbacks(&g_clientCallbacks, false);
   }
-  // Reuse the address type discovered during the scan (public vs random); phones
-  // and some EL15 units advertise a random address, which a forced-public
-  // connect can't reach. Fall back to public only if we don't have it.
-  NimBLEAddress addr(std::string(address), BLE_ADDR_PUBLIC);
-  for (auto &x : scanAddrs_) if (x.toString() == std::string(address)) { addr = x; break; }
+  client_->setConnectTimeout(connectTimeoutMs_);
+  NimBLEAddress addr(std::string(address), (uint8_t)addrType);
   Serial.printf("[ble] connecting to %s (addr type %d)\n", address, addr.getType());
   if (!client_->connect(addr)) {
     setState(IDLE, "Connect failed");
@@ -154,6 +160,8 @@ bool El15Client::connectTo(const char *address) {
   if (notifyChar_->canNotify()) notifyChar_->subscribe(true, notifyCb);
   frameLen_ = 0;
   lastPollMs_ = 0;
+  snprintf(lastAddr_, sizeof(lastAddr_), "%s", address);
+  lastAddrType_ = addrType;
   setState(CONNECTED, "Connected - FFF0");
   return true;
 }

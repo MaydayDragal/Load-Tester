@@ -15,8 +15,9 @@ This is the headline: most of the board is idle. Every feature below marked
 | **WiFi 6 radio** | completely unused | web UI, REST/MQTT, NTP clock, OTA updates, cloud logging, alerts |
 | **802.15.4 radio** (Thread/Zigbee/Matter) | completely unused | smart-home integration without WiFi |
 | **QMI8658 6-axis IMU** | completely unused | auto-rotate, tap/shake gestures, wake-on-lift, e-stop shake |
-| **SD card slot** | wired, driver stubbed | all logging/export (already Phase 0 of CAPACITY_PLAN.md) |
-| **PCF85063 RTC** | read-only | real timestamps on logs — needs a set-time path (or NTP) |
+| **SD card slot** | CSV test reports (shares the panel's SPI host) | live streaming logs, history browser, load-profile replay |
+| **PCF85063 RTC** | now settable (Wi-Fi NTP) | real timestamps on logs — done; manual set-time UI still optional |
+| **WiFi 6 radio** | NTP clock sync (Settings ▸ Clock) | web UI, REST/MQTT, OTA, cloud logging still open |
 | **AXP2101 PMIC** | read-only | sleep/low-power modes, runtime estimate, charge control |
 | **PWR + BOOT buttons** | completely unused | physical emergency-stop / wake / quick-action keys that work without looking |
 | **Audio out** | completely unused | completion tones, fault alarms, audible probing — see §14 for the hardware caveat |
@@ -71,7 +72,7 @@ lifting; several of these are small deltas on existing code.
 
 | Feature | Effort | Notes |
 |---|---|---|
-| **NTP time sync** | **S** | Fixes the "RTC not set" problem with no UI work at all. |
+| ~~NTP time sync~~ | **done** | Settings ▸ Clock: **scan and pick** a network (hidden/manual entry too), type the password, set UTC offset, "Sync clock now". Radio is powered only for the scan/sync and both are refused while a test runs (shared antenna with BLE). `netclock.cpp`. |
 | **OTA firmware update** | S–M | No more USB cable for updates. |
 | **Built-in web UI** | L | Full control + live charts from any browser; the big-screen companion this 1.8″ display can't be. |
 | **REST API / MQTT publish** | M | Home Assistant, Grafana, InfluxDB, lab scripting. |
@@ -85,8 +86,8 @@ lifting; several of these are small deltas on existing code.
 
 | Feature | Effort | Notes |
 |---|---|---|
-| **Link-loss auto-stop supervisor** | **S–M** | *Real current gap today*: if BLE drops mid-discharge the load keeps sinking until the EL15's own UVP. Add reconnect-and-stop + a loud alert. |
-| **Crash/reboot recovery** | M | NVS "test in progress" flag → on boot, reconnect and force LOAD OFF. |
+| ~~Link-loss auto-stop supervisor~~ | **done** | `link_guard.h`: whenever the load reports ON, a dropped link starts a reconnect-and-force-LOAD-OFF loop (8 tries) with a locked red banner + repeating alarm; gives up loudly rather than silently. |
+| ~~Crash/reboot recovery~~ | **done** | NVS in-flight flag (written synchronously while energised) → on boot, offers "reconnect and force LOAD OFF" using the stored last device. `prefs` + `link_guard`. |
 | **Temperature auto-abort** | S | User-set limit; stop before the load cooks. |
 | **User soft limits** | S | Cap max current/power below hardware ratings for a given setup. |
 | **Confirm dialog above a power threshold** | S | Guard rail for high-energy runs. |
@@ -98,8 +99,8 @@ lifting; several of these are small deltas on existing code.
 
 | Feature | Effort | Notes |
 |---|---|---|
-| **Persistent settings + test profiles (NVS)** | **S–M** | Remember brightness, sample rate, last battery config; save/recall named setups. Highest quality-of-life per hour of work. |
-| **Auto-dim / sleep + wake-on-tap** | S | Battery life during long unattended tests. |
+| ~~Persistent settings (NVS)~~ | **done** | `prefs.cpp`: brightness, volume/mute, sample rate, screen-protection, R-test + battery setup, Wi-Fi, last device all survive a reboot. Named/recallable *profiles* still open. |
+| ~~Auto-dim / sleep + wake-on-tap~~ | **done** | Settings ▸ Screen protection: dim after 1/2/5 min idle, blank at 5x that, wake on any touch/button. Blank is suppressed while a test runs. `display.cpp`. |
 | **Idle "watch face"** | S | Clock, battery, last result when nothing is connected. |
 | **Screen auto-rotate (IMU)** | S | Free with the IMU. |
 | **Customisable Menu tiles / favourites** | S | Put your two real workflows on the home screen. |
@@ -112,8 +113,8 @@ lifting; several of these are small deltas on existing code.
 | Feature | Effort | Notes |
 |---|---|---|
 | **2-point user calibration of V and I** | M | Correct against a reference DMM, store slope/offset in NVS. Turns "indication" into "measurement". |
-| **Zero/tare offset** | S | Removes lead/contact offset before an R-test. |
-| **4-wire (Kelvin) workflow support** | S | Mostly UI guidance + a mode flag; dramatically improves low-resistance accuracy. |
+| ~~Zero/tare offset~~ | **done** | R-test setup (2-wire): "Measure (short the probes)" runs a tare sweep, stores it in NVS, subtracts it from every later result and shows the raw figure alongside. |
+| ~~4-wire (Kelvin) workflow support~~ | **done** | R-test setup has a 2-wire/4-wire toggle with hook-up guidance; the result carries the wiring and (2-wire) the tare. `resistance_test.h` + `ui.cpp`. |
 | **Calibration due-date reminder** | S | If this ever does real QA work. |
 
 ## 7. Optional external hardware
@@ -182,8 +183,8 @@ Small screen, so every pixel should carry information.
 
 | Idea | Effort | Why |
 |---|---|---|
-| **Burn-in mitigation (pixel shift)** | **S** | *Genuinely important and non-obvious*: this is a static instrument UI on an **AMOLED**. Fixed labels like "VOLTAGE"/"CURRENT" sitting in place for hours will burn in permanently. A 1–2 px slow drift of the whole layout, plus periodic full-screen refresh, costs almost nothing and protects the panel. |
-| **True-black idle mode** | S | AMOLED pixels use no power when black. Dim to a single value on a black field when idle — big battery win on long unattended tests. |
+| ~~Burn-in mitigation (pixel shift)~~ | **done** | The whole layout creeps around a 3x3 px box every 90 s (`display.cpp`), on by default, toggle in Settings ▸ Screen protection. |
+| ~~True-black idle mode~~ | **done** | Idle dim → blank (AMOLED black = no power); see the auto-dim row in §5. |
 | **7-segment / LCD-style hero font** | M | A generated instrument-style numeric font would make it *look* like bench gear instead of a phone app. Also lets you reach the 64 px hero size the original spec wanted (Montserrat maxes at 48). |
 | **Proper icon font (Phosphor)** | M | Replaces the approximated LVGL built-in symbols noted in the QA guide. |
 | **Screen transitions (slide/fade)** | S | LVGL supports animated screen changes; makes swipe navigation feel real. |
@@ -267,17 +268,19 @@ is exactly what you want when something is wrong.
 
 ## Suggested next moves
 
-If the goal is **maximum value for least work**, in order:
+*Landed since this list was written: SD CSV reports, NVS persistence, the
+link-loss supervisor + crash recovery, NTP clock sync, AMOLED burn-in
+mitigation, and 4-wire/tare R-test support. What's left, highest value first:*
 
 1. **Solar I-V / max-power-point mode** — the sweep engine already collects
    everything needed; this is mostly a second results view. (S)
-2. **NVS persistence + test profiles** — every session currently starts from
-   defaults; this is the most-felt daily annoyance. (S–M)
-3. **SD logging** — unblocks history, comparison, and export all at once. (M)
-4. **Link-loss auto-stop supervisor** — closes the one genuine safety gap in
-   the current design. (S–M)
-5. **NTP + OTA over WiFi** — real timestamps and cable-free updates, and it
-   lights up a radio that is doing nothing today. (S–M)
+2. **Named test profiles / history** — NVS persistence landed, but save/recall
+   of *named* setups and an on-device history browser (now that SD works) are
+   the next step. (M)
+3. **OTA over WiFi** — the radio is already used for NTP; OTA removes the USB
+   cable for updates. (S–M)
+4. **Capacity per-sample CSV streaming** (CAPACITY_PLAN Phase 3) — today's
+   `BATT_NNN.CSV` has the summary but not the discharge curve. (S)
 
 If the goal is **turning this into a product-grade instrument**: calibration,
 pass/fail limits, named history, and the web UI are the differentiators.
@@ -286,12 +289,12 @@ If the goal is **making the device nicer to actually use**, in order:
 
 1. **Swipe navigation between screens** — removes most Menu trips immediately. (S)
 2. **Sparklines behind the hero numbers** — trend + value in the same pixels. (S–M)
-3. **AMOLED burn-in pixel shift** — do this before the panel is damaged; it is
-   cheap now and unfixable later. (S)
-4. **Persistent running-test chip** — stop the UI hijacking the screen during
+3. **Persistent running-test chip** — stop the UI hijacking the screen during
    a test. (S–M)
-5. **Full-screen fault takeover** — the alerting is currently too easy to miss
+4. **Full-screen fault takeover** — the alerting is currently too easy to miss
    for something driving real current. (S)
+
+*(AMOLED burn-in pixel shift is done — see §11.)*
 
 ---
 

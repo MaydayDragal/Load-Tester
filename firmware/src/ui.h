@@ -4,6 +4,8 @@
 // the Android app: connect/scan, live monitor, manual control, resistance test.
 #pragma once
 
+#include <stddef.h>
+
 #include <functional>
 #include "capacity_test.h"
 #include "el15_protocol.h"
@@ -18,12 +20,23 @@ struct UiActions {
   std::function<void(bool on)> setLoad;
   std::function<void()> lock;
   std::function<void(int ms)> setPollRate;   // status sampling interval
-  std::function<void(float fuse, int steps)> startRTest;
+  // fourWire/tareOhm describe the probe wiring: 4-wire (Kelvin) sensing needs
+  // no lead correction, 2-wire subtracts the measured lead+contact tare.
+  std::function<void(float fuse, int steps, bool fourWire, float tareOhm)> startRTest;
   std::function<void()> stopRTest;
-  std::function<void()> saveRTest;   // persist the last R-Test result (e.g. to SD)
   std::function<void(float cutoffV, float amps)> startBatt;
   std::function<void()> stopBatt;
-  std::function<void()> saveBatt;    // persist the last capacity result (stub until SD)
+
+  // SD card. All three block for up to ~2 s (card init) and report honestly:
+  // true = written, and `msg` holds the file name; false = nothing was saved,
+  // and `msg` holds the reason to show the user. Nothing may draw meanwhile —
+  // the card shares the panel's SPI bus (sd_card.cpp) — so the UI must render
+  // any "Saving..." state BEFORE calling.
+  std::function<bool(char *msg, size_t len)> saveRTest;   // last R-Test result
+  std::function<bool(char *msg, size_t len)> saveBatt;    // last capacity result
+  std::function<bool(char *msg, size_t len)> sdInfo;      // card present + size
+  std::function<void()> syncClock;   // start a Wi-Fi NTP sync of the RTC
+  std::function<bool()> scanWifi;    // start a Wi-Fi scan (false = radio busy)
 };
 
 namespace ui {
@@ -47,5 +60,27 @@ void onBattError(const char *msg);
 // Hardware emergency stop (BOOT button): show the acknowledgement banner and
 // unstick any running-test view.
 void onEmergencyStop(bool wasTestRunning);
+
+// Link-loss supervisor / crash recovery, in the full-width banner.
+//  - `resolved` = the load is confirmed off; the banner goes green and can be
+//    dismissed with a tap.
+//  - otherwise it is a live warning (red, cannot be dismissed by tapping) and
+//    the screen is force-woken, because this is the one thing the user must see.
+// The banner is painted immediately: the supervisor blocks for seconds at a
+// time while it reconnects.
+void onGuardAlert(const char *title, const char *msg, bool resolved);
+
+// Offer boot-time recovery after a crash left the load energised. Tapping the
+// banner runs `action` (reconnect + force LOAD OFF).
+void offerRecovery(const char *msg, std::function<void()> action);
+
+// Wi-Fi/NTP progress for the Settings clock card. `state` is net::State;
+// 3 = done, 4 = failed.
+void onNetProgress(int state, const char *text);
+
+// Result of a Wi-Fi scan: `n` networks (already deduped, strongest-first),
+// `ssids[i]`/`rssi[i]` valid for i in [0,n). `err` non-null = scan failed and
+// `n` is 0. Populates the network-picker overlay.
+void onWifiScanResult(const char *const *ssids, const int *rssi, int n, const char *err);
 
 }  // namespace ui

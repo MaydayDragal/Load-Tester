@@ -39,12 +39,27 @@ class ResistanceTest {
     float resistanceStdErr = 0;   // 1-sigma uncertainty on resistanceOhm (ohm)
     float fuseRating = 0, maxTestCurrent = 0;
     bool reliable = false;
+    // What the slope actually measured, before the lead tare was taken off.
+    // rawResistanceOhm is also what a tare run itself records.
+    float rawResistanceOhm = 0;
+    float tareOhm = 0;            // subtracted (0 in 4-wire, where there is nothing to subtract)
+    bool fourWire = false;
   };
 
   // Callbacks (fired from tick(), main task).
   std::function<void(int step, int total, float target, float v, float i)> onProgress;
   std::function<void(const Result &)> onComplete;
   std::function<void(const char *)> onError;
+
+  // Probe wiring. In 4-wire (Kelvin) sensing the voltage is measured through a
+  // second pair of leads that carry no current, so lead and contact resistance
+  // never enters the reading and there is nothing to subtract. In 2-wire it is
+  // measured in series with the circuit under test, so `tareOhm` — captured by
+  // running a sweep with the probes shorted together — is taken off the result.
+  // At the milliohm scale that correction is often larger than what is being
+  // measured, which is why this matters.
+  bool fourWire = false;
+  float tareOhm = 0;
 
   // Tunables (defaults match the Android app).
   int steps = 8;
@@ -226,7 +241,13 @@ class ResistanceTest {
     }
     double slope = sII > 1e-9 ? sIV / sII : 0;
     double intercept = meanV - slope * meanI;
-    r.resistanceOhm = (float)max(-slope, 0.0);
+    r.rawResistanceOhm = (float)max(-slope, 0.0);
+    // 4-wire already excludes the leads; 2-wire subtracts the measured tare and
+    // clamps at zero (a DUT below the tare means the tare is stale, not that
+    // resistance went negative).
+    r.fourWire = fourWire;
+    r.tareOhm = fourWire ? 0 : tareOhm;
+    r.resistanceOhm = max(r.rawResistanceOhm - r.tareOhm, 0.0f);
     r.openCircuitVoltage = (float)intercept;
     r.rSquared = (sII > 1e-9 && sVV > 1e-9) ? (float)((sIV * sIV) / (sII * sVV)) : 0;
 
@@ -247,7 +268,10 @@ class ResistanceTest {
     // Reliable when the uncertainty is small in ABSOLUTE (<= 5 mohm) OR RELATIVE
     // (<= 5 %) terms — meaningful at any resistance scale, unlike R^2 which
     // false-alarms on clean low-milliohm reads and rubber-stamps noisy big ones.
-    double relTol = r.resistanceOhm > 1e-4 ? stdErr / r.resistanceOhm : 1e9;
+    // Judge the uncertainty against what was MEASURED, not against the
+    // tare-corrected figure: subtracting a constant cannot make the fit better,
+    // and a near-tare result would otherwise look wildly unreliable.
+    double relTol = r.rawResistanceOhm > 1e-4 ? stdErr / r.rawResistanceOhm : 1e9;
     r.reliable = n >= 3 && slope < 0 && spread > 0.05f &&
                  (stdErr <= 0.005 || relTol <= 0.05);
     return r;

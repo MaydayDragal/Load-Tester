@@ -14,6 +14,7 @@
 
 #include "audio.h"
 #include "display.h"
+#include "prefs.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +65,7 @@ static UiActions A;
 
 // ---- State -----------------------------------------------------------------
 enum Screen { SCR_MON, SCR_ADJ, SCR_GRAPH, SCR_RTEST, SCR_CONNECT, SCR_SET, SCR_BATT };
-enum Overlay { OV_NONE, OV_MENU, OV_KEYPAD, OV_PICKER };
+enum Overlay { OV_NONE, OV_MENU, OV_KEYPAD, OV_PICKER, OV_TEXT, OV_WIFI };
 enum RtPhase { RT_IDLE, RT_RUN, RT_RESULT };
 
 static const int MODE_RT = 0xF0;    // UI-only pseudo-mode (drives the R-Test engine)
@@ -84,10 +85,16 @@ static std::string kpBuf;
 
 static float   fuseRating = 0;
 static int     rtSteps = 8;
+// Probe wiring. 4-wire (Kelvin) senses voltage at the DUT through separate
+// leads, so the lead and contact resistance carried by the force leads never
+// appears in the reading; 2-wire measures it in series with the DUT, which is
+// what the tare below subtracts (measure with the probes shorted, store R).
+static bool    rtFourWire = false;
+static float   rtTareOhm = 0;
+static bool    rtTareRunning = false;   // this sweep is a lead-tare measurement
 static RtPhase rtPhase = RT_IDLE;
 static ResistanceTest::Result lastResult;
-static bool    rtSaved = false;
-static int     rtSeq = 1;
+static bool    rtSaved = false;   // this result is already on the card
 
 static const int HIST_N = 60;
 static float vHist[HIST_N], iHist[HIST_N];
@@ -186,6 +193,13 @@ static lv_obj_t *faultBanner, *faultTitle, *faultMsg;
 // for an e-stop it must stay up (a clean status packet would otherwise hide it
 // on the next poll) until the user taps it or a real protection trip supersedes.
 static bool faultIsEmergency = false;
+// Set while the link-loss supervisor is actively trying to shut a load down:
+// the banner then refuses taps and cannot be replaced, because it is the only
+// thing telling the user that current may still be flowing.
+static bool faultLocked = false;
+// When set, tapping the banner runs this instead of dismissing it (the
+// "reconnect and force LOAD OFF" offer after a crash).
+static std::function<void()> guardAction;
 
 static lv_obj_t *modeAbbrLbl, *modeNameLbl, *setLabelLbl, *setValLbl, *setUnitLbl;
 static lv_obj_t *vHeroBlock, *vHeroVal, *iHeroBlock, *iHeroLabelRow, *iHeroSink, *iHeroVal, *iHeroUnit;
@@ -201,18 +215,32 @@ static lv_obj_t *fuseVal, *stepsVal, *startBtn, *startBtnLbl;
 static lv_obj_t *estWireVal, *estLenVal, *estConnVal, *estTypeVal, *estTotalVal;
 static lv_obj_t *runStepLbl, *runBar, *runVLbl, *runILbl;
 static lv_obj_t *resistVal, *lowConfBox, *resultList, *saveBtn, *saveBtnLbl, *rtStatusLbl;
+static lv_obj_t *rtProbeVal, *rtProbeHint, *rtTareCard, *rtTareVal;
 static lv_obj_t *rtChart, *rcXRange, *rcYRange;
 static lv_chart_series_t *rtSerMeas, *rtSerFit;
 // Result rows are built ONCE and text-updated per test. Rebuilding them per
 // completion (lv_obj_clean + ~45 allocations) interleaved frees with the chart
 // buffer reallocs and corrupted the heap -> Load access fault in the next
 // layout pass (see the 2026-07-21 panic capture).
-static const int RR_N = 16;
-enum { RR_VOC, RR_TOL, RR_R2, RR_PSC, RR_SAG, RR_PKW, RR_TEMP, RR_FAN, RR_SWEEP,
-       RR_STEPS, RR_FUSELIM, RR_WIRE, RR_CONN, RR_FUSEEST, RR_ESTTOT, RR_RESID };
+static const int RR_N = 18;
+enum { RR_VOC, RR_PROBE, RR_RAW, RR_TOL, RR_R2, RR_PSC, RR_SAG, RR_PKW, RR_TEMP,
+       RR_FAN, RR_SWEEP, RR_STEPS, RR_FUSELIM,
+       RR_WIRE, RR_CONN, RR_FUSEEST, RR_ESTTOT, RR_RESID };
 static lv_obj_t *rrRow[RR_N], *rrKey[RR_N], *rrVal[RR_N];
 static const int RT_CHART_PTS = 20;  // fixed capacity = UI max steps; no reallocs
-static lv_obj_t *setBriVal, *setBattVal, *setBattState, *setRtcVal, *setHeapVal, *setMinHeapVal, *setUptimeVal;
+static lv_obj_t *setBriVal, *setBattVal, *setBattState, *setRtcVal, *setSdVal, *setHeapVal, *setMinHeapVal, *setUptimeVal;
+static lv_obj_t *setPxShiftBtn, *setPxShiftLbl, *dimChip[4], *dimChipLbl[4];
+static lv_obj_t *setSsidVal, *setPassVal, *setTzVal, *setSyncBtn, *setSyncLbl, *setNetStatus;
+// Text-entry overlay (password + manual/hidden SSID entry).
+static lv_obj_t *kbOverlay, *kbTextArea, *kbTitle;
+enum { KB_SSID = 1, KB_PASS = 2 };
+static int kbTarget = KB_SSID;
+// Wi-Fi network picker overlay + its scanned SSID list (ui-owned copies, so a
+// row's event handler can reference one after the scan buffer is reused).
+static lv_obj_t *wifiOverlay, *wifiList, *wifiStatus;
+static const int WIFI_MAX = 24;
+static char wifiNames[WIFI_MAX][33];
+static int wifiCount = 0;
 static lv_obj_t *setVolVal, *setMuteBtn, *setMuteLbl;
 // ---- Battery capacity test state ---------------------------------------------
 struct BattChem { const char *name; float nom, full, cut; int maxCells; };
@@ -256,7 +284,7 @@ static lv_obj_t *btChemVal, *btCellsVal, *btVocLbl, *btCutoffVal, *btAmpsVal, *b
 static lv_obj_t *btPhaseLbl, *btElapsedLbl, *btVLbl, *btCutSub, *btILbl, *btAhLbl, *btWhLbl, *btTempLbl;
 static lv_obj_t *btChart, *btChartYLbl, *btChartXLbl;
 static lv_chart_series_t *btSer;
-static lv_obj_t *btAhBig, *btWhSub, *btSaveLbl;
+static lv_obj_t *btAhBig, *btWhSub, *btSaveBtn, *btSaveLbl;
 static const int BR_N = 10;
 static lv_obj_t *brVal[BR_N];
 
@@ -285,6 +313,9 @@ static void refreshBatt();
 static void battChartRefresh();
 static void enterBattRun();
 static void syncMonitorExtras();
+static void refreshWifi();
+static void openTextEntry(int target);
+static void startWifiScan();
 static void addDeviceRow(const char *sym, const char *name, const char *sub, const char *addr);
 
 // ---- Small builders --------------------------------------------------------
@@ -341,12 +372,38 @@ static void setTextIf(lv_obj_t *l, const char *t) {
   if (strcmp(lv_label_get_text(l), t) != 0) lv_label_set_text(l, t);
 }
 
+// ---- SD card saves ---------------------------------------------------------
+// A save blocks for up to ~2 s and NOTHING may draw while it runs (the card
+// shares the panel's SPI bus), so the button has to be repainted to its
+// in-progress state and flushed to the panel before the call is made.
+static void armSaveButton(lv_obj_t *btn, lv_obj_t *lblObj) {
+  lv_label_set_text(lblObj, LV_SYMBOL_SAVE "  Writing to card...");
+  lv_obj_set_style_bg_color(btn, COL_AMBER, 0);
+  lv_refr_now(nullptr);
+}
+
+// Report the outcome verbatim: the file name when the report really is on the
+// card, the failure reason when it is not. A failed save leaves the button
+// armed so the user can swap the card and tap again.
+static void showSaveOutcome(lv_obj_t *btn, lv_obj_t *lblObj, bool ok, const char *msg) {
+  char b[64];
+  snprintf(b, sizeof(b), ok ? LV_SYMBOL_OK "  Saved %s" : LV_SYMBOL_WARNING "  %s", msg);
+  lv_label_set_text(lblObj, b);
+  lv_obj_set_style_bg_color(btn, ok ? COL_GREEN : COL_RED, 0);
+}
+
+// Back to the idle "Save to SD card" look — called when a fresh result lands.
+static void resetSaveButton(lv_obj_t *btn, lv_obj_t *lblObj) {
+  lv_label_set_text(lblObj, LV_SYMBOL_SAVE "  Save to SD card");
+  lv_obj_set_style_bg_color(btn, COL_ACCENT, 0);
+}
+
 // ---- Navigation ------------------------------------------------------------
 static void showOverlay(Overlay o) {
   curOverlay = o;
-  lv_obj_t *ovs[3] = {menuOverlay, kpOverlay, pickerOverlay};
-  Overlay ids[3] = {OV_MENU, OV_KEYPAD, OV_PICKER};
-  for (int i = 0; i < 3; i++) {
+  lv_obj_t *ovs[5] = {menuOverlay, kpOverlay, pickerOverlay, kbOverlay, wifiOverlay};
+  Overlay ids[5] = {OV_MENU, OV_KEYPAD, OV_PICKER, OV_TEXT, OV_WIFI};
+  for (int i = 0; i < 5; i++) {
     if (ids[i] == o) { lv_obj_clear_flag(ovs[i], LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(ovs[i]); }
     else lv_obj_add_flag(ovs[i], LV_OBJ_FLAG_HIDDEN);
   }
@@ -479,7 +536,16 @@ static void buildFaultBanner() {
   lv_obj_set_style_pad_all(faultBanner, 9, 0);
   lv_obj_set_flex_flow(faultBanner, LV_FLEX_FLOW_COLUMN);
   lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(faultBanner, [](lv_event_t *) { faultIsEmergency = false; lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_HIDDEN); }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(faultBanner, [](lv_event_t *) {
+    // A banner with an armed action (crash recovery) runs it instead of
+    // dismissing; a locked one (the supervisor mid-recovery) ignores taps
+    // entirely, because the load is still energised and the message is the
+    // only thing telling the user so.
+    if (guardAction) { std::function<void()> a = guardAction; guardAction = nullptr; a(); return; }
+    if (faultLocked) return;
+    faultIsEmergency = false;
+    lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+  }, LV_EVENT_CLICKED, nullptr);
   faultTitle = lbl(faultBanner, LV_SYMBOL_WARNING "  -- - PROTECTION", lv_color_hex(0x1a0606), F16);
   faultMsg = lbl(faultBanner, "", lv_color_hex(0x1a0606), F12);
   lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
@@ -604,7 +670,7 @@ static void buildLoadBar() {
     if (isRT()) {
       if (!fuseRating) return;
       if (!connected) { showScreen(SCR_CONNECT); return; }
-      if (A.startRTest) { A.startRTest(fuseRating, rtSteps); enterRtRun(); }
+      if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtSteps, rtFourWire, rtTareOhm); enterRtRun(); }
       return;
     }
     if (isBatt()) {
@@ -861,6 +927,68 @@ static void buildRtest() {
   styleCard(sp2, COL_INSET, COL_BORDER, 12, 0);
   lv_obj_t *spl = lbl(sp2, LV_SYMBOL_PLUS, COL_INK, F20); lv_obj_center(spl);
   lv_obj_add_event_cb(sp2, [](lv_event_t *) { rtSteps = rtSteps < 20 ? rtSteps + 1 : 20; refreshRtest(); }, LV_EVENT_CLICKED, nullptr);
+
+  // Probe wiring. At the milliohm scale the leads are usually a bigger
+  // resistance than the thing being measured, so how they are connected is not
+  // a detail: 4-wire removes them physically, 2-wire removes them arithmetically
+  // (the tare below), and nothing removes them if you do neither.
+  lv_obj_t *probeCard = flatBtn(rtSetupGroup);
+  lv_obj_set_size(probeCard, LV_PCT(100), LV_SIZE_CONTENT);
+  styleCard(probeCard, COL_CARD, COL_BORDER, 12, 12);
+  lv_obj_set_flex_flow(probeCard, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(probeCard, 5, 0);
+  lbl(probeCard, "PROBE WIRING - tap to switch", COL_MUTED, F12);
+  rtProbeVal = lbl(probeCard, "2-wire", COL_INK, F24);
+  rtProbeHint = lbl(probeCard, "", COL_FAINT, F12);
+  lv_label_set_long_mode(rtProbeHint, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(rtProbeHint, LV_PCT(100));
+  lv_obj_add_event_cb(probeCard, [](lv_event_t *) {
+    rtFourWire = !rtFourWire;
+    refreshRtest();
+  }, LV_EVENT_CLICKED, nullptr);
+
+  // Lead tare (2-wire only): one shorted-probe sweep, stored and subtracted
+  // from every later result.
+  rtTareCard = cont(rtSetupGroup);
+  lv_obj_set_size(rtTareCard, LV_PCT(100), LV_SIZE_CONTENT);
+  styleCard(rtTareCard, COL_CARD, COL_BORDER, 12, 12);
+  lv_obj_set_flex_flow(rtTareCard, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(rtTareCard, 8, 0);
+  lv_obj_t *tRow = cont(rtTareCard);
+  lv_obj_set_size(tRow, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(tRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(tRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lbl(tRow, "LEAD TARE", COL_MUTED, F12);
+  rtTareVal = lbl(tRow, "not set", COL_FAINT, F16);
+  lv_obj_t *tBtnRow = cont(rtTareCard);
+  lv_obj_set_size(tBtnRow, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(tBtnRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(tBtnRow, 7, 0);
+  lv_obj_t *tMeas = flatBtn(tBtnRow);
+  lv_obj_set_flex_grow(tMeas, 3);
+  lv_obj_set_height(tMeas, 46);
+  styleCard(tMeas, COL_INSET, COL_BORDER, 11, 0);
+  lv_obj_t *tMeasLbl = lbl(tMeas, "Measure (short the probes)", COL_ACCENT2, F14);
+  lv_obj_center(tMeasLbl);
+  lv_obj_add_event_cb(tMeas, [](lv_event_t *) {
+    if (!fuseRating) {   // the sweep ladder is derived from it
+      lv_label_set_text(rtStatusLbl, "Set the fuse rating first - the tare sweep uses it.");
+      lv_obj_clear_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);
+      return;
+    }
+    if (!connected || engineBusy() || !A.startRTest) return;
+    rtTareRunning = true;
+    enterRtRun();
+    A.startRTest(fuseRating, rtSteps, false /* tare is a 2-wire measurement */, 0);
+  }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *tClear = flatBtn(tBtnRow);
+  lv_obj_set_flex_grow(tClear, 1);
+  lv_obj_set_height(tClear, 46);
+  styleCard(tClear, COL_INSET, COL_BORDER, 11, 0);
+  lv_obj_t *tClearLbl = lbl(tClear, "Clear", COL_MUTED, F14);
+  lv_obj_center(tClearLbl);
+  lv_obj_add_event_cb(tClear, [](lv_event_t *) { rtTareOhm = 0; refreshRtest(); }, LV_EVENT_CLICKED, nullptr);
+
   // circuit estimate (optional): wire + connections + fuse -> predicted R
   lv_obj_t *estCard = cont(rtSetupGroup);
   lv_obj_set_size(estCard, LV_PCT(100), LV_SIZE_CONTENT);
@@ -930,7 +1058,7 @@ static void buildRtest() {
     if (engineBusy()) return;
     if (!fuseRating) return;
     if (!connected) { showScreen(SCR_CONNECT); return; }
-    if (A.startRTest) { A.startRTest(fuseRating, rtSteps); enterRtRun(); }
+    if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtSteps, rtFourWire, rtTareOhm); enterRtRun(); }
   }, LV_EVENT_CLICKED, nullptr);
 
   // running
@@ -1030,7 +1158,8 @@ static void buildRtest() {
   lv_obj_set_style_pad_hor(resultList, 13, 0);
   lv_obj_set_flex_flow(resultList, LV_FLEX_FLOW_COLUMN);
   static const char *RR_KEYS[RR_N] = {
-      "Open-circuit voltage", "Uncertainty (+/-)", "Fit quality (R2)", "Est. short-circuit I",
+      "Open-circuit voltage", "Probe wiring", "Measured (incl. leads)",
+      "Uncertainty (+/-)", "Fit quality (R2)", "Est. short-circuit I",
       "Sag at max current", "Peak test power", "Load temp", "Max fan",
       "Current sweep", "Steps / samples", "Fuse limit",
       "Wire", "Contacts", "Fuse (est)", "Est. build R", "Residual vs est."};
@@ -1058,9 +1187,11 @@ static void buildRtest() {
   saveBtnLbl = lbl(saveBtn, LV_SYMBOL_SAVE "  Save to SD card", COL_DARKINK, F16);
   lv_obj_center(saveBtnLbl);
   lv_obj_add_event_cb(saveBtn, [](lv_event_t *) {
-    if (rtSaved) return;
-    if (A.saveRTest) A.saveRTest();
-    rtSaved = true; rtSeq++; refreshRtest();
+    if (rtSaved || !A.saveRTest) return;   // one file per result; retry on failure
+    armSaveButton(saveBtn, saveBtnLbl);
+    char msg[48] = "";
+    rtSaved = A.saveRTest(msg, sizeof(msg));
+    showSaveOutcome(saveBtn, saveBtnLbl, rtSaved, msg);
   }, LV_EVENT_CLICKED, nullptr);
   lv_obj_t *newBtn = flatBtn(rtResultBox);
   lv_obj_set_size(newBtn, LV_PCT(100), 52);
@@ -1073,7 +1204,26 @@ static void buildRtest() {
   lv_obj_add_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Mirror the on-screen test setup into NVS so the next boot starts where this
+// one left off. Called from the two refresh functions rather than from each of
+// the dozen mutation sites, so a new control can't forget to persist itself.
+// Cheap: NVS skips writes whose value is unchanged, and commits are debounced.
+static void persistSetup() {
+  prefs::change([](prefs::Data &d) {
+    d.fuseRating = fuseRating;
+    d.rtSteps = (uint8_t)rtSteps;
+    d.fourWire = rtFourWire;
+    d.tareOhm = rtTareOhm;
+    d.battChem = (uint8_t)battChem;
+    d.battCells = (uint8_t)battCells;
+    d.battCutoff = battCutoff;
+    d.battCutoffCustom = battCutoffCustom;
+    d.battAmps = battAmps;
+  });
+}
+
 static void refreshRtest() {
+  persistSetup();
   // Each phase (Idle / Running / Result) is a different "view" sharing one
   // scrollable screen — reset to the top when the phase changes so a new view
   // never inherits the previous one's scroll position. Plain value refreshes
@@ -1092,6 +1242,24 @@ static void refreshRtest() {
     if (fuseRating) { snprintf(b, sizeof(b), "%g", fuseRating); lv_label_set_text(fuseVal, b); lv_obj_set_style_text_color(fuseVal, COL_INK, 0); }
     else { lv_label_set_text(fuseVal, "--"); lv_obj_set_style_text_color(fuseVal, COL_FAINT, 0); }
     snprintf(b, sizeof(b), "%d", rtSteps); lv_label_set_text(stepsVal, b);
+    // Probe wiring + tare. The hint is deliberately a hook-up instruction
+    // rather than a definition: 4-wire only works if the sense leads land on
+    // the DUT itself, past the force-lead contacts.
+    lv_label_set_text(rtProbeVal, rtFourWire ? "4-wire (Kelvin)" : "2-wire");
+    lv_obj_set_style_text_color(rtProbeVal, rtFourWire ? COL_GREEN : COL_INK, 0);
+    lv_label_set_text(rtProbeHint,
+        rtFourWire ? "Sense leads land ON the part, inside the force-lead clamps. Lead and contact resistance is excluded, so no tare is used."
+                   : "Lead and contact resistance is measured in series with the part. Tare it below, or switch to 4-wire.");
+    if (rtFourWire) lv_obj_add_flag(rtTareCard, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_clear_flag(rtTareCard, LV_OBJ_FLAG_HIDDEN);
+    if (rtTareOhm > 0) {
+      char ob[20]; fmtOhm(ob, sizeof(ob), rtTareOhm);
+      lv_label_set_text(rtTareVal, ob);
+      lv_obj_set_style_text_color(rtTareVal, COL_GREEN, 0);
+    } else {
+      lv_label_set_text(rtTareVal, "not set");
+      lv_obj_set_style_text_color(rtTareVal, COL_FAINT, 0);
+    }
     if (estWireMm2 > 0) { snprintf(b, sizeof(b), "%g mm2", estWireMm2); lv_label_set_text(estWireVal, b); }
     else lv_label_set_text(estWireVal, "--");
     if (estWireLen > 0) { snprintf(b, sizeof(b), "%g m", estWireLen); lv_label_set_text(estLenVal, b); }
@@ -1203,6 +1371,23 @@ static lv_obj_t *kvRow(lv_obj_t *parent, const char *k) {
   return lbl(row, "--", COL_INK, F14);
 }
 
+// A key/value row that is itself a button — used where the value is edited
+// somewhere else (the text-entry overlay) rather than in place.
+static lv_obj_t *tapRow(lv_obj_t *parent, const char *k, lv_event_cb_t cb, void *ud) {
+  lv_obj_t *row = flatBtn(parent);
+  lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(row, 0, 0);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_ver(row, 8, 0);
+  lv_obj_set_style_pad_hor(row, 0, 0);
+  lbl(row, k, COL_MUTED, F14);
+  lv_obj_t *v = lbl(row, "--", COL_ACCENT2, F14);
+  lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, ud);
+  return v;
+}
+
 static lv_obj_t *settingsCard(const char *caption) {
   lv_obj_t *c = cont(setScreen);
   lv_obj_set_size(c, LV_PCT(100), LV_SIZE_CONTENT);
@@ -1211,6 +1396,36 @@ static lv_obj_t *settingsCard(const char *caption) {
   lv_obj_set_style_pad_row(c, 2, 0);
   lbl(c, caption, COL_MUTED, F12);
   return c;
+}
+
+// Idle-dim choices, in seconds (0 = never).
+static const int DIM_N = 4;
+static const uint16_t DIM_SECS[DIM_N] = {0, 60, 120, 300};
+static const char *DIM_NAMES[DIM_N] = {"Never", "1 min", "2 min", "5 min"};
+
+static void refreshScreenProt() {
+  bool on = display::pixelShift();
+  lv_label_set_text(setPxShiftLbl, on ? "Pixel shift on" : "Pixel shift off");
+  lv_obj_set_style_border_color(setPxShiftBtn, on ? COL_GREEN : COL_FAINT, 0);
+  lv_obj_set_style_text_color(setPxShiftLbl, on ? COL_GREEN : COL_FAINT, 0);
+  for (int i = 0; i < DIM_N; i++) {
+    bool sel = DIM_SECS[i] == display::idleDim();
+    lv_obj_set_style_bg_color(dimChip[i], sel ? lv_color_hex(0x1d1b33) : COL_INSET, 0);
+    lv_obj_set_style_border_color(dimChip[i], sel ? COL_ACCENT : COL_BORDER, 0);
+    lv_obj_set_style_text_color(dimChipLbl[i], sel ? COL_ACCENT2 : COL_MUTED, 0);
+  }
+}
+
+static void refreshWifi() {
+  const prefs::Data &p = prefs::get();
+  setTextIf(setSsidVal, p.ssid[0] ? p.ssid : "Tap to scan");
+  setTextIf(setPassVal, p.pass[0] ? "********" : "Not set");
+  char tz[12];
+  int m = p.tzMinutes;
+  snprintf(tz, sizeof(tz), "UTC%+d%s", m / 60, m % 60 ? ":30" : "");
+  setTextIf(setTzVal, tz);
+  bool ready = p.ssid[0] != '\0';
+  lv_obj_set_style_text_color(setSyncLbl, ready ? COL_ACCENT2 : COL_FAINT, 0);
 }
 
 static void refreshRateChips() {
@@ -1226,12 +1441,14 @@ static void onRateChip(lv_event_t *e) {
   int i = (int)(intptr_t)lv_event_get_user_data(e);
   pollMs = RATE_MS[i];
   if (A.setPollRate) A.setPollRate(pollMs);
+  prefs::change([](prefs::Data &d) { d.pollMs = (uint16_t)pollMs; });
   refreshRateChips();
 }
 
 static void onBrightness(lv_event_t *e) {
   int v = lv_slider_get_value(lv_event_get_target(e));
   display::setBrightness((uint8_t)v);
+  prefs::change([v](prefs::Data &d) { d.brightness = (uint8_t)v; });
   char b[12];
   snprintf(b, sizeof(b), "%d%%", v * 100 / 255);
   lv_label_set_text(setBriVal, b);
@@ -1246,6 +1463,7 @@ static void refreshMute() {
 static void onVolume(lv_event_t *e) {
   int v = lv_slider_get_value(lv_event_get_target(e));
   audio::setVolume((uint8_t)v);
+  prefs::change([v](prefs::Data &d) { d.volume = (uint8_t)v; });
   char b[12];
   snprintf(b, sizeof(b), "%d%%", v);
   lv_label_set_text(setVolVal, b);
@@ -1327,6 +1545,7 @@ static void buildSettings() {
   lv_obj_add_event_cb(setMuteBtn, [](lv_event_t *) {
     audio::setMuted(!audio::muted());
     if (!audio::muted()) audio::press();   // audible confirm when un-muting
+    prefs::change([](prefs::Data &d) { d.muted = audio::muted(); });
     refreshMute();
   }, LV_EVENT_CLICKED, nullptr);
   refreshMute();
@@ -1357,9 +1576,120 @@ static void buildSettings() {
   setBattVal = kvRow(pc, "Level");
   setBattState = kvRow(pc, "State");
 
-  // clock (PCF85063)
+  // clock (PCF85063) + Wi-Fi NTP sync
   lv_obj_t *cc2 = settingsCard("CLOCK");
+  lv_obj_set_style_pad_row(cc2, 6, 0);
   setRtcVal = kvRow(cc2, "RTC");
+  lv_obj_t *ntpNote = lbl(cc2, "Set the clock from the internet so saved reports carry a real timestamp. The Wi-Fi radio is powered only for the sync, and a sync is refused while a test is running - the BLE link is the only way to stop the load.", COL_FAINT, F12);
+  lv_label_set_long_mode(ntpNote, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(ntpNote, LV_PCT(100));
+  setSsidVal = tapRow(cc2, "Wi-Fi network", [](lv_event_t *) { startWifiScan(); }, nullptr);
+  setPassVal = tapRow(cc2, "Password", [](lv_event_t *) { openTextEntry(KB_PASS); }, nullptr);
+  lv_obj_t *tzRow = cont(cc2);
+  lv_obj_set_size(tzRow, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(tzRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(tzRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_ver(tzRow, 6, 0);
+  lbl(tzRow, "UTC offset", COL_MUTED, F14);
+  lv_obj_t *tzCtl = cont(tzRow);
+  lv_obj_set_size(tzCtl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(tzCtl, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(tzCtl, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(tzCtl, 8, 0);
+  lv_obj_t *tzM = flatBtn(tzCtl); lv_obj_set_size(tzM, 44, 40);
+  styleCard(tzM, COL_INSET, COL_BORDER, 10, 0);
+  lv_obj_t *tzMl = lbl(tzM, LV_SYMBOL_MINUS, COL_INK, F16); lv_obj_center(tzMl);
+  lv_obj_add_event_cb(tzM, [](lv_event_t *) {
+    prefs::change([](prefs::Data &d) { if (d.tzMinutes > -12 * 60) d.tzMinutes -= 60; });
+    refreshWifi();
+  }, LV_EVENT_CLICKED, nullptr);
+  setTzVal = lbl(tzCtl, "UTC+0", COL_INK, F16);
+  lv_obj_t *tzP = flatBtn(tzCtl); lv_obj_set_size(tzP, 44, 40);
+  styleCard(tzP, COL_INSET, COL_BORDER, 10, 0);
+  lv_obj_t *tzPl = lbl(tzP, LV_SYMBOL_PLUS, COL_INK, F16); lv_obj_center(tzPl);
+  lv_obj_add_event_cb(tzP, [](lv_event_t *) {
+    prefs::change([](prefs::Data &d) { if (d.tzMinutes < 14 * 60) d.tzMinutes += 60; });
+    refreshWifi();
+  }, LV_EVENT_CLICKED, nullptr);
+  setSyncBtn = flatBtn(cc2);
+  lv_obj_set_size(setSyncBtn, LV_PCT(100), 46);
+  styleCard(setSyncBtn, COL_INSET, COL_BORDER, 11, 0);
+  setSyncLbl = lbl(setSyncBtn, "Sync clock now", COL_ACCENT2, F16);
+  lv_obj_center(setSyncLbl);
+  lv_obj_add_event_cb(setSyncBtn, [](lv_event_t *) {
+    if (!A.syncClock) return;
+    if (engineBusy()) {   // never touch the radio while the load is being driven
+      lv_label_set_text(setNetStatus, "Not while a test is running.");
+      lv_obj_set_style_text_color(setNetStatus, COL_AMBER, 0);
+      return;
+    }
+    lv_label_set_text(setNetStatus, "Starting Wi-Fi...");
+    lv_obj_set_style_text_color(setNetStatus, COL_MUTED, 0);
+    lv_refr_now(nullptr);                 // paint before the buffer shrinks
+    display::setLowMemMode(true);         // free RAM for the Wi-Fi stack
+    A.syncClock();
+  }, LV_EVENT_CLICKED, nullptr);
+  setNetStatus = lbl(cc2, "", COL_MUTED, F12);
+  lv_label_set_long_mode(setNetStatus, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(setNetStatus, LV_PCT(100));
+  refreshWifi();
+
+  // AMOLED protection: pixel shift + idle dim/blank.
+  lv_obj_t *pc2 = settingsCard("SCREEN PROTECTION");
+  lv_obj_set_style_pad_row(pc2, 8, 0);
+  lv_obj_t *psNote = lbl(pc2, "This panel is an AMOLED: static labels burn in permanently. Pixel shift creeps the layout by a few pixels; idle dim drops brightness (and blanks it later) when nobody is touching it.", COL_FAINT, F12);
+  lv_label_set_long_mode(psNote, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(psNote, LV_PCT(100));
+  setPxShiftBtn = flatBtn(pc2);
+  lv_obj_set_size(setPxShiftBtn, LV_PCT(100), 44);
+  styleCard(setPxShiftBtn, COL_BLACK, COL_GREEN, 11, 0);
+  lv_obj_set_style_bg_opa(setPxShiftBtn, LV_OPA_TRANSP, 0);
+  setPxShiftLbl = lbl(setPxShiftBtn, "Pixel shift on", COL_GREEN, F16);
+  lv_obj_center(setPxShiftLbl);
+  lv_obj_add_event_cb(setPxShiftBtn, [](lv_event_t *) {
+    display::setPixelShift(!display::pixelShift());
+    prefs::change([](prefs::Data &d) { d.pixelShift = display::pixelShift(); });
+    refreshScreenProt();
+  }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *dimRow = cont(pc2);
+  lv_obj_set_size(dimRow, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(dimRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(dimRow, 7, 0);
+  for (int i = 0; i < DIM_N; i++) {
+    dimChip[i] = flatBtn(dimRow);
+    lv_obj_set_flex_grow(dimChip[i], 1);
+    lv_obj_set_height(dimChip[i], 42);
+    styleCard(dimChip[i], COL_INSET, COL_BORDER, 11, 0);
+    dimChipLbl[i] = lbl(dimChip[i], DIM_NAMES[i], COL_MUTED, F14);
+    lv_obj_center(dimChipLbl[i]);
+    lv_obj_add_event_cb(dimChip[i], [](lv_event_t *e) {
+      int i = (int)(intptr_t)lv_event_get_user_data(e);
+      display::setIdleDim(DIM_SECS[i]);
+      prefs::change([](prefs::Data &d) { d.idleDimS = display::idleDim(); });
+      refreshScreenProt();
+    }, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+  }
+  refreshScreenProt();
+
+  // SD card. Probed on demand only: mounting takes ~1 s and stops the panel
+  // drawing (shared SPI bus), so it must never sit on the 1 Hz settings tick.
+  lv_obj_t *sdc = settingsCard("SD CARD");
+  setSdVal = kvRow(sdc, "Status");
+  lv_label_set_text(setSdVal, "Not checked");
+  lv_obj_t *sdBtn = flatBtn(sdc);
+  lv_obj_set_size(sdBtn, LV_PCT(100), 44);
+  styleCard(sdBtn, COL_INSET, COL_BORDER, 11, 0);
+  lv_obj_t *sdBtnLbl = lbl(sdBtn, "Check card", COL_ACCENT2, F14);
+  lv_obj_center(sdBtnLbl);
+  lv_obj_add_event_cb(sdBtn, [](lv_event_t *) {
+    if (!A.sdInfo) return;
+    lv_label_set_text(setSdVal, "Checking...");
+    lv_refr_now(nullptr);   // paint before the bus goes to the card
+    char msg[48] = "";
+    bool ok = A.sdInfo(msg, sizeof(msg));
+    lv_label_set_text(setSdVal, msg);
+    lv_obj_set_style_text_color(setSdVal, ok ? COL_GREEN : COL_AMBER, 0);
+  }, LV_EVENT_CLICKED, nullptr);
 
   // system
   lv_obj_t *sc = settingsCard("SYSTEM");
@@ -1382,7 +1712,10 @@ static void buildSettings() {
   styleCard(rb, lv_color_hex(0x2a1416), COL_RED, 13, 0);
   lv_obj_t *rl = lbl(rb, LV_SYMBOL_REFRESH "  Restart controller", COL_RED, F16);
   lv_obj_center(rl);
-  lv_obj_add_event_cb(rb, [](lv_event_t *) { ESP.restart(); }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(rb, [](lv_event_t *) {
+    prefs::flush();   // a deliberate restart shouldn't lose the last edit
+    ESP.restart();
+  }, LV_EVENT_CLICKED, nullptr);
 }
 
 // Refresh the live Settings values (1 Hz timer; cheap no-op off-screen).
@@ -1455,6 +1788,7 @@ static void battChartRefresh() {
 }
 
 static void refreshBatt() {
+  persistSetup();
   static BattPhase lastShownBt = BT_IDLE;
   if (btPhase != lastShownBt) {
     lastShownBt = btPhase;
@@ -1710,17 +2044,19 @@ static void buildBatt() {
       "Rebound (rested)", "Average voltage", "Average current", "Temp range",
       "Cutoff", "Discharge current"};
   for (int i = 0; i < BR_N; i++) brVal[i] = kvRow(rowsCard, BR_KEYS[i]);
-  lv_obj_t *saveBtn2 = flatBtn(btResultBox);
-  lv_obj_set_size(saveBtn2, LV_PCT(100), 56);
-  lv_obj_set_style_bg_color(saveBtn2, COL_ACCENT, 0);
-  lv_obj_set_style_bg_opa(saveBtn2, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(saveBtn2, 13, 0);
-  btSaveLbl = lbl(saveBtn2, LV_SYMBOL_SAVE "  Save to SD card", COL_DARKINK, F16);
+  btSaveBtn = flatBtn(btResultBox);
+  lv_obj_set_size(btSaveBtn, LV_PCT(100), 56);
+  lv_obj_set_style_bg_color(btSaveBtn, COL_ACCENT, 0);
+  lv_obj_set_style_bg_opa(btSaveBtn, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(btSaveBtn, 13, 0);
+  btSaveLbl = lbl(btSaveBtn, LV_SYMBOL_SAVE "  Save to SD card", COL_DARKINK, F16);
   lv_obj_center(btSaveLbl);
-  lv_obj_add_event_cb(saveBtn2, [](lv_event_t *) {
-    if (battSaved) return;
-    if (A.saveBatt) A.saveBatt();
-    battSaved = true;
+  lv_obj_add_event_cb(btSaveBtn, [](lv_event_t *) {
+    if (battSaved || !A.saveBatt) return;   // one file per result; retry on failure
+    armSaveButton(btSaveBtn, btSaveLbl);
+    char msg[48] = "";
+    battSaved = A.saveBatt(msg, sizeof(msg));
+    showSaveOutcome(btSaveBtn, btSaveLbl, battSaved, msg);
   }, LV_EVENT_CLICKED, nullptr);
   lv_obj_t *newBtn2 = flatBtn(btResultBox);
   lv_obj_set_size(newBtn2, LV_PCT(100), 52);
@@ -1854,6 +2190,209 @@ static void onPreset(lv_event_t *e) {
   int cents = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
   char b[16]; snprintf(b, sizeof(b), "%g", cents / 100.0f); kpBuf = b; kpRefresh();
 }
+// ---- Text-entry overlay (Wi-Fi credentials) --------------------------------
+// LVGL's keyboard, in its own modal overlay. Only used for text that cannot be
+// picked from a list — today the Wi-Fi SSID and password.
+static void openTextEntry(int target) {
+  kbTarget = target;
+  const prefs::Data &p = prefs::get();
+  lv_label_set_text(kbTitle, target == KB_SSID ? "Wi-Fi network name" : "Wi-Fi password");
+  lv_textarea_set_password_mode(kbTextArea, target == KB_PASS);
+  lv_textarea_set_max_length(kbTextArea, target == KB_SSID ? 32 : 64);
+  lv_textarea_set_text(kbTextArea, target == KB_SSID ? p.ssid : p.pass);
+  showOverlay(OV_TEXT);
+}
+
+static void commitTextEntry() {
+  const char *txt = lv_textarea_get_text(kbTextArea);
+  if (kbTarget == KB_SSID)
+    prefs::change([txt](prefs::Data &d) { snprintf(d.ssid, sizeof(d.ssid), "%s", txt); });
+  else
+    prefs::change([txt](prefs::Data &d) { snprintf(d.pass, sizeof(d.pass), "%s", txt); });
+  prefs::flush();   // credentials are worth committing immediately
+  showOverlay(OV_NONE);
+  refreshWifi();
+}
+
+static void buildTextEntry() {
+  kbOverlay = cont(lv_layer_top());
+  lv_obj_add_flag(kbOverlay, LV_OBJ_FLAG_CLICKABLE);   // modal barrier
+  lv_obj_set_size(kbOverlay, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_color(kbOverlay, COL_BLACK, 0);
+  lv_obj_set_style_bg_opa(kbOverlay, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(kbOverlay, 10, 0);
+  lv_obj_set_flex_flow(kbOverlay, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(kbOverlay, 8, 0);
+  lv_obj_add_flag(kbOverlay, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t *hdr = cont(kbOverlay);
+  lv_obj_set_size(hdr, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(hdr, 8, 0);
+  lv_obj_t *x = flatBtn(hdr);
+  lv_obj_set_size(x, 40, 40);
+  lv_obj_set_ext_click_area(x, 12);
+  styleCard(x, COL_CARD, COL_BORDER, 10, 0);
+  lv_obj_t *xl = lbl(x, LV_SYMBOL_CLOSE, COL_MUTED, F16);
+  lv_obj_center(xl);
+  lv_obj_add_event_cb(x, [](lv_event_t *) { showOverlay(OV_NONE); }, LV_EVENT_CLICKED, nullptr);
+  kbTitle = lbl(hdr, "", COL_INK, F16);
+
+  kbTextArea = lv_textarea_create(kbOverlay);
+  lv_obj_set_width(kbTextArea, LV_PCT(100));
+  lv_textarea_set_one_line(kbTextArea, true);
+  lv_obj_set_style_bg_color(kbTextArea, COL_READOUT, 0);
+  lv_obj_set_style_border_color(kbTextArea, COL_BORDER, 0);
+  lv_obj_set_style_text_color(kbTextArea, COL_INK, 0);
+
+  lv_obj_t *kb = lv_keyboard_create(kbOverlay);
+  lv_obj_set_width(kb, LV_PCT(100));
+  lv_obj_set_flex_grow(kb, 1);
+  lv_keyboard_set_textarea(kb, kbTextArea);
+  // The keyboard's own OK/close keys are the commit and cancel actions.
+  lv_obj_add_event_cb(kb, [](lv_event_t *) { commitTextEntry(); }, LV_EVENT_READY, nullptr);
+  lv_obj_add_event_cb(kb, [](lv_event_t *) { showOverlay(OV_NONE); }, LV_EVENT_CANCEL, nullptr);
+}
+
+// ---- Wi-Fi network picker overlay ------------------------------------------
+// Scan (via net::), list the SSIDs, pick one. Replaces typing the network name;
+// the password still needs the keyboard, so picking a network opens it next.
+static void onWifiRowPicked(lv_event_t *e) {
+  int i = (int)(intptr_t)lv_event_get_user_data(e);
+  if (i < 0 || i >= wifiCount) return;
+  prefs::change([i](prefs::Data &d) { snprintf(d.ssid, sizeof(d.ssid), "%s", wifiNames[i]); });
+  prefs::flush();
+  refreshWifi();
+  openTextEntry(KB_PASS);   // a network is no use without its password
+}
+
+static void startWifiScan() {
+  if (engineBusy()) {   // radio shares the antenna with the BLE link to the load
+    lv_label_set_text(setNetStatus, "Not while a test is running.");
+    lv_obj_set_style_text_color(setNetStatus, COL_AMBER, 0);
+    return;
+  }
+  if (!A.scanWifi) return;
+  // Clear the previous list and show the scanning state before the overlay is
+  // shown, so it never flashes stale results.
+  lv_obj_clean(wifiList);
+  wifiCount = 0;
+  lv_label_set_text(wifiStatus, "Scanning...");
+  lv_obj_clear_flag(wifiStatus, LV_OBJ_FLAG_HIDDEN);
+  showOverlay(OV_WIFI);
+  // Free ~70 KB for the Wi-Fi stack (no PSRAM on this board) before it inits.
+  // Painted the overlay above first; low-mem mode re-renders it in small chunks.
+  display::setLowMemMode(true);
+  if (!A.scanWifi()) {   // radio busy (a sync is mid-flight)
+    lv_label_set_text(wifiStatus, "Wi-Fi is busy - try again in a moment.");
+    display::setLowMemMode(false);
+  }
+}
+
+void onWifiScanResult(const char *const *ssids, const int *rssi, int n, const char *err) {
+  // The scan is done and the radio is off again — restore the full draw buffer
+  // so the list (and the rest of the UI) renders at full speed while the user
+  // picks and types.
+  display::setLowMemMode(false);
+  // A scan the user has already navigated away from should not repaint anything.
+  if (curOverlay != OV_WIFI) return;
+  lv_obj_clean(wifiList);
+  wifiCount = 0;
+  if (err) {
+    lv_label_set_text(wifiStatus, err);
+    lv_obj_set_style_text_color(wifiStatus, COL_AMBER, 0);
+    lv_obj_clear_flag(wifiStatus, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  if (n <= 0) {
+    lv_label_set_text(wifiStatus, "No networks found. Tap Rescan, or enter a hidden one manually.");
+    lv_obj_set_style_text_color(wifiStatus, COL_MUTED, 0);
+    lv_obj_clear_flag(wifiStatus, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  lv_obj_add_flag(wifiStatus, LV_OBJ_FLAG_HIDDEN);
+  if (n > WIFI_MAX) n = WIFI_MAX;
+  wifiCount = n;
+  const char *sel = prefs::get().ssid;
+  for (int i = 0; i < n; i++) {
+    snprintf(wifiNames[i], sizeof(wifiNames[0]), "%s", ssids[i]);
+    lv_obj_t *row = flatBtn(wifiList);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    styleCard(row, COL_CARD, COL_BORDER, 11, 12);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    bool current = strcmp(wifiNames[i], sel) == 0;
+    lv_obj_t *nm = lbl(row, wifiNames[i], current ? COL_ACCENT2 : COL_INK, F16);
+    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(nm, LV_PCT(72));
+    // RSSI → 4 signal bars. Rough but conventional thresholds (dBm).
+    int r = rssi[i];
+    int bars = r >= -55 ? 4 : r >= -65 ? 3 : r >= -75 ? 2 : r >= -85 ? 1 : 0;
+    char sig[24];
+    snprintf(sig, sizeof(sig), LV_SYMBOL_WIFI " %d/4", bars);
+    lbl(row, sig, bars >= 2 ? COL_GREEN : COL_AMBER, F14);
+    lv_obj_add_event_cb(row, onWifiRowPicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+  }
+}
+
+static void buildWifiPicker() {
+  wifiOverlay = cont(lv_layer_top());
+  lv_obj_add_flag(wifiOverlay, LV_OBJ_FLAG_CLICKABLE);   // modal barrier
+  lv_obj_set_size(wifiOverlay, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_color(wifiOverlay, COL_BLACK, 0);
+  lv_obj_set_style_bg_opa(wifiOverlay, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(wifiOverlay, 16, 0);
+  lv_obj_set_flex_flow(wifiOverlay, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(wifiOverlay, 8, 0);
+  lv_obj_add_flag(wifiOverlay, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t *hdr = cont(wifiOverlay);
+  lv_obj_set_size(hdr, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(hdr, 8, 0);
+  lv_obj_t *x = flatBtn(hdr);
+  lv_obj_set_size(x, 40, 40);
+  lv_obj_set_ext_click_area(x, 12);
+  styleCard(x, COL_CARD, COL_BORDER, 10, 0);
+  lv_obj_t *xl = lbl(x, LV_SYMBOL_CLOSE, COL_MUTED, F16);
+  lv_obj_center(xl);
+  lv_obj_add_event_cb(x, [](lv_event_t *) { showOverlay(OV_NONE); }, LV_EVENT_CLICKED, nullptr);
+  lbl(hdr, "Wi-Fi networks", COL_INK, F16);
+
+  wifiStatus = lbl(wifiOverlay, "", COL_MUTED, F14);
+  lv_label_set_long_mode(wifiStatus, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(wifiStatus, LV_PCT(100));
+
+  wifiList = cont(wifiOverlay);
+  lv_obj_set_width(wifiList, LV_PCT(100));
+  lv_obj_set_flex_grow(wifiList, 1);
+  lv_obj_set_flex_flow(wifiList, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(wifiList, 8, 0);
+  lv_obj_add_flag(wifiList, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(wifiList, LV_SCROLLBAR_MODE_OFF);
+
+  lv_obj_t *foot = cont(wifiOverlay);
+  lv_obj_set_size(foot, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(foot, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(foot, 8, 0);
+  lv_obj_t *rescan = flatBtn(foot);
+  lv_obj_set_flex_grow(rescan, 1);
+  lv_obj_set_height(rescan, 46);
+  styleCard(rescan, COL_INSET, COL_BORDER, 11, 0);
+  lv_obj_t *rsl = lbl(rescan, LV_SYMBOL_REFRESH "  Rescan", COL_ACCENT2, F14);
+  lv_obj_center(rsl);
+  lv_obj_add_event_cb(rescan, [](lv_event_t *) { startWifiScan(); }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *manual = flatBtn(foot);
+  lv_obj_set_flex_grow(manual, 1);
+  lv_obj_set_height(manual, 46);
+  styleCard(manual, COL_INSET, COL_BORDER, 11, 0);
+  lv_obj_t *ml = lbl(manual, "Hidden / manual", COL_MUTED, F14);
+  lv_obj_center(ml);
+  lv_obj_add_event_cb(manual, [](lv_event_t *) { openTextEntry(KB_SSID); }, LV_EVENT_CLICKED, nullptr);
+}
+
 static void buildKeypad() {
   kpOverlay = cont(lv_layer_top());
   lv_obj_add_flag(kpOverlay, LV_OBJ_FLAG_CLICKABLE);  // modal barrier: catch stray taps
@@ -2173,16 +2712,21 @@ void onStatus(const el15::Status &s) {
     }
   }
 
-  // fault banner (flags toggled only on a visibility change)
-  if (s.warning[0]) {
+  // fault banner (flags toggled only on a visibility change). A supervisor
+  // warning outranks everything else on screen while it is live, so leave the
+  // banner alone until it stands down.
+  if (s.warning[0] && !faultLocked) {
     faultIsEmergency = false;   // a real protection trip supersedes an e-stop ack
+    guardAction = nullptr;
+    lv_obj_set_style_bg_color(faultBanner, COL_RED, 0);
     snprintf(b, sizeof(b), LV_SYMBOL_WARNING "  %s - PROTECTION", s.warning); setTextIf(faultTitle, b);
     setTextIf(faultMsg, "Load protection tripped - check the setup");
     if (lv_obj_has_flag(faultBanner, LV_OBJ_FLAG_HIDDEN)) {
       lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
       audio::fault();   // alarm only on the transition into a new fault
     }
-  } else if (!faultIsEmergency && !lv_obj_has_flag(faultBanner, LV_OBJ_FLAG_HIDDEN)) {
+  } else if (!s.warning[0] && !faultIsEmergency && !faultLocked && !guardAction &&
+             !lv_obj_has_flag(faultBanner, LV_OBJ_FLAG_HIDDEN)) {
     lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
   }
 
@@ -2193,6 +2737,62 @@ void onStatus(const el15::Status &s) {
   }
 
   refreshMonitor();
+}
+
+// ---- Link-loss supervisor / crash recovery ---------------------------------
+void onGuardAlert(const char *title, const char *msg, bool resolved) {
+  // A live warning must not be dismissable by a stray tap, and must not be
+  // hidden behind a blanked screen.
+  guardAction = nullptr;
+  faultIsEmergency = !resolved;
+  faultLocked = !resolved;
+  display::noteActivity();
+  lv_obj_set_style_bg_color(faultBanner, resolved ? COL_GREEN : COL_RED, 0);
+  char t[64];
+  snprintf(t, sizeof(t), "%s  %s", resolved ? LV_SYMBOL_OK : LV_SYMBOL_WARNING, title);
+  lv_label_set_text(faultTitle, t);
+  lv_label_set_text(faultMsg, msg);
+  lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(faultBanner);
+  // The supervisor blocks for seconds inside a reconnect attempt, so this has
+  // to reach the panel before we return to it.
+  lv_refr_now(nullptr);
+}
+
+void offerRecovery(const char *msg, std::function<void()> action) {
+  guardAction = action;
+  faultIsEmergency = true;
+  faultLocked = false;   // tapping runs the action rather than dismissing
+  display::noteActivity();
+  lv_obj_set_style_bg_color(faultBanner, COL_AMBER, 0);
+  lv_label_set_text(faultTitle, LV_SYMBOL_WARNING "  LOAD MAY STILL BE ON");
+  lv_label_set_text(faultMsg, msg);
+  lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(faultBanner);
+}
+
+void onNetProgress(int state, const char *text) {
+  // net::State — 3 DONE, 4 FAILED, 5 SCANNING (scan uses onWifiScanResult for
+  // its own low-mem handling, so ignore SCANNING here).
+  const bool done = state == 3, failed = state == 4, scanning = state == 5;
+  if (scanning) return;
+  lv_label_set_text(setNetStatus, text);
+  lv_obj_set_style_text_color(setNetStatus, failed ? COL_RED : done ? COL_GREEN : COL_MUTED, 0);
+  lv_label_set_text(setSyncLbl, (done || failed) ? "Sync clock now" : "Syncing...");
+  if (done) {
+    // The clock is in the RTC and every setting is in NVS, so a restart loses
+    // nothing — and it is the only way to get the full-speed draw buffer back
+    // (Wi-Fi fragmented the heap; the 82 KB block can't be reassembled). Reboot
+    // rather than leave the UI on the reduced buffer.
+    settingsTick();   // reflect the new RTC time for the moment it's visible
+    lv_label_set_text(setNetStatus, "Clock set - restarting to restore the display...");
+    lv_obj_set_style_text_color(setNetStatus, COL_GREEN, 0);
+    lv_refr_now(nullptr);
+    prefs::flush();
+    delay(1600);      // let the confirmation be read
+    ESP.restart();
+  }
+  if (failed) display::setLowMemMode(false);   // restore (best-effort) so a retry is usable
 }
 
 void onEmergencyStop(bool wasTestRunning) {
@@ -2261,6 +2861,21 @@ void onTestProgress(int step, int total, float target, float v, float i) {
   snprintf(b, sizeof(b), "%.3f A", i); lv_label_set_text(runILbl, b);
 }
 void onTestComplete(const ResistanceTest::Result &r) {
+  // A tare run isn't a result — it is a calibration of the leads. Store the
+  // RAW slope (nothing is subtracted from a tare) and go straight back to setup.
+  if (rtTareRunning) {
+    rtTareRunning = false;
+    rtTareOhm = r.rawResistanceOhm;
+    rtPhase = RT_IDLE;
+    char t[96], ob[20];
+    fmtOhm(ob, sizeof(ob), rtTareOhm);
+    snprintf(t, sizeof(t), "Lead tare stored: %s. It is subtracted from 2-wire results.", ob);
+    lv_label_set_text(rtStatusLbl, t);
+    lv_obj_clear_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);
+    refreshRtest();   // also persists the new tare
+    showScreen(SCR_RTEST);
+    return;
+  }
   lastResult = r; rtPhase = RT_RESULT; rtSaved = false;
   char b[32];
   if (r.resistanceOhm < 1.0f) snprintf(b, sizeof(b), "%.4f ohm", r.resistanceOhm);
@@ -2279,6 +2894,20 @@ void onTestComplete(const ResistanceTest::Result &r) {
   for (auto &sm : r.samples) { pkW = LV_MAX(pkW, sm.voltage * sm.current); fanMax = LV_MAX(fanMax, sm.fanSpeed); }
 
   snprintf(v1, sizeof(v1), "%.2f V", r.openCircuitVoltage); lv_label_set_text(rrVal[RR_VOC], v1);
+  // Probe wiring, and — when a tare was subtracted — what was actually measured
+  // before it. Hiding the raw figure would make the correction invisible.
+  char probe[40];
+  if (r.fourWire) strcpy(probe, "4-wire (Kelvin)");
+  else if (r.tareOhm > 0) { char ob[20]; fmtOhm(ob, sizeof(ob), r.tareOhm); snprintf(probe, sizeof(probe), "2-wire, tare %s", ob); }
+  else strcpy(probe, "2-wire, no tare");
+  lv_label_set_text(rrVal[RR_PROBE], probe);
+  lv_obj_set_style_text_color(rrVal[RR_PROBE], r.fourWire || r.tareOhm > 0 ? COL_GREEN : COL_AMBER, 0);
+  if (r.tareOhm > 0) {
+    fmtOhm(v1, sizeof(v1), r.rawResistanceOhm); lv_label_set_text(rrVal[RR_RAW], v1);
+    lv_obj_clear_flag(rrRow[RR_RAW], LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(rrRow[RR_RAW], LV_OBJ_FLAG_HIDDEN);
+  }
   // Uncertainty carries the reliable colour (green ok / amber high); R^2 is now
   // secondary and stays neutral.
   fmtOhm(v1, sizeof(v1), r.resistanceStdErr); lv_label_set_text(rrVal[RR_TOL], v1);
@@ -2381,12 +3010,12 @@ void onTestComplete(const ResistanceTest::Result &r) {
   lv_chart_refresh(rtChart);
   snprintf(v1, sizeof(v1), "%.2f-%.2f V", vLoPlot, vHiPlot); lv_label_set_text(rcYRange, v1);
   snprintf(v1, sizeof(v1), "0-%.2f A", xHi); lv_label_set_text(rcXRange, v1);
-  lv_label_set_text(saveBtnLbl, LV_SYMBOL_SAVE "  Save to SD card");
-  lv_obj_set_style_bg_color(saveBtn, COL_ACCENT, 0);
+  resetSaveButton(saveBtn, saveBtnLbl);
   refreshRtest();
   showScreen(SCR_RTEST);
 }
 void onTestError(const char *msg) {
+  rtTareRunning = false;   // a failed tare sweep leaves the old tare in place
   rtPhase = RT_IDLE; refreshRtest();
   lv_label_set_text(rtStatusLbl, msg);
   lv_obj_clear_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);
@@ -2431,7 +3060,7 @@ void onBattComplete(const CapacityTest::Result &r) {
   snprintf(b, sizeof(b), "%.1f - %.1f\xC2\xB0" "C", r.minTemp, r.maxTemp); lv_label_set_text(brVal[7], b);
   snprintf(b, sizeof(b), "%.2f V", r.cutoffV); lv_label_set_text(brVal[8], b);
   snprintf(b, sizeof(b), "%.2f A", r.currentA); lv_label_set_text(brVal[9], b);
-  lv_label_set_text(btSaveLbl, LV_SYMBOL_SAVE "  Save to SD card");
+  resetSaveButton(btSaveBtn, btSaveLbl);
   battChartRefresh();
   refreshBatt();
   showScreen(SCR_BATT);
@@ -2448,6 +3077,22 @@ void onBattError(const char *msg) {
 // ---- Entry -----------------------------------------------------------------
 void begin(const UiActions &actions) {
   A = actions;
+
+  // Restore the last session's setup BEFORE building the screens, so every
+  // widget is created showing the value it will actually use.
+  const prefs::Data &p = prefs::get();
+  pollMs = p.pollMs;
+  fuseRating = p.fuseRating;
+  rtSteps = p.rtSteps;
+  rtFourWire = p.fourWire;
+  rtTareOhm = p.tareOhm;
+  battChem = p.battChem;
+  battCells = p.battCells;
+  battCutoff = p.battCutoff;
+  battCutoffCustom = p.battCutoffCustom;
+  battAmps = p.battAmps;
+  if (A.setPollRate) A.setPollRate(pollMs);
+
   scrRoot = lv_scr_act();
   lv_obj_set_style_bg_color(scrRoot, COL_BLACK, 0);
   lv_obj_set_style_pad_all(scrRoot, 0, 0);
@@ -2474,6 +3119,8 @@ void begin(const UiActions &actions) {
   buildLoadBar();
   buildMenu();
   buildKeypad();
+  buildTextEntry();
+  buildWifiPicker();
   buildPicker();
 
   UnitCfg c = unitCfg("A");

@@ -23,6 +23,9 @@ bool batteryStats(int &percent, int &milliVolt, int &chargeState, bool &present)
 // Returns false when the RTC is absent or its oscillator-stop flag says the
 // time was never set.
 bool rtcTime(int &year, int &mon, int &day, int &hour, int &min, int &sec);
+// Set the RTC (local time, 24-hour). Clears the oscillator-stop flag, so
+// rtcTime() starts returning true. False = the write did not reach the part.
+bool setRtcTime(int year, int mon, int day, int hour, int min, int sec);
 
 // ---- Physical buttons ------------------------------------------------------
 // BOOT is a GPIO; PWR is read from the PMIC's latched key IRQs. Poll from the
@@ -35,5 +38,35 @@ ButtonEvent pollButtons();
 // or a tap on the dark screen, wakes it.
 void setSleep(bool on);
 bool asleep();
+
+// ---- AMOLED burn-in mitigation ---------------------------------------------
+// A bench instrument shows the same static labels for hours; on an OLED that
+// burns in permanently. Both defences are independent of the UI layer.
+
+// Pixel shift: creep the whole layout around a 3x3 px box so no edge sits on
+// the same subpixel. On by default; costs one redraw every 90 s.
+void setPixelShift(bool on);
+bool pixelShift();
+
+// Dim after this many seconds without a touch or button press, then blank at
+// 5x that. 0 disables both. The user's brightness is restored on any input.
+void setIdleDim(uint16_t seconds);
+uint16_t idleDim();
+
+// Suppress the blank step (not the dim) — set while a test is running so an
+// unattended run keeps a visible, dimmed screen.
+void inhibitSleep(bool on);
+
+// Reset the idle timer and undo dim/sleep. Called by the touch driver; call it
+// for any other interaction that should count as "the user is here".
+void noteActivity();
+
+// ---- Low-memory mode -------------------------------------------------------
+// Temporarily shrink the LVGL draw buffer to free ~70 KB for the Wi-Fi stack
+// (esp_wifi_init needs ~50 KB and this board has no PSRAM). The UI keeps working
+// but renders in smaller chunks. Turn on immediately before a Wi-Fi scan/sync
+// and off the moment it finishes. Idempotent.
+void setLowMemMode(bool on);
+bool lowMemMode();
 
 }  // namespace display

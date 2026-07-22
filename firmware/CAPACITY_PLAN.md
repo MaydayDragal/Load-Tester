@@ -67,18 +67,23 @@ stub, as part of this work).
   axis) on the Running screen; final curve on the Result screen. Fixed-capacity
   chart series allocated at build (no reallocs — see the 2026-07-21 panic).
 
-### 2.4 SD card (Phase 0 — also unblocks the R-test stub)
-- ESP32-C6 has **no SDMMC host** — the slot must run in SPI mode. Pins from the
-  TODO map to SPI as SCK=11, MOSI(CMD)=10, MISO(D0)=18; **CS pin must be
-  verified** against Waveshare's pin_config.h (open question — possibly D3 on a
-  GPIO or the TCA9554 expander).
-- `sd::begin()` lazy-mounts FAT; writes only from the loop task; card-absent
-  and write-failure states surface honestly in the UI (no fake "Saved").
-- Naming: `RTEST_NNN.csv` / `BATT_NNN.csv`, next index by directory scan.
-  Metadata header rows (config, firmware version, RTC timestamp if set — CSV
-  uses uptime seconds when the RTC is unset).
-- Retro-fit the R-test save to write a real CSV (samples + summary + circuit
-  estimate) — closes QA-report finding M5.
+### 2.4 SD card (Phase 0 — DONE, also unblocked the R-test stub)
+- ESP32-C6 has **no SDMMC host** — the slot runs in SPI mode: SCK=11,
+  MOSI(CMD)=10, MISO(D0)=18, **CS=6** (confirmed against Waveshare's
+  `pin_config.h`, which calls them `SDMMC_*`).
+- The C6 also has only **one general-purpose SPI host**, and the AMOLED owns it.
+  The card is therefore a second device on that host with the clock/data signals
+  re-routed through the GPIO matrix per access — so it is never left mounted,
+  and nothing may draw while it is. Full rationale in `sd_card.cpp`.
+- `sd::saveCsv()` mounts, writes and unmounts as one operation, from the loop
+  task; card-absent and write-failure states surface honestly in the UI (no fake
+  "Saved"), and a half-written file is deleted rather than left as a "result".
+- Naming: `RTEST_NNN.CSV` / `BATT_NNN.CSV`, next index by directory scan.
+  Metadata header rows (config, firmware build, RTC timestamp if set — the CSV
+  says "(RTC not set) uptime NNN s" when it is not).
+- The R-test save writes a real CSV (per-level samples + summary) — closes
+  QA-report finding M5. Remaining for Phase 3: streaming the capacity test's
+  per-sample discharge curve (today's `BATT_NNN.CSV` holds the summary only).
 
 ### 2.5 UI (new `SCR_BATT` screen, Menu grows to 8 tiles = exactly 4×2)
 - **Setup**: chemistry tiles, cells −/+ with Voc/auto-suggest readout, cutoff
@@ -113,7 +118,7 @@ stub, as part of this work).
 
 | Phase | Scope | Est. size |
 |---|---|---|
-| 0 | SD SPI bring-up, `sd::` module, real R-test CSV save, CS-pin verification | ~1 session |
+| 0 | ~~SD SPI bring-up, `sd::` module, real R-test CSV save, CS-pin verification~~ **done 2026-07-22** (untested on hardware) | ~1 session |
 | 1 | `capacity_test.h` engine + El15Simulator battery model (emf sags with drawn Ah along a simple SoC curve) so everything is testable on-device without hardware | ~1 session |
 | 2 | SCR_BATT setup/running/result UI + charts + picker/Menu wiring | 1–2 sessions |
 | 3 | CSV streaming during test + result save + file naming | ~0.5 session |
