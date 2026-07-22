@@ -1117,8 +1117,7 @@ static void enterRtRun() {
 static std::vector<std::string *> g_addrPool;
 static void onDeviceRow(lv_event_t *e) {
   const char *addr = (const char *)lv_event_get_user_data(e);
-  if (addr && strcmp(addr, "__demo__") == 0) { if (A.startDemo) A.startDemo(); }
-  else if (addr && A.connect) A.connect(addr);
+  if (addr && A.connect) A.connect(addr);
 }
 static void addDeviceRow(const char *sym, const char *name, const char *sub, const char *addr) {
   lv_obj_t *row = flatBtn(deviceList);
@@ -1175,7 +1174,7 @@ static void buildConnect() {
   lv_obj_set_size(deviceList, LV_PCT(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(deviceList, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(deviceList, 8, 0);
-  addDeviceRow(LV_SYMBOL_EDIT, "Demo Simulator", "built-in - no hardware", "__demo__");
+  lbl(deviceList, "Scan to find EL15 devices.", COL_FAINT, F12);
 }
 
 // ---- Settings ----------------------------------------------------------------
