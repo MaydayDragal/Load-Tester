@@ -2298,18 +2298,27 @@ void onTestComplete(const ResistanceTest::Result &r) {
   float vPad = (vHiPlot - vLoPlot) * 0.10f;
   lv_chart_set_range(rtChart, LV_CHART_AXIS_PRIMARY_Y,
                      (lv_coord_t)((vLoPlot - vPad) * 100), (lv_coord_t)((vHiPlot + vPad) * 100));
-  // Line chart plotted by step index (levels are evenly spaced). Measured V
-  // (amber) and the least-squares fit V at each level's current (green); unused
-  // tail slots are POINT_NONE, which the line renderer skips — no stray edge.
-  for (int k = 0; k < RT_CHART_PTS; k++) {
-    if (k < n) {
-      lv_chart_set_value_by_id(rtChart, rtSerMeas, k, (lv_coord_t)(r.samples[k].voltage * 100));
-      lv_chart_set_value_by_id(rtChart, rtSerFit, k,
-                               (lv_coord_t)((r.openCircuitVoltage - r.resistanceOhm * r.samples[k].current) * 100));
+  // A line chart places points at fixed index positions, so the N level-points
+  // are RESAMPLED across all RT_CHART_PTS slots to span the full width (the same
+  // approach the battery curve uses); otherwise a few levels would fill only the
+  // left of the chart and leave the rest empty. Measured V in amber; the
+  // least-squares fit V at the interpolated current in green.
+  for (int j = 0; j < RT_CHART_PTS; j++) {
+    float vMeas, cur;
+    if (n == 1) {
+      vMeas = r.samples[0].voltage; cur = r.samples[0].current;
     } else {
-      lv_chart_set_value_by_id(rtChart, rtSerMeas, k, LV_CHART_POINT_NONE);
-      lv_chart_set_value_by_id(rtChart, rtSerFit, k, LV_CHART_POINT_NONE);
+      float sf = (float)j * (n - 1) / (RT_CHART_PTS - 1);
+      int i0 = (int)sf;
+      if (i0 >= n - 1) { vMeas = r.samples[n - 1].voltage; cur = r.samples[n - 1].current; }
+      else {
+        float f = sf - i0;
+        vMeas = r.samples[i0].voltage * (1 - f) + r.samples[i0 + 1].voltage * f;
+        cur   = r.samples[i0].current * (1 - f) + r.samples[i0 + 1].current * f;
+      }
     }
+    lv_chart_set_value_by_id(rtChart, rtSerMeas, j, (lv_coord_t)(vMeas * 100));
+    lv_chart_set_value_by_id(rtChart, rtSerFit, j, (lv_coord_t)((r.openCircuitVoltage - r.resistanceOhm * cur) * 100));
   }
   lv_chart_refresh(rtChart);
   snprintf(v1, sizeof(v1), "%.2f-%.2f V", vLoPlot, vHiPlot); lv_label_set_text(rcYRange, v1);
