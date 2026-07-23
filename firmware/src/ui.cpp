@@ -1793,9 +1793,23 @@ static void settingsTick() {
 }
 
 // ---- Battery capacity test ---------------------------------------------------
-static void battHistReset() { btHistN = 0; btHistStride = 1; btHistAcc = 0; btLastElapsed = 0; }
+// Persistent per-run state for a STABLE discharge frame (see battChartRefresh).
+static float btVMax = 0;      // highest voltage seen this run — the frame's top
+static float btSmooth = 0;    // EMA-filtered voltage
+static bool  btFiltInit = false;
+
+static void battHistReset() {
+  btHistN = 0; btHistStride = 1; btHistAcc = 0; btLastElapsed = 0;
+  btVMax = 0; btFiltInit = false;
+}
 
 static void battHistPush(float v) {
+  // Light EMA first: the raw load-ADC voltage carries a few mV of noise that
+  // otherwise shows as squiggle. The discharge is slow, so the lag is trivial.
+  if (!btFiltInit) { btSmooth = v; btVMax = v; btFiltInit = true; }
+  else btSmooth += (v - btSmooth) * 0.4f;
+  v = btSmooth;
+  if (v > btVMax) btVMax = v;   // only ever grows — survives the reservoir halving
   if (++btHistAcc < btHistStride) return;
   btHistAcc = 0;
   if (btHistN == BATT_RES_N) {           // full: halve resolution, double stride
@@ -1808,11 +1822,21 @@ static void battHistPush(float v) {
 
 static void battChartRefresh() {
   if (!btChart || btHistN == 0) return;
-  float lo = btHistV[0], hi = btHistV[0];
-  for (int k = 0; k < btHistN; k++) { lo = LV_MIN(lo, btHistV[k]); hi = LV_MAX(hi, btHistV[k]); }
-  if (hi - lo < 0.2f) { lo -= 0.1f; hi += 0.1f; }
-  float p = (hi - lo) * 0.10f;
-  lv_chart_set_range(btChart, LV_CHART_AXIS_PRIMARY_Y, (lv_coord_t)((lo - p) * 100), (lv_coord_t)((hi + p) * 100));
+  // FIXED discharge frame so the curve keeps its shape instead of rescaling on
+  // every poll (which made it "squiggle around"): top = highest voltage seen
+  // (~the rested start; only ever grows), bottom = the configured cutoff (the
+  // run's floor). Both are steady for the whole run, so each new sample just
+  // extends the line — the vertical frame never jumps.
+  float top = btVMax;
+  float bottom = battCutoff;
+  if (bottom >= top - 0.05f) bottom = top - 0.30f;   // guard: cutoff at/above start
+  if (top - bottom < 0.30f) {                         // keep a readable minimum span
+    float mid = (top + bottom) * 0.5f;
+    top = mid + 0.15f; bottom = mid - 0.15f;
+  }
+  float m = (top - bottom) * 0.06f;
+  lv_chart_set_range(btChart, LV_CHART_AXIS_PRIMARY_Y,
+                     (lv_coord_t)((bottom - m) * 100), (lv_coord_t)((top + m) * 100));
   // Resample the reservoir across the full chart width: chart point j maps to
   // time fraction j/(BATT_CHART_N-1) of the whole run, so the curve always
   // spans [0, elapsed] and the time axis grows smoothly every refresh.
@@ -1829,7 +1853,7 @@ static void battChartRefresh() {
     lv_chart_set_value_by_id(btChart, btSer, j, (lv_coord_t)(v * 100));
   }
   char b[24];
-  snprintf(b, sizeof(b), "%.2f-%.2f V", lo, hi); lv_label_set_text(btChartYLbl, b);
+  snprintf(b, sizeof(b), "%.2f-%.2f V", bottom, top); lv_label_set_text(btChartYLbl, b);
   char el[16];
   hhmmss((int)btLastElapsed, el, sizeof(el));
   snprintf(b, sizeof(b), "0 - %s", el); lv_label_set_text(btChartXLbl, b);
