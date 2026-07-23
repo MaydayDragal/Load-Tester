@@ -230,6 +230,7 @@ static lv_obj_t *rrRow[RR_N], *rrKey[RR_N], *rrVal[RR_N];
 static const int RT_CHART_PTS = 20;  // fixed capacity = UI max steps; no reallocs
 static lv_obj_t *setBriVal, *setBattVal, *setBattState, *setRtcVal, *setSdVal, *setHeapVal, *setMinHeapVal, *setUptimeVal;
 static lv_obj_t *setPxShiftBtn, *setPxShiftLbl, *dimChip[4], *dimChipLbl[4];
+static lv_obj_t *setAutoConnBtn, *setAutoConnLbl;
 static lv_obj_t *setSsidVal, *setPassVal, *setTzVal, *setSyncBtn, *setSyncLbl, *setNetStatus;
 // Text-entry overlay (password + manual/hidden SSID entry).
 static lv_obj_t *kbOverlay, *kbTextArea, *kbTitle;
@@ -1415,6 +1416,19 @@ static const int DIM_N = 4;
 static const uint16_t DIM_SECS[DIM_N] = {0, 60, 120, 300};
 static const char *DIM_NAMES[DIM_N] = {"Never", "1 min", "2 min", "5 min"};
 
+static void refreshAutoConn() {
+  bool on = prefs::get().autoConnect;
+  bool have = prefs::get().lastAddr[0] != '\0';
+  lv_label_set_text(setAutoConnLbl, on ? "Auto-connect on" : "Auto-connect off");
+  lv_obj_set_style_border_color(setAutoConnBtn, on ? COL_GREEN : COL_FAINT, 0);
+  lv_obj_set_style_text_color(setAutoConnLbl, on ? COL_GREEN : COL_FAINT, 0);
+  // Honest hint when enabled but nothing has ever connected to store an address.
+  if (on && !have) {
+    lv_label_set_text(setAutoConnLbl, "Auto-connect on (no device yet)");
+    lv_obj_set_style_text_color(setAutoConnLbl, COL_AMBER, 0);
+  }
+}
+
 static void refreshScreenProt() {
   bool on = display::pixelShift();
   lv_label_set_text(setPxShiftLbl, on ? "Pixel shift on" : "Pixel shift off");
@@ -1582,6 +1596,25 @@ static void buildSettings() {
     lv_obj_add_event_cb(rateChip[i], onRateChip, LV_EVENT_CLICKED, (void *)(intptr_t)i);
   }
   refreshRateChips();
+
+  // connection: auto-connect to the last device on startup
+  lv_obj_t *conc = settingsCard("CONNECTION");
+  lv_obj_set_style_pad_row(conc, 8, 0);
+  lv_obj_t *acNote = lbl(conc, "When on, the controller reconnects to the last device automatically at startup - no scan or tap needed.", COL_FAINT, F12);
+  lv_label_set_long_mode(acNote, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(acNote, LV_PCT(100));
+  setAutoConnBtn = flatBtn(conc);
+  lv_obj_set_size(setAutoConnBtn, LV_PCT(100), 44);
+  styleCard(setAutoConnBtn, COL_BLACK, COL_GREEN, 11, 0);
+  lv_obj_set_style_bg_opa(setAutoConnBtn, LV_OPA_TRANSP, 0);
+  setAutoConnLbl = lbl(setAutoConnBtn, "Auto-connect off", COL_FAINT, F16);
+  lv_obj_center(setAutoConnLbl);
+  lv_obj_add_event_cb(setAutoConnBtn, [](lv_event_t *) {
+    prefs::change([](prefs::Data &d) { d.autoConnect = !d.autoConnect; });
+    prefs::flush();
+    refreshAutoConn();
+  }, LV_EVENT_CLICKED, nullptr);
+  refreshAutoConn();
 
   // battery (AXP2101)
   lv_obj_t *pc = settingsCard("BATTERY");

@@ -51,6 +51,10 @@ static LinkGuard g_guard(&g_ble);
 static ResistanceTest::Result g_lastRTest;
 static CapacityTest::Result g_lastBatt;
 
+// One-shot: a clean boot with auto-connect enabled asks loop() to reconnect to
+// the stored device once NimBLE has settled.
+static bool g_autoConnectPending = false;
+
 // ---- Status routing --------------------------------------------------------
 static void handleStatus(const el15::Status &s) {
   ui::onStatus(s);
@@ -349,6 +353,12 @@ void setup() {
                   prefs::get().lastAddr[0] ? prefs::get().lastAddr : "-");
     audio::fault();
     ui::offerRecovery(msg, []() { g_guard.start("Recovering after a restart"); });
+  } else if (prefs::get().autoConnect && prefs::get().lastAddr[0]) {
+    // Clean boot + auto-connect enabled + a device on record: reconnect on our
+    // own so the user doesn't scan+tap every session. Deferred to loop() so
+    // NimBLE's host has time to sync first; skipped when crash recovery owns the
+    // boot (its explicit reconnect-and-force-off takes precedence above).
+    g_autoConnectPending = true;
   }
 }
 
@@ -393,6 +403,17 @@ void loop() {
   display::loopTick();
   handleButtons();
   g_ble.loopTick();
+  // Startup auto-connect (once, after NimBLE has had ~1.5 s to sync). connectTo
+  // blocks the loop, but nothing else needs to run yet; the UI paints
+  // "Connecting..." via onConnState.
+  if (g_autoConnectPending && millis() > 1500) {
+    g_autoConnectPending = false;
+    if (g_ble.state() == El15Client::IDLE && prefs::get().lastAddr[0]) {
+      Serial.printf("[ble] auto-connect to %s (type %u)\n",
+                    prefs::get().lastAddr, (unsigned)prefs::get().lastAddrType);
+      g_ble.connectTo(prefs::get().lastAddr, prefs::get().lastAddrType);
+    }
+  }
   g_test.tick();
   g_batt.tick();
   g_guard.tick();    // reconnect-and-force-off, if the link dropped hot

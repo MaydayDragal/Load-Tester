@@ -46,6 +46,9 @@ struct Data {
   // Last device, so a reconnect after a link loss or a crash needs no scan.
   char lastAddr[24] = "";
   uint8_t lastAddrType = 0;
+  // Auto-connect to lastAddr on startup (skip the scan+tap each session). Off by
+  // default — the firmware should not reach out for a BLE link unprompted.
+  bool autoConnect = false;
 
   // Crash/reboot recovery: non-zero while something is driving the load, so the
   // next boot knows the load may have been left energised.

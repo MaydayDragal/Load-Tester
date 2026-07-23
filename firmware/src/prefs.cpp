@@ -40,6 +40,7 @@ void writeAll() {
   g_nvs.putShort("tz", g_data.tzMinutes);
   g_nvs.putString("lastAddr", g_data.lastAddr);
   g_nvs.putUChar("lastAddrT", g_data.lastAddrType);
+  g_nvs.putBool("autoConn", g_data.autoConnect);
 }
 
 }  // namespace
@@ -70,6 +71,7 @@ void begin() {
   g_data.tzMinutes = g_nvs.getShort("tz", d.tzMinutes);
   g_nvs.getString("lastAddr", g_data.lastAddr, sizeof(g_data.lastAddr));
   g_data.lastAddrType = g_nvs.getUChar("lastAddrT", d.lastAddrType);
+  g_data.autoConnect = g_nvs.getBool("autoConn", d.autoConnect);
   g_data.inFlight = g_nvs.getUChar("inFlight", Data::NONE);
   Serial.printf("[prefs] loaded (inFlight=%u, ssid=%s)\n",
                 (unsigned)g_data.inFlight, g_data.ssid[0] ? g_data.ssid : "-");
