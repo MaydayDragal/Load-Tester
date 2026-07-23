@@ -95,6 +95,18 @@ holes found in that audit and already patched — listed so you know they were c
     OFF" offer; tap it; verify the device input goes OFF. First from-cold reconnect
     against the real unit's address type. If it fails, unattended runs are off the table.
 
+16a. *(advisory)* **Load-safe power-off drill.** LOAD ON at open input, then **long-press
+    PWR**: expect serial `[btn] POWER OFF (load stopped)`, "POWERING OFF — load stopped"
+    banner, the EL15 input going OFF, then the controller powering down (on USB it may
+    reset instead of fully powering off — expected). Confirms a power-off can't strand
+    the load. *(new 2026-07-22, AXP2101)*
+
+16b. *(advisory)* **Controller-brownout auto-safe.** Hard to bench without a low battery —
+    but know the behavior: on battery (not USB), at ~8% / ~3.30 V the controller
+    force-stops the load and shows an amber "CONTROLLER BATTERY CRITICAL" banner
+    (`[pmic] ... CRITICAL ... forcing LOAD OFF` on serial). For any long unattended run,
+    **keep the controller on USB** so this never has to fire. *(new 2026-07-22, AXP2101)*
+
 ## Phase 2 — first real current
 
 17. *(advisory but strongly recommended)* **Bench PSU before any battery.** ~5 V with a

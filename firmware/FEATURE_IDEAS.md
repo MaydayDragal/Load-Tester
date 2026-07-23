@@ -18,7 +18,7 @@ This is the headline: most of the board is idle. Every feature below marked
 | **SD card slot** | CSV test reports (shares the panel's SPI host) | live streaming logs, history browser, load-profile replay |
 | **PCF85063 RTC** | now settable (Wi-Fi NTP) | real timestamps on logs — done; manual set-time UI still optional |
 | **WiFi 6 radio** | NTP clock sync (Settings ▸ Clock) | web UI, REST/MQTT, OTA, cloud logging still open |
-| **AXP2101 PMIC** | read-only | sleep/low-power modes, runtime estimate, charge control |
+| **AXP2101 PMIC** | brownout auto-safe + load-safe power-off (read: %/V/USB) | runtime estimate, charge-current control, rail power-saving |
 | **PWR + BOOT buttons** | completely unused | physical emergency-stop / wake / quick-action keys that work without looking |
 | **Audio out** | completely unused | completion tones, fault alarms, audible probing — see §14 for the hardware caveat |
 | **USB-Serial/JTAG** | flashing + logs only | SCPI-style scripting API for lab automation |
@@ -88,6 +88,8 @@ lifting; several of these are small deltas on existing code.
 |---|---|---|
 | ~~Link-loss auto-stop supervisor~~ | **done** | `link_guard.h`: whenever the load reports ON, a dropped link starts a reconnect-and-force-LOAD-OFF loop (8 tries) with a locked red banner + repeating alarm; gives up loudly rather than silently. |
 | ~~Crash/reboot recovery~~ | **done** | NVS in-flight flag (written synchronously while energised) → on boot, offers "reconnect and force LOAD OFF" using the stored last device. `prefs` + `link_guard`. |
+| ~~Controller-brownout auto-safe (AXP2101)~~ | **done** | `main.cpp monitorPower()`: the controller's OWN battery is watched (fuel-gauge % + VBAT floor, suppressed on USB); at the critical threshold it force-stops the load before the controller can brown out and strand it — the sibling of the link guard for "the controller's battery died". |
+| ~~Load-safe power-off (AXP2101)~~ | **done** | Long-press PWR forces LOAD OFF and flushes it over BLE before `display::powerOff()` cuts the rails — the PMIC's own OFFLEVEL cutoff would skip that and strand an energised load. |
 | **Temperature auto-abort** | S | User-set limit; stop before the load cooks. |
 | **User soft limits** | S | Cap max current/power below hardware ratings for a given setup. |
 | **Confirm dialog above a power threshold** | S | Guard rail for high-energy runs. |

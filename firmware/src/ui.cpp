@@ -2838,6 +2838,37 @@ void clearGuardBanner() {
   lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
 }
 
+void onPowerCritical(int percent, bool wasHot) {
+  // Full-width amber banner; not locked (the load is already off), so a tap
+  // dismisses it. Reuses the fault banner on the top layer so it shows even
+  // over an open overlay.
+  guardAction = nullptr;
+  faultLocked = false;
+  faultIsEmergency = true;   // keep it up across clean status packets
+  display::noteActivity();
+  lv_obj_set_style_bg_color(faultBanner, COL_AMBER, 0);
+  lv_label_set_text(faultTitle, LV_SYMBOL_WARNING "  CONTROLLER BATTERY CRITICAL");
+  char b[96];
+  snprintf(b, sizeof(b), "%d%% - the load was stopped so the controller can't die mid-test. Plug in USB. Tap to dismiss.",
+           percent);
+  lv_label_set_text(faultMsg, b);
+  lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(faultBanner);
+  if (rtPhase == RT_RUN) { rtPhase = RT_IDLE; refreshRtest(); }
+  if (btPhase == BT_RUN || btPhase == BT_REST) { btPhase = BT_IDLE; refreshBatt(); }
+}
+
+void onPoweringOff() {
+  guardAction = nullptr;
+  faultLocked = false;
+  lv_obj_set_style_bg_color(faultBanner, COL_RED, 0);
+  lv_label_set_text(faultTitle, LV_SYMBOL_POWER "  POWERING OFF");
+  lv_label_set_text(faultMsg, "Load stopped. Cutting power...");
+  lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(faultBanner);
+  lv_refr_now(nullptr);   // paint before main.cpp cuts the rails
+}
+
 void onEmergencyStop(bool wasTestRunning) {
   // A stale recovery offer must not hijack the acknowledgement tap.
   guardAction = nullptr;

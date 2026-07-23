@@ -23,6 +23,14 @@ bool batteryStats(int &percent, int &milliVolt, int &chargeState, bool &present)
 // Returns false when the RTC is absent or its oscillator-stop flag says the
 // time was never set.
 bool rtcTime(int &year, int &mon, int &day, int &hour, int &min, int &sec);
+
+// ---- AXP2101 power (see the power monitor in main.cpp) ---------------------
+// True while the controller is on USB/wall power (no brownout risk).
+bool usbPresent();
+// Clean hardware power-off: cut all rails via the AXP2101. The caller MUST have
+// forced the EL15 load off first — this kills our own power. Returns only if
+// the PMIC did not act.
+void powerOff();
 // Set the RTC (local time, 24-hour). Clears the oscillator-stop flag, so
 // rtcTime() starts returning true. False = the write did not reach the part.
 bool setRtcTime(int year, int mon, int day, int hour, int min, int sec);

@@ -79,6 +79,13 @@ void offerRecovery(const char *msg, std::function<void()> action);
 // stale banner must not stay locked on screen suppressing later alerts.
 void clearGuardBanner();
 
+// The controller's OWN battery hit the critical threshold and the load was
+// force-stopped before brownout. `wasHot` = something was actually sinking.
+void onPowerCritical(int percent, bool wasHot);
+
+// A load-safe power-off is in progress (load stopped, about to cut power).
+void onPoweringOff();
+
 // Wi-Fi/NTP progress for the Settings clock card. `state` is net::State;
 // 3 = done, 4 = failed.
 void onNetProgress(int state, const char *text);

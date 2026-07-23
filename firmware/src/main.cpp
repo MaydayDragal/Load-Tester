@@ -84,6 +84,80 @@ static void emergencyStop() {
   ui::onEmergencyStop(acted);
 }
 
+// Is anything (possibly) sinking current right now? An engine running, or the
+// device reporting the load on (the guard arms on that echo).
+static bool loadHot() {
+  return g_test.running() || g_batt.running() || g_guard.armed();
+}
+
+// ---- Controller-brownout protection (AXP2101) ------------------------------
+// The controller runs on its own battery; a multi-hour capacity test can outlast
+// it. If the controller browns out mid-discharge it dies exactly like a crash —
+// and the EL15 keeps sinking with nothing commanding it (the whole reason the
+// link guard exists). So watch our OWN battery and, before we brown out, force
+// LOAD OFF while a link still exists. Poll at 1 Hz from loop().
+//
+// Firmware-side threshold on the fuel-gauge percent (+ a VBAT hard floor), NOT
+// the AXP2101's warning-IRQ register: that register's %-encoding is ambiguous in
+// the vendor lib, whereas percent (reg 0xA4) is what the Settings card already
+// reads reliably. On USB there is no brownout risk, so the check is suppressed.
+static void monitorPower() {
+  static uint32_t lastMs = 0;
+  if (millis() - lastMs < 1000) return;
+  lastMs = millis();
+
+  static const int CRIT_PCT = 8;        // fuel-gauge % — plenty of runway on 1S Li-ion
+  static const int CRIT_MV = 3300;      // VBAT hard floor; below this the rails sag
+  static const int DEBOUNCE = 3;        // consecutive 1 Hz reads before acting
+  static int critCount = 0;
+  static bool latched = false;
+
+  int pct, mV, chg;
+  bool present;
+  if (!display::batteryStats(pct, mV, chg, present)) return;
+  bool usb = display::usbPresent();
+
+  bool crit = present && !usb &&
+              (pct <= CRIT_PCT || (mV > 2500 && mV <= CRIT_MV));  // mV range guards a garbled read
+  if (!crit) { critCount = 0; latched = false; return; }
+  if (++critCount < DEBOUNCE || latched) return;
+  latched = true;   // act once per sustained low-battery episode
+
+  bool wasHot = loadHot();
+  Serial.printf("[pmic] controller battery CRITICAL (%d%%, %d mV) - forcing LOAD OFF (wasHot=%d)\n",
+                pct, mV, (int)wasHot);
+  if (g_test.running()) g_test.stop();
+  if (g_batt.running()) g_batt.stop("Controller battery critical");
+  g_ble.setSetpoint(0);
+  g_ble.setLoad(false);   // the guard's in-flight NVS flag (set while armed) covers a hard brownout
+  audio::fault();
+  ui::onPowerCritical(pct, wasHot);
+}
+
+// ---- Load-safe power-off (long-press PWR) ----------------------------------
+// A power-off must never strand the load: force LOAD OFF and let the write flush
+// over BLE BEFORE cutting our own power via the AXP2101. The PMIC's own OFFLEVEL
+// hardware power-off would skip this, so we intercept the long-press IRQ (which
+// fires earlier) and do a deterministic clean shutdown instead.
+static void powerOffSafely() {
+  if (g_test.running()) g_test.stop();
+  if (g_batt.running()) g_batt.stop("Powering off");
+  g_ble.setSetpoint(0);
+  g_ble.setLoad(false);
+  Serial.println("[btn] POWER OFF (load stopped)");
+  ui::onPoweringOff();
+  audio::press();
+  delay(250);   // let the LOAD_OFF notification transmit before power is cut
+  // If a live link confirmed the off, this is a clean shutdown — clear the
+  // recovery flag. If we could NOT reach the load (disconnected while armed),
+  // leave the in-flight flag set so the next boot offers reconnect-and-kill.
+  if (g_ble.state() == El15Client::CONNECTED) prefs::clearInFlight();
+  prefs::flush();
+  display::powerOff();   // AXP2101: cut all rails
+  delay(600);            // powerOff() should not return; fall back to a reset
+  ESP.restart();
+}
+
 static void stopAll() {
   // Capture whether a test was mid-run BEFORE stopping it: stopping the test
   // clears the flag, so checking it afterwards would always be false and the
@@ -301,8 +375,12 @@ static void handleButtons() {
       if (!wasAsleep) display::setSleep(true);
       break;
     case display::BTN_PWR_LONG:
-      // A held PWR key reads as "wake" only (noteActivity() handled it); leave
-      // hardware power-off to the PMIC's own long-press handling.
+      // Asleep: a blind long-press just wakes (don't power off something the
+      // user can't see). Awake: a deliberate long hold powers the controller
+      // off — but LOAD-SAFE (force LOAD OFF first), unlike the PMIC's own
+      // OFFLEVEL cutoff which would strand an energised load.
+      if (wasAsleep) break;   // noteActivity() already woke it
+      powerOffSafely();
       break;
     default: break;
   }
@@ -318,6 +396,7 @@ void loop() {
   g_test.tick();
   g_batt.tick();
   g_guard.tick();    // reconnect-and-force-off, if the link dropped hot
+  monitorPower();    // 1 Hz: force LOAD OFF before the CONTROLLER's own battery dies
   net::tick();       // Wi-Fi NTP sync state machine (idle unless syncing)
   prefs::tick();     // debounced NVS commit
   delay(2);

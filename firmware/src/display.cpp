@@ -232,10 +232,17 @@ static int i2cReadReg(uint8_t addr, uint8_t reg) {
   return Wire.read();
 }
 
+static bool i2cWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
 bool batteryStats(int &percent, int &milliVolt, int &chargeState, bool &present) {
   int st0 = i2cReadReg(PMIC_I2C_ADDR, 0x00);
   if (st0 < 0) return false;
-  present = (st0 & 0x08) != 0;               // battery-present flag
+  present = (st0 & 0x08) != 0;               // STATUS1 bit3: battery-present flag
   int p = i2cReadReg(PMIC_I2C_ADDR, 0xA4);   // fuel-gauge percent
   int h = i2cReadReg(PMIC_I2C_ADDR, 0x34);   // VBAT ADC high (6 bits)
   int l = i2cReadReg(PMIC_I2C_ADDR, 0x35);   // VBAT ADC low
@@ -244,6 +251,25 @@ bool batteryStats(int &percent, int &milliVolt, int &chargeState, bool &present)
   milliVolt = (h < 0 || l < 0) ? 0 : (((h & 0x3F) << 8) | l);
   chargeState = s1 < 0 ? -1 : (s1 & 0x07);
   return true;
+}
+
+// USB / VBUS present = the controller is on wall power (AXP2101 STATUS1 bit5,
+// "VBUS good"). On USB there is no brownout risk, so the power monitor uses this
+// to suppress the low-battery-force-off path.
+bool usbPresent() {
+  int st0 = i2cReadReg(PMIC_I2C_ADDR, 0x00);
+  return st0 >= 0 && (st0 & (1 << 5)) != 0;
+}
+
+// Clean hardware power-off via the AXP2101 (COMMON_CONFIG 0x10 bit0 = shutdown:
+// cuts every rail). Read-modify-write so the other config bits are preserved.
+// The caller MUST have already forced the EL15 load off — this kills our own
+// power, and anything still sinking current would be stranded. Returns only if
+// the PMIC did not power us down (then the caller falls back to a reset).
+void powerOff() {
+  int cc = i2cReadReg(PMIC_I2C_ADDR, 0x10);
+  if (cc < 0) return;
+  i2cWriteReg(PMIC_I2C_ADDR, 0x10, (uint8_t)(cc | 0x01));
 }
 
 // ---- Display sleep ---------------------------------------------------------
