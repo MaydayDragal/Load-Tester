@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
  * Dynamic circuit-resistance test.
@@ -21,6 +22,13 @@ import kotlin.math.min
  * The engine is a small timer-driven state machine. It is fed live device
  * readings through [onStatus]; the host forwards each status notification while
  * a test is running.
+ *
+ * Accuracy: the ladder is swept bidirectionally — up then back down — and the
+ * two visits to each current level are averaged, so first-order time drift
+ * (wire self-heating, a sagging battery) cancels instead of biasing the slope.
+ * The result carries a 1-sigma uncertainty on the resistance (the standard
+ * error of the fitted slope), and reliability is gated on that tolerance
+ * rather than R² — meaningful at any resistance scale.
  */
 class CircuitResistanceTester(
     private val ble: El15Controller,
@@ -49,7 +57,14 @@ class CircuitResistanceTester(
         val fuseRating: Float,
         val maxTestCurrent: Float,
         val reliable: Boolean,
+        /** 1-sigma standard error of the resistance (ohms); the ± tolerance. */
+        val resistanceStdErr: Float = 0f,
     )
+
+    /** Sums the (1 or 2) visits to one current level so they average to a point. */
+    private class LevelAcc {
+        var sumI = 0.0; var sumV = 0.0; var sumT = 0.0; var count = 0; var fanMax = 0
+    }
 
     // ---- Tunable parameters ----------------------------------------------
     /** Number of current steps in the sweep. */
@@ -74,9 +89,11 @@ class CircuitResistanceTester(
     private val main = Handler(Looper.getMainLooper())
     private var state = State.IDLE
 
-    private val targets = ArrayList<Float>()
-    private val results = ArrayList<Sample>()
-    private val stepBuffer = ArrayList<Sample>()
+    private val levels = ArrayList<Float>()       // distinct current setpoints, ascending
+    private val seq = ArrayList<Int>()            // physical visit order (indices into levels)
+    private val levelAcc = ArrayList<LevelAcc>()  // per-level sums, one entry per level
+    private val results = ArrayList<Sample>()     // one averaged sample per level (built at complete)
+    private val stepBuffer = ArrayList<Sample>()  // raw samples within the current collect window
     private var stepIndex = 0
     private var fuseRating = 0f
     private var maxCurrent = 0f
@@ -94,7 +111,7 @@ class CircuitResistanceTester(
         fuseRating = fuseRatingAmps
         results.clear()
         stepBuffer.clear()
-        targets.clear()
+        levels.clear(); seq.clear(); levelAcc.clear()
         stepIndex = 0
         vOcMeasured = 0f
         vRecent = 0f
@@ -141,7 +158,14 @@ class CircuitResistanceTester(
         }
 
         val n = steps.coerceIn(2, MAX_STEPS)
-        for (k in 1..n) targets.add(maxCurrent * k / n)
+        for (k in 1..n) levels.add(maxCurrent * k / n)
+        // Bidirectional triangle over the levels: up 0..n-1 then back down
+        // n-2..0. Every level except the apex is visited twice, symmetrically
+        // about the midpoint, so first-order (linear-in-time) drift cancels
+        // when the two visits average. The apex sits at the midpoint (one visit).
+        for (k in 0 until n) seq.add(k)
+        for (k in n - 2 downTo 0) seq.add(k)
+        for (k in 0 until n) levelAcc.add(LevelAcc())
         beginStep(0)
     }
 
@@ -183,12 +207,12 @@ class CircuitResistanceTester(
     // ---- State machine ----------------------------------------------------
     private fun beginStep(idx: Int) {
         if (!running) return
-        if (idx >= targets.size) {
+        if (idx >= seq.size) {
             complete()
             return
         }
         stepIndex = idx
-        currentTarget = clampToRatings(targets[idx])
+        currentTarget = clampToRatings(levels[seq[idx]])
         ble.setSetpoint(currentTarget)
         if (idx == 0) ble.setLoad(true) // energise the load once, on the first step
 
@@ -203,19 +227,27 @@ class CircuitResistanceTester(
     private fun endStep() {
         if (!running) return
         state = State.SETTLING
-        val target = currentTarget
         if (stepBuffer.isNotEmpty()) {
-            val i = stepBuffer.map { it.current.toDouble() }.average().toFloat()
-            val v = stepBuffer.map { it.voltage.toDouble() }.average().toFloat()
-            val t = stepBuffer.map { it.temperature.toDouble() }.average().toFloat()
+            val i = stepBuffer.map { it.current.toDouble() }.average()
+            val v = stepBuffer.map { it.voltage.toDouble() }.average()
+            val t = stepBuffer.map { it.temperature.toDouble() }.average()
             val fan = stepBuffer.maxOf { it.fanSpeed }
-            results.add(Sample(i, v, t, fan))
-            callback.onTestProgress(stepIndex + 1, targets.size, target, v, i)
+            // Bin this visit into its current level; the two visits per level
+            // average together in complete(), cancelling drift.
+            val a = levelAcc[seq[stepIndex]]
+            a.sumI += i; a.sumV += v; a.sumT += t; a.count++; a.fanMax = maxOf(a.fanMax, fan)
+            callback.onTestProgress(stepIndex + 1, seq.size, currentTarget, v.toFloat(), i.toFloat())
         }
         beginStep(stepIndex + 1)
     }
 
     private fun complete() {
+        // One drift-cancelled point per visited level, in ascending current order.
+        results.clear()
+        for (a in levelAcc) if (a.count > 0) results.add(
+            Sample((a.sumI / a.count).toFloat(), (a.sumV / a.count).toFloat(),
+                (a.sumT / a.count).toFloat(), a.fanMax)
+        )
         // A sweep that produced fewer than two usable points is a failure, not
         // a result — the V–I slope needs at least two samples.
         if (results.size < 2) {
@@ -246,37 +278,27 @@ class CircuitResistanceTester(
     private fun computeResult(): ResistanceResult {
         val n = results.size
         if (n < 2) {
-            return ResistanceResult(results.toList(), 0f, 0f, 0f, fuseRating, maxCurrent, false)
+            return ResistanceResult(results.toList(), 0f, 0f, 0f, fuseRating, maxCurrent, false, 0f)
         }
-        var sumI = 0.0; var sumV = 0.0
-        for (s in results) { sumI += s.current; sumV += s.voltage }
-        val meanI = sumI / n; val meanV = sumV / n
-
-        var sII = 0.0; var sIV = 0.0; var sVV = 0.0
-        for (s in results) {
-            val di = s.current - meanI
-            val dv = s.voltage - meanV
-            sII += di * di; sIV += di * dv; sVV += dv * dv
-        }
-
-        // Slope of V vs I. V = a + b·I, resistance R = -b.
-        val slope = if (sII > 1e-9) sIV / sII else 0.0
-        val intercept = meanV - slope * meanI
-        val resistance = max(-slope, 0.0).toFloat()
-        val rSquared = if (sII > 1e-9 && sVV > 1e-9) ((sIV * sIV) / (sII * sVV)).toFloat() else 0f
-
-        // Consider the fit reliable only with a clear downward trend and spread.
-        val currentSpread = (results.maxOf { it.current } - results.minOf { it.current })
-        val reliable = n >= 3 && slope < 0 && rSquared >= 0.90f && currentSpread > 0.05f
+        val f = fit(results)
+        // Reliable when the uncertainty is small in ABSOLUTE (≤5 mΩ) OR RELATIVE
+        // (≤5 %) terms — meaningful at any resistance scale, unlike R² which
+        // false-alarms on clean low-milliohm reads and rubber-stamps noisy big
+        // ones. R² is kept as a secondary linearity readout.
+        val currentSpread = results.maxOf { it.current } - results.minOf { it.current }
+        val relTol = if (f.resistanceOhm > 1e-4f) f.resistanceStdErr / f.resistanceOhm else 1e9f
+        val reliable = n >= 3 && f.slopeNegative && currentSpread > 0.05f &&
+            (f.resistanceStdErr <= 0.005f || relTol <= 0.05f)
 
         return ResistanceResult(
             samples = results.toList(),
-            resistanceOhm = resistance,
-            openCircuitVoltage = intercept.toFloat(),
-            rSquared = rSquared,
+            resistanceOhm = f.resistanceOhm,
+            openCircuitVoltage = f.openCircuitVoltage,
+            rSquared = f.rSquared,
             fuseRating = fuseRating,
             maxTestCurrent = maxCurrent,
             reliable = reliable,
+            resistanceStdErr = f.resistanceStdErr,
         )
     }
 
@@ -292,11 +314,47 @@ class CircuitResistanceTester(
         pending.clear()
     }
 
+    /** Pure least-squares fit of V = Voc − R·I; no reliability gating. */
+    data class Fit(
+        val resistanceOhm: Float,
+        val openCircuitVoltage: Float,
+        val rSquared: Float,
+        val resistanceStdErr: Float,
+        val slopeNegative: Boolean,
+    )
+
     companion object {
         private const val PRIME_MS = 900L
         private const val MIN_TEST_CURRENT = 0.05f
         const val MAX_STEPS = 1000
         /** Absolute backstop; the EL15's 12 A rating is the real ceiling. */
         const val ABS_MAX_CURRENT = 40f
+
+        /**
+         * Ordinary least-squares fit of V = Voc − R·I over the averaged points,
+         * with the slope's 1-sigma standard error (the ± tolerance on R):
+         * SSE = Σdv² − slope·Σdi·dv; Var(slope) = (SSE/(n−2)) / Σdi².
+         * Pure and side-effect-free so the fit math is unit-testable without the
+         * Android timer machinery.
+         */
+        fun fit(samples: List<Sample>): Fit {
+            val n = samples.size
+            if (n < 2) return Fit(0f, 0f, 0f, 0f, false)
+            var sumI = 0.0; var sumV = 0.0
+            for (s in samples) { sumI += s.current; sumV += s.voltage }
+            val meanI = sumI / n; val meanV = sumV / n
+            var sII = 0.0; var sIV = 0.0; var sVV = 0.0
+            for (s in samples) {
+                val di = s.current - meanI; val dv = s.voltage - meanV
+                sII += di * di; sIV += di * dv; sVV += dv * dv
+            }
+            val slope = if (sII > 1e-9) sIV / sII else 0.0
+            val intercept = meanV - slope * meanI
+            val rSquared = if (sII > 1e-9 && sVV > 1e-9) ((sIV * sIV) / (sII * sVV)).toFloat() else 0f
+            val sse = (sVV - slope * sIV).coerceAtLeast(0.0)
+            val stdErr = if (n > 2 && sII > 1e-9) sqrt(sse / ((n - 2) * sII)) else 0.0
+            return Fit(max(-slope, 0.0).toFloat(), intercept.toFloat(), rSquared,
+                stdErr.toFloat(), slope < 0)
+        }
     }
 }

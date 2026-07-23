@@ -28,6 +28,7 @@ class TestRecordTest {
             CircuitResistanceTester.Sample(8f, 9.80f, 31.7f, 3),
         ),
         notes = "Bench test\nline two",
+        resistanceStdErr = 0.0041f,
     )
 
     @Test fun jsonRoundTripPreservesEverything() {
@@ -45,6 +46,7 @@ class TestRecordTest {
         assertEquals(original.resistanceOhm, restored.resistanceOhm, 1e-5f)
         assertEquals(original.openCircuitVoltage, restored.openCircuitVoltage, 1e-4f)
         assertEquals(original.rSquared, restored.rSquared, 1e-5f)
+        assertEquals(original.resistanceStdErr, restored.resistanceStdErr, 1e-6f)
         assertEquals(original.reliable, restored.reliable)
         assertEquals(original.notes, restored.notes)
         assertEquals(original.samples.size, restored.samples.size)

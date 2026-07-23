@@ -24,6 +24,8 @@ data class TestRecord(
     val samples: List<CircuitResistanceTester.Sample>,
     var notes: String = "",
     var tag: String = "",
+    /** 1-sigma standard error of the resistance (ohms); 0 for older records. */
+    val resistanceStdErr: Float = 0f,
 ) {
     val peakPower: Float get() = samples.maxOfOrNull { it.power } ?: 0f
     val maxTemp: Float get() = samples.maxOfOrNull { it.temperature } ?: 0f
@@ -43,6 +45,7 @@ data class TestRecord(
         put("resistanceOhm", resistanceOhm.toDouble())
         put("openCircuitVoltage", openCircuitVoltage.toDouble())
         put("rSquared", rSquared.toDouble())
+        put("resistanceStdErr", resistanceStdErr.toDouble())
         put("reliable", reliable)
         put("notes", notes)
         put("tag", tag)
@@ -86,6 +89,7 @@ data class TestRecord(
                 samples = samples,
                 notes = o.optString("notes", ""),
                 tag = o.optString("tag", ""),
+                resistanceStdErr = o.optDouble("resistanceStdErr", 0.0).toFloat(),
             )
         }
 
@@ -108,6 +112,7 @@ data class TestRecord(
             rSquared = result.rSquared,
             reliable = result.reliable,
             samples = result.samples,
+            resistanceStdErr = result.resistanceStdErr,
         )
     }
 }

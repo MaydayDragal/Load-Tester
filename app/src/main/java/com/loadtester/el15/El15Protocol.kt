@@ -72,6 +72,14 @@ object El15Protocol {
         MODE_DCR to SetpointInfo("A", 3, "Current"),
         MODE_CR to SetpointInfo("Ω", 1, "Resistance"),
         MODE_CP to SetpointInfo("W", 2, "Power"),
+        // ADV-family modes have no user-facing setpoint; blank the fields to
+        // match the DM40GUI reference (they're reachable only from the device's
+        // own front panel). Otherwise the readout would show "Setpoint (?)".
+        MODE_ADV to SetpointInfo("", 3, ""),
+        MODE_DT to SetpointInfo("", 3, ""),
+        MODE_ADV_SCAN to SetpointInfo("", 3, ""),
+        MODE_POWER to SetpointInfo("", 3, ""),
+        MODE_POWER_RPT to SetpointInfo("", 3, ""),
     )
 
     /** Modes the user can pick from the UI (those with a meaningful setpoint). */

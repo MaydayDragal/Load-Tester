@@ -108,8 +108,9 @@ class ResultActivity : BaseActivity() {
     private fun bind() {
         val r = record ?: return
         binding.resistanceValue.text = formatResistance(r.resistanceOhm)
-        binding.summaryText.text = listOf(
+        binding.summaryText.text = listOfNotNull(
             "Open-circuit voltage: %.3f V".format(r.openCircuitVoltage),
+            formatTolerance(r)?.let { "Uncertainty: $it" },
             "Tested up to %.2f A  (%d%% of %.1f A fuse)".format(r.maxTestCurrent, r.safetyPct, r.fuseRating),
             "Peak power dissipated: %.1f W".format(r.peakPower),
             "Max unit temperature: %.1f °C".format(r.maxTemp),
@@ -220,6 +221,15 @@ class ResultActivity : BaseActivity() {
         return sb.toString().trimEnd()
     }
 
+    /** "± 4.0 mΩ (±1.1%)" tolerance string, or null when no uncertainty is known. */
+    private fun formatTolerance(r: TestRecord): String? {
+        val se = r.resistanceStdErr
+        if (se <= 0f) return null
+        val abs = if (se < 1f) "±%.1f mΩ".format(se * 1000f) else "±%.4f Ω".format(se)
+        val rel = if (r.resistanceOhm > 1e-4f) "  (±%.1f%%)".format(se / r.resistanceOhm * 100f) else ""
+        return "$abs$rel"
+    }
+
     private fun formatResistance(ohm: Float): String = when {
         ohm <= 0f -> "n/a"
         ohm < 1f -> "%.1f mΩ".format(ohm * 1000f)
@@ -232,6 +242,7 @@ class ResultActivity : BaseActivity() {
         sb.append("# EL15 circuit resistance test\n")
         sb.append("# ").append(buildMetadata().replace("\n", "\n# ")).append("\n")
         sb.append("# resistance_ohm,%.6f\n".format(Locale.US, r.resistanceOhm))
+        sb.append("# resistance_stderr_ohm,%.6f\n".format(Locale.US, r.resistanceStdErr))
         sb.append("# open_circuit_v,%.4f\n".format(Locale.US, r.openCircuitVoltage))
         sb.append("# r_squared,%.6f\n".format(Locale.US, r.rSquared))
         if (notesText().isNotEmpty()) sb.append("# notes,").append(notesText().replace("\n", " ")).append("\n")
@@ -343,8 +354,9 @@ class ResultActivity : BaseActivity() {
 
         // 1) Summary & resistance — mirrors the app's headline card.
         if (sel(KEY_RESISTANCE)) {
-            val summary = listOf(
+            val summary = listOfNotNull(
                 "Open-circuit voltage: %.3f V".format(r.openCircuitVoltage),
+                formatTolerance(r)?.let { "Uncertainty: $it" },
                 "Tested up to %.2f A  (%d%% of %.1f A fuse)".format(r.maxTestCurrent, r.safetyPct, r.fuseRating),
                 "Peak power dissipated: %.1f W".format(r.peakPower),
                 "Max unit temperature: %.1f °C".format(r.maxTemp),
