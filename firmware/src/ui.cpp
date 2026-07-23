@@ -1793,23 +1793,23 @@ static void settingsTick() {
 }
 
 // ---- Battery capacity test ---------------------------------------------------
-// Persistent per-run state for a STABLE discharge frame (see battChartRefresh).
-static float btVMax = 0;      // highest voltage seen this run — the frame's top
-static float btSmooth = 0;    // EMA-filtered voltage
+// Persistent per-run state for the discharge frame (see battChartRefresh).
+static float btSmooth = 0;                 // EMA-filtered voltage
 static bool  btFiltInit = false;
+static float btRangeLo = 0, btRangeHi = 0; // currently-applied Y frame
+static bool  btRangeInit = false;
 
 static void battHistReset() {
   btHistN = 0; btHistStride = 1; btHistAcc = 0; btLastElapsed = 0;
-  btVMax = 0; btFiltInit = false;
+  btFiltInit = false; btRangeInit = false;
 }
 
 static void battHistPush(float v) {
   // Light EMA first: the raw load-ADC voltage carries a few mV of noise that
   // otherwise shows as squiggle. The discharge is slow, so the lag is trivial.
-  if (!btFiltInit) { btSmooth = v; btVMax = v; btFiltInit = true; }
+  if (!btFiltInit) { btSmooth = v; btFiltInit = true; }
   else btSmooth += (v - btSmooth) * 0.4f;
   v = btSmooth;
-  if (v > btVMax) btVMax = v;   // only ever grows — survives the reservoir halving
   if (++btHistAcc < btHistStride) return;
   btHistAcc = 0;
   if (btHistN == BATT_RES_N) {           // full: halve resolution, double stride
@@ -1822,21 +1822,22 @@ static void battHistPush(float v) {
 
 static void battChartRefresh() {
   if (!btChart || btHistN == 0) return;
-  // FIXED discharge frame so the curve keeps its shape instead of rescaling on
-  // every poll (which made it "squiggle around"): top = highest voltage seen
-  // (~the rested start; only ever grows), bottom = the configured cutoff (the
-  // run's floor). Both are steady for the whole run, so each new sample just
-  // extends the line — the vertical frame never jumps.
-  float top = btVMax;
-  float bottom = battCutoff;
-  if (bottom >= top - 0.05f) bottom = top - 0.30f;   // guard: cutoff at/above start
-  if (top - bottom < 0.30f) {                         // keep a readable minimum span
-    float mid = (top + bottom) * 0.5f;
-    top = mid + 0.15f; bottom = mid - 0.15f;
-  }
-  float m = (top - bottom) * 0.06f;
+  // Dynamic auto-zoom to the actual voltage band, but SNAPPED to a 0.1 V grid
+  // and only ever EXPANDED — so the frame moves in occasional discrete steps as
+  // the discharge crosses a grid line, not on every poll. The curve fills the
+  // chart (shows detail) yet keeps its shape between steps instead of rescaling
+  // constantly. Never shrinking is what stops it hunting/squiggling.
+  float dlo = btHistV[0], dhi = btHistV[0];
+  for (int k = 1; k < btHistN; k++) { dlo = LV_MIN(dlo, btHistV[k]); dhi = LV_MAX(dhi, btHistV[k]); }
+  const float STEP = 0.1f, PAD = 0.04f, MIN_SPAN = 0.20f;
+  float wantLo = floorf((dlo - PAD) / STEP) * STEP;
+  float wantHi = ceilf((dhi + PAD) / STEP) * STEP;
+  if (wantHi - wantLo < MIN_SPAN) wantHi = wantLo + MIN_SPAN;
+  if (!btRangeInit) { btRangeLo = wantLo; btRangeHi = wantHi; btRangeInit = true; }
+  else { if (wantLo < btRangeLo) btRangeLo = wantLo; if (wantHi > btRangeHi) btRangeHi = wantHi; }
+  float top = btRangeHi, bottom = btRangeLo;
   lv_chart_set_range(btChart, LV_CHART_AXIS_PRIMARY_Y,
-                     (lv_coord_t)((bottom - m) * 100), (lv_coord_t)((top + m) * 100));
+                     (lv_coord_t)(bottom * 100), (lv_coord_t)(top * 100));
   // Resample the reservoir across the full chart width: chart point j maps to
   // time fraction j/(BATT_CHART_N-1) of the whole run, so the curve always
   // spans [0, elapsed] and the time axis grows smoothly every refresh.
