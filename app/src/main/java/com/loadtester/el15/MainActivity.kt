@@ -831,8 +831,9 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
                                 permissionLauncher.launch(requiredPermissions())
                             }
                             else -> {
-                                core.ble.stopScan()
-                                if (!core.ble.connect(addr)) toast("Could not reconnect to $name — is Bluetooth on?")
+                                // Scan-based reconnect (reconnect() stops the picker
+                                // scan itself), so a random-address device reconnects.
+                                if (!core.ble.reconnect(addr)) toast("Could not reconnect to $name — is Bluetooth on?")
                             }
                         }
                     }

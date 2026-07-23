@@ -59,6 +59,8 @@ class El15BleManager(private val context: Context) : El15Controller {
     private var opGen = 0L
 
     private val seenDevices = HashSet<String>()
+    /** When set, the active scan is a targeted reconnect looking for this MAC. */
+    private var reconnectAddress: String? = null
     private var pollRunnable: Runnable? = null
     private var scanTimeout: Runnable? = null
     private var shuttingDown = false
@@ -79,6 +81,20 @@ class El15BleManager(private val context: Context) : El15Controller {
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
+            // Targeted reconnect: connect to the *actual advertised device* the
+            // moment it appears. Its address type (public vs random) is baked in,
+            // so unlike a getRemoteDevice() reconnect this reaches random-address
+            // peers — phones, the simulator, and some EL15 units.
+            reconnectAddress?.let { target ->
+                if (device.address.equals(target, ignoreCase = true)) {
+                    reconnectAddress = null
+                    scanTimeout?.let { main.removeCallbacks(it) }
+                    scanTimeout = null
+                    main.post { connect(device) }
+                    return
+                }
+                return  // during a reconnect scan, don't populate the device picker
+            }
             // Unfiltered scan: EL15 units often don't put FFF0 in their adverts,
             // so we list every *named* device and verify the service after
             // connecting (onServicesDiscovered rejects non-EL15 devices).
@@ -101,6 +117,7 @@ class El15BleManager(private val context: Context) : El15Controller {
         }
         stopScanInternal() // restarting an active scan would fail with SCAN_FAILED_ALREADY_STARTED
         seenDevices.clear()
+        reconnectAddress = null // a manual scan supersedes any pending reconnect
         setState(State.SCANNING, "Scanning…")
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -117,12 +134,17 @@ class El15BleManager(private val context: Context) : El15Controller {
     }
 
     fun stopScan() {
-        if (state == State.SCANNING) stopScanInternal()
+        // Don't cancel a targeted reconnect scan: the device picker's
+        // onDismiss calls this the instant the reconnect row is tapped, which
+        // would otherwise kill the reconnect before it finds the device. The
+        // reconnect has its own timeout.
+        if (state == State.SCANNING && reconnectAddress == null) stopScanInternal()
     }
 
     private fun stopScanInternal() {
         scanTimeout?.let { main.removeCallbacks(it) }
         scanTimeout = null
+        reconnectAddress = null
         try {
             adapter?.bluetoothLeScanner?.stopScan(scanCallback)
         } catch (e: SecurityException) {
@@ -150,23 +172,48 @@ class El15BleManager(private val context: Context) : El15Controller {
     }
 
     /**
-     * Quick-reconnect to a previously bonded/seen device by MAC address, with
-     * no scan. Returns false if Bluetooth is off or the address is malformed.
+     * Reconnect to a previously-used device by MAC address.
+     *
+     * A plain getRemoteDevice()+connect always assumes a **public** BLE address,
+     * so it silently fails against a peer that advertises a **random** address
+     * (phones, the simulator, and some EL15 units — verified on the ESP firmware,
+     * whose forced-public reconnect had the same bug). Instead we briefly scan
+     * for the address and connect to the actual advertised device, whose address
+     * type is correct. Requires scan permission (the reconnect UI already gates
+     * on it). Returns false if Bluetooth is off or unavailable.
      */
-    fun connect(address: String): Boolean {
-        val a = adapter ?: return false
-        if (!a.isEnabled) return false
-        val device = try {
-            a.getRemoteDevice(address)
-        } catch (e: IllegalArgumentException) {
+    fun reconnect(address: String): Boolean {
+        val scanner = adapter?.bluetoothLeScanner ?: return false
+        if (adapter?.isEnabled != true) return false
+        stopScanInternal()
+        seenDevices.clear()
+        reconnectAddress = address.uppercase()
+        setState(State.SCANNING, "Reconnecting…")
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+        try {
+            scanner.startScan(null, settings, scanCallback)
+        } catch (e: SecurityException) {
+            reconnectAddress = null
+            setState(State.IDLE, "Bluetooth permission missing")
             return false
         }
-        connect(device)
+        val timeout = Runnable {
+            if (reconnectAddress != null) {
+                reconnectAddress = null
+                stopScanInternal()
+                setState(State.IDLE, "Reconnect timed out — is the device on?")
+            }
+        }
+        scanTimeout = timeout
+        main.postDelayed(timeout, SCAN_TIMEOUT_MS)
         return true
     }
 
     fun disconnect() {
         stopPolling()
+        stopScanInternal() // cancel a pending reconnect scan, if any
         shuttingDown = false
         shutdownOffSent = false
         gatt?.disconnect()
