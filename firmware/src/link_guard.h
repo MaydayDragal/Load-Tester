@@ -30,8 +30,12 @@
 class LinkGuard {
  public:
   // Progress/outcome for the UI. `resolved` distinguishes "the load is off,
-  // stand down" from "still trying" / "gave up".
+  // stand down" from "still trying".
   std::function<void(const char *title, const char *msg, bool resolved)> onAlert;
+  // Final give-up, after MAX_ATTEMPTS. Wired separately so the UI can show an
+  // ACTIONABLE banner (tap = retry()) instead of a permanently locked one —
+  // a locked banner with no exit suppressed all later protection alerts.
+  std::function<void(const char *msg)> onFailed;
   std::function<void()> onAlarm;   // audible warning, repeated per attempt
 
   explicit LinkGuard(El15Client *ble) : ble_(ble) {}
@@ -132,8 +136,9 @@ class LinkGuard {
     if (attempts_ >= MAX_ATTEMPTS) {
       state_ = FAILED;
       Serial.println("[guard] recovery FAILED - could not reach the load");
-      if (onAlert) onAlert("CANNOT REACH THE LOAD",
-                           "The load did not answer. DISCONNECT IT BY HAND - it may still be drawing current.", false);
+      const char *m = "The load did not answer. DISCONNECT IT BY HAND - it may still be drawing current. Tap to retry.";
+      if (onFailed) onFailed(m);
+      else if (onAlert) onAlert("CANNOT REACH THE LOAD", m, false);
       if (onAlarm) onAlarm();
       return;
     }

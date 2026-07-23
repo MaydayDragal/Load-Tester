@@ -89,10 +89,15 @@ static void stopAll() {
   // clears the flag, so checking it afterwards would always be false and the
   // safe LOAD_OFF-then-flush teardown would never run (mirrors the Android
   // DeviceCore.disconnect() `wasBusy` capture).
-  bool wasBusy = g_test.running() || g_batt.running();
+  // "Hot" = anything may be sinking current: a running engine OR a manually
+  // energised load (the guard arms whenever the device reports loadOn). A
+  // plain disconnect while hot would leave the EL15 sinking with no controller
+  // attached and no supervisor — Disconnect must never be a way to walk away
+  // from flowing current.
+  bool wasHot = g_test.running() || g_batt.running() || g_guard.armed();
   if (g_test.running()) g_test.stop();
   if (g_batt.running()) g_batt.stop("Disconnected");
-  if (wasBusy) g_ble.shutdownAndDisconnect();  // push LOAD_OFF and let it flush
+  if (wasHot) g_ble.shutdownAndDisconnect();  // push LOAD_OFF and let it flush
   else g_ble.disconnect();
   // A disconnect the user asked for is not a link loss: disarm AFTER the
   // LOAD_OFF above, so the guard never chases a link we dropped on purpose.
@@ -123,9 +128,10 @@ void setup() {
 
   UiActions actions;
   // A manual scan or connect is the user taking control — the guard stands down
-  // so its recovery reconnects can't stop-scan on top of them.
-  actions.scan       = []() { g_guard.standDown(); ui::clearDevices(); g_ble.startScan(8); };
-  actions.connect    = [](const char *addr) { g_guard.standDown(); g_ble.connectTo(addr); };
+  // so its recovery reconnects can't stop-scan on top of them, and its stale
+  // banner (locked warning / retry offer) is dismissed with it.
+  actions.scan       = []() { g_guard.standDown(); ui::clearGuardBanner(); ui::clearDevices(); g_ble.startScan(8); };
+  actions.connect    = [](const char *addr) { g_guard.standDown(); ui::clearGuardBanner(); g_ble.connectTo(addr); };
   actions.disconnect = stopAll;
   actions.setMode    = [](int m) { g_ble.setMode(m); };
   actions.setSetpoint= [](float v) { g_ble.setSetpoint(v); };
@@ -190,6 +196,12 @@ void setup() {
 
   g_guard.onAlert = [](const char *title, const char *msg, bool resolved) {
     ui::onGuardAlert(title, msg, resolved);
+  };
+  // Final give-up: an ACTIONABLE banner (tap = retry) instead of a locked
+  // dead-end — a permanently locked banner also suppressed later protection
+  // alerts for the rest of the session.
+  g_guard.onFailed = [](const char *msg) {
+    ui::offerRecovery(msg, []() { g_guard.retry(); });
   };
   g_guard.onAlarm = []() { audio::fault(); };
 

@@ -74,6 +74,11 @@ void onGuardAlert(const char *title, const char *msg, bool resolved);
 // banner runs `action` (reconnect + force LOAD OFF).
 void offerRecovery(const char *msg, std::function<void()> action);
 
+// Dismiss any guard banner (locked warning or armed recovery offer). Call when
+// the user takes manual control (scan/connect) — the guard stands down and its
+// stale banner must not stay locked on screen suppressing later alerts.
+void clearGuardBanner();
+
 // Wi-Fi/NTP progress for the Settings clock card. `state` is net::State;
 // 3 = done, 4 = failed.
 void onNetProgress(int state, const char *text);

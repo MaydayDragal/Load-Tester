@@ -80,6 +80,11 @@ inline SetpointInfo setpointInfo(int mode) {
     case MODE_DCR: return {"A", 3, "Current"};
     case MODE_CR:  return {"\xCE\xA9", 1, "Resistance"};  // UTF-8 ohm
     case MODE_CP:  return {"W", 2, "Power"};
+    // ADV-family modes have no user setpoint; blank fields (matches the
+    // DM40GUI reference) — reachable only from the device's own front panel.
+    case MODE_ADV: case MODE_POWER: case MODE_DT:
+    case MODE_ADV_SCAN: case MODE_POWER_RPT:
+      return {"", 3, ""};
     default:       return {"?", 3, "Setpoint"};
   }
 }
@@ -142,6 +147,10 @@ inline Status parseStatus(const uint8_t *d, int len) {
   int sum = 0;
   for (int i = 0; i < len; i++) sum += d[i];
   s.crcPass = (sum & 0xFF) == 0;
+  // Deliberate deviation from the DM40GUI reference: it parses checksum-FAIL
+  // packets anyway (a human is watching the raw log); this controller runs
+  // tests unattended, so a corrupt V/I sample must never reach the engines —
+  // drop the frame and let the next poll refresh state.
   if (len < 28 || !isStatusPacket(d, len) || !s.crcPass) return s;
 
   s.voltage = f32(d, 7);

@@ -231,6 +231,21 @@ void El15Client::handleNotify(const uint8_t *data, size_t len) {
       continue;
     }
     el15::Status s = el15::parseStatus(frameBuf_, 28);
+    if (!s.valid) {
+      // A header-aligned frame that fails the checksum is dropped SILENTLY by
+      // the parser — against an untested real device, a checksum-convention
+      // mismatch would otherwise present as "connected, but Monitor blank"
+      // with a clean serial log. Rate-limited so a noisy link can't spam.
+      static uint32_t lastDropLogMs = 0;
+      uint32_t now = millis();
+      if (now - lastDropLogMs > 2000) {
+        lastDropLogMs = now;
+        Serial.printf("[ble] status frame DROPPED (checksum): %02X %02X %02X %02X %02X %02X %02X %02X ... sum&0xFF=%02X\n",
+                      frameBuf_[0], frameBuf_[1], frameBuf_[2], frameBuf_[3],
+                      frameBuf_[4], frameBuf_[5], frameBuf_[6], frameBuf_[7],
+                      [&] { int sum = 0; for (int i = 0; i < 28; i++) sum += frameBuf_[i]; return sum & 0xFF; }());
+      }
+    }
     if (onStatus) onStatus(s);
     memmove(frameBuf_, frameBuf_ + 28, frameLen_ - 28);
     frameLen_ -= 28;

@@ -529,8 +529,16 @@ static void buildInfoBar() {
 
 // ---- Fault banner ----------------------------------------------------------
 static void buildFaultBanner() {
-  faultBanner = cont(scrRoot);
+  // On lv_layer_top(), NOT scrRoot: the full-screen overlays (menu, keypad,
+  // picker, text entry, Wi-Fi) are opaque top-layer children, and the top layer
+  // always renders above the active screen — a banner parented to scrRoot is
+  // invisible while any overlay is open, which is exactly when a "LOAD MAY
+  // STILL BE ON" warning must not disappear. Overlays are built AFTER this, so
+  // every show path also calls lv_obj_move_foreground(faultBanner) to end up
+  // above them within the layer.
+  faultBanner = cont(lv_layer_top());
   lv_obj_set_size(faultBanner, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_align(faultBanner, LV_ALIGN_TOP_MID, 0, 0);
   lv_obj_set_style_bg_color(faultBanner, COL_RED, 0);
   lv_obj_set_style_bg_opa(faultBanner, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(faultBanner, 9, 0);
@@ -679,7 +687,11 @@ static void buildLoadBar() {
       if (A.startBatt) { A.startBatt(battCutoff, battAmps); enterBattRun(); }
       return;
     }
-    if (lastStatus.warning[0]) return;
+    // The warning gate blocks only turning the load ON: with a protection
+    // warning active while current still flows (thermal pre-trip, latched
+    // fault), the primary on-screen control must NEVER refuse to send
+    // LOAD OFF — that path stays open unconditionally.
+    if (!lastLoadOn && lastStatus.warning[0]) return;
     if (!connected) { showScreen(SCR_CONNECT); return; }
     if (A.setLoad) A.setLoad(!lastLoadOn);
   }, LV_EVENT_CLICKED, nullptr);
@@ -1618,8 +1630,11 @@ static void buildSettings() {
   lv_obj_center(setSyncLbl);
   lv_obj_add_event_cb(setSyncBtn, [](lv_event_t *) {
     if (!A.syncClock) return;
-    if (engineBusy()) {   // never touch the radio while the load is being driven
-      lv_label_set_text(setNetStatus, "Not while a test is running.");
+    // Never touch the radio while ANYTHING is sinking current — engines AND a
+    // manually-energised load (a successful sync deliberately reboots the
+    // controller, which would abandon a hot load with no supervisor).
+    if (engineBusy() || lastLoadOn) {
+      lv_label_set_text(setNetStatus, "Not while the load is on.");
       lv_obj_set_style_text_color(setNetStatus, COL_AMBER, 0);
       return;
     }
@@ -2177,11 +2192,14 @@ static void kpPress(const char *c) {
 static void kpSet() {
   float v = atof(kpBuf.c_str());
   // Target 1 pushes a live setpoint; suppress it while an engine owns the load.
-  // The other targets are test configuration and are safe to edit any time.
+  // Targets 4/5 are the battery cutoff/current: the RUNNING engine copied its
+  // values at start(), so applying an edit mid-discharge would update the UI
+  // (and NVS) while the test silently keeps the old threshold — the display
+  // would promise a cutoff the engine will not honor. Refuse, same as target 1.
   if (kpTarget == 1) { if (!engineBusy()) { setpoint = v; if (A.setSetpoint) A.setSetpoint(v); } refreshAdjust(); refreshMonitor(); }
   else if (kpTarget == 3) { estWireLen = v < 0 ? 0 : v > 100 ? 100 : v; refreshRtest(); }
-  else if (kpTarget == 4) { battCutoff = v < 0.1f ? 0.1f : v > 60 ? 60 : v; battCutoffCustom = true; refreshBatt(); refreshMonitor(); }
-  else if (kpTarget == 5) { battAmps = v < 0.01f ? 0.01f : v > 12 ? 12 : v; refreshBatt(); }
+  else if (kpTarget == 4) { if (!engineBusy()) { battCutoff = v < 0.1f ? 0.1f : v > 60 ? 60 : v; battCutoffCustom = true; } refreshBatt(); refreshMonitor(); }
+  else if (kpTarget == 5) { if (!engineBusy()) { battAmps = v < 0.01f ? 0.01f : v > 12 ? 12 : v; } refreshBatt(); }
   else { fuseRating = v; refreshRtest(); refreshMonitor(); }
   showOverlay(OV_NONE);
 }
@@ -2268,8 +2286,10 @@ static void onWifiRowPicked(lv_event_t *e) {
 }
 
 static void startWifiScan() {
-  if (engineBusy()) {   // radio shares the antenna with the BLE link to the load
-    lv_label_set_text(setNetStatus, "Not while a test is running.");
+  // Radio shares the antenna with the BLE link to the load; block while an
+  // engine OR a manually-energised load is sinking (same rule as the sync).
+  if (engineBusy() || lastLoadOn) {
+    lv_label_set_text(setNetStatus, "Not while the load is on.");
     lv_obj_set_style_text_color(setNetStatus, COL_AMBER, 0);
     return;
   }
@@ -2471,6 +2491,11 @@ static void buildKeypad() {
 
 // ---- Mode picker overlay ---------------------------------------------------
 static void onModePick(lv_event_t *e) {
+  // A mode change mid-test would re-regulate the load out from under the
+  // engine (both engines drive CC; CV with a stale target on a charged battery
+  // runs current to the 12 A limit). Same gate as the load bar: stop the test
+  // first. The picker itself stays reachable — this refuses only the commit.
+  if (engineBusy()) { showOverlay(OV_NONE); return; }
   int idx = (int)(intptr_t)lv_event_get_user_data(e);
   int m = MODE_IDS[idx];
   if (m == MODE_RT || m == MODE_BATT) { curMode = m; }  // UI-only; no device mode
@@ -2628,7 +2653,13 @@ void onStatus(const el15::Status &s) {
   if (!s.valid) return;
   lastStatus = s;
   lastLoadOn = s.loadOn;
-  if (!isRT() && !isBatt() && curMode != s.mode) {
+  // Mode sync — but NOT while a protection warning is active: the warn flag
+  // masks mode bits 1+2, so at the byte level CAP|fault reads as CC and
+  // DCR|fault reads as CV (real-device behavior; see DM40GUI's
+  // _apply_status_buttons, which holds the last good mode for the same reason).
+  // Syncing during a fault would flap the mode chip/units to the aliased mode
+  // and back once the fault clears.
+  if (!isRT() && !isBatt() && !s.warning[0] && curMode != s.mode) {
     curMode = s.mode;
     syncMonitorExtras();
   }
@@ -2723,6 +2754,7 @@ void onStatus(const el15::Status &s) {
     setTextIf(faultMsg, "Load protection tripped - check the setup");
     if (lv_obj_has_flag(faultBanner, LV_OBJ_FLAG_HIDDEN)) {
       lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(faultBanner);   // above any overlay on the top layer
       audio::fault();   // alarm only on the transition into a new fault
     }
   } else if (!s.warning[0] && !faultIsEmergency && !faultLocked && !guardAction &&
@@ -2795,13 +2827,38 @@ void onNetProgress(int state, const char *text) {
   if (failed) display::setLowMemMode(false);   // restore (best-effort) so a retry is usable
 }
 
+// The user has taken manual control (scan / connect): any stale guard banner —
+// a locked mid-recovery warning or a failed-recovery retry offer — is now
+// superseded by their own actions and must not linger (a permanently locked
+// banner also suppressed all later protection alerts via the faultLocked gate).
+void clearGuardBanner() {
+  guardAction = nullptr;
+  faultLocked = false;
+  faultIsEmergency = false;
+  lv_obj_add_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
+}
+
 void onEmergencyStop(bool wasTestRunning) {
+  // A stale recovery offer must not hijack the acknowledgement tap.
+  guardAction = nullptr;
+  // While the guard is mid-recovery or failed, the link is down — our LOAD_OFF
+  // write went into a dead link and stopped nothing. The guard's "LOAD MAY
+  // STILL BE ON" banner is the truth; do not overwrite it with a false ack.
+  if (faultLocked) {
+    if (rtPhase == RT_RUN) { rtPhase = RT_IDLE; refreshRtest(); }
+    if (btPhase == BT_RUN || btPhase == BT_REST) { btPhase = BT_IDLE; refreshBatt(); }
+    return;
+  }
   // Reuse the full-width fault banner as the acknowledgement; it stays up until
   // tapped (faultIsEmergency guards onStatus from auto-hiding it).
   faultIsEmergency = true;
+  lv_obj_set_style_bg_color(faultBanner, COL_RED, 0);  // guard paths recolor it
   lv_label_set_text(faultTitle, LV_SYMBOL_WARNING "  EMERGENCY STOP");
-  lv_label_set_text(faultMsg, wasTestRunning ? "Test aborted - load forced off. Tap to dismiss."
-                                             : "Load forced off. Tap to dismiss.");
+  // Honest wording: with no link, the stop command reached nothing.
+  lv_label_set_text(faultMsg,
+      !connected     ? "Not connected - the stop could NOT reach the load. Check the device. Tap to dismiss."
+      : wasTestRunning ? "Test aborted - load forced off. Tap to dismiss."
+                       : "Load forced off. Tap to dismiss.");
   lv_obj_clear_flag(faultBanner, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(faultBanner);
   // A test that was aborted leaves its engine idle; reflect that in the UI so
@@ -2830,6 +2887,10 @@ void onConnState(int state, const char *info) {
     lv_obj_add_flag(connDisc, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(scanBtn, LV_OBJ_FLAG_HIDDEN);
     histCount = 0;
+    // A stale warning from the dropped session would otherwise keep gating the
+    // load button after the next connect, until the first clean packet lands.
+    lastStatus.warning[0] = '\0';
+    lastLoadOn = false;
     // A drop mid-sweep stops the engine without a callback; unstick the UI.
     if (rtPhase == RT_RUN) { rtPhase = RT_IDLE; refreshRtest(); }
   }
@@ -2837,6 +2898,11 @@ void onConnState(int state, const char *info) {
   if (connected && (curScreen == SCR_MON || curScreen == SCR_ADJ || curScreen == SCR_GRAPH))
     lv_obj_clear_flag(infoBar, LV_OBJ_FLAG_HIDDEN);
   else lv_obj_add_flag(infoBar, LV_OBJ_FLAG_HIDDEN);
+  // A manual connect blocks the loop task inside NimBLE for up to ~20 s on an
+  // absent peer; nothing repaints until it returns. Push the "Connecting"
+  // chrome to the panel NOW, exactly like every other blocking path does
+  // (SD saves, Wi-Fi sync), so the user sees progress instead of a freeze.
+  if (state == 2 /* CONNECTING */) lv_refr_now(nullptr);
 }
 
 void onDeviceFound(const char *address, const char *name) {
