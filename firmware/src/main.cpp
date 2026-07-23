@@ -122,8 +122,10 @@ void setup() {
   Serial.printf("[boot] reset reason: %s (%d)\n", rrs, (int)rr);
 
   UiActions actions;
-  actions.scan       = []() { ui::clearDevices(); g_ble.startScan(8); };
-  actions.connect    = [](const char *addr) { g_ble.connectTo(addr); };
+  // A manual scan or connect is the user taking control — the guard stands down
+  // so its recovery reconnects can't stop-scan on top of them.
+  actions.scan       = []() { g_guard.standDown(); ui::clearDevices(); g_ble.startScan(8); };
+  actions.connect    = [](const char *addr) { g_guard.standDown(); g_ble.connectTo(addr); };
   actions.disconnect = stopAll;
   actions.setMode    = [](int m) { g_ble.setMode(m); };
   actions.setSetpoint= [](float v) { g_ble.setSetpoint(v); };

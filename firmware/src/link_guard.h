@@ -54,11 +54,29 @@ class LinkGuard {
   bool armed() const { return armed_ != prefs::Data::NONE; }
   bool recovering() const { return state_ != IDLE; }
 
-  // Called by main on every BLE state change.
+  // The user has taken manual control (started a scan, or a manual connect).
+  // Abandon any recovery and disarm: they will reconnect and manage the load
+  // themselves, and the guard must not fight that by stop-scanning underneath
+  // them. Safety is not lost — a genuine unattended drop still armed+recovers,
+  // and the crash/reboot flag still covers a power loss.
+  void standDown() {
+    if (state_ != IDLE || armed())
+      Serial.println("[guard] stand down (manual control)");
+    state_ = IDLE;
+    armed_ = prefs::Data::NONE;
+    wasConnected_ = false;
+    prefs::clearInFlight();
+  }
+
+  // Called by main on every BLE state change. Recovery fires ONLY on a real
+  // drop from a live link (CONNECTED -> not), never on the user's own
+  // scan/connect transitions from idle — otherwise starting a scan while armed
+  // would trigger a reconnect loop that stop-scans on top of the user.
   void onConnState(El15Client::State st) {
-    if (st == El15Client::CONNECTED) return;
-    // A disconnect while nothing is energised is just a disconnect.
-    if (!armed() || state_ != IDLE) return;
+    if (st == El15Client::CONNECTED) { wasConnected_ = true; return; }
+    bool dropped = wasConnected_;
+    wasConnected_ = false;
+    if (!dropped || !armed() || state_ != IDLE) return;
     start(armed_ == prefs::Data::CAPACITY ? "Link lost during a discharge"
                                           : "Link lost with the load ON");
   }
@@ -89,10 +107,17 @@ class LinkGuard {
              attempts_, MAX_ATTEMPTS);
     if (onAlert) onAlert("LOAD MAY STILL BE ON", msg, false);
 
+    // Short single-attempt connects: the guard has its own outer retry loop, so
+    // it wants NO inner establishment retries (else each attempt would block the
+    // loop for timeout x 5). Save and restore the manual-connect settings.
+    uint32_t savedTimeout = ble_->connectTimeoutMs();
+    uint8_t savedRetries = ble_->connectRetries();
     ble_->setConnectTimeoutMs(RECONNECT_TIMEOUT_MS);
+    ble_->setConnectRetries(0);
     bool up = ble_->state() == El15Client::CONNECTED ||
               ble_->connectTo(target(), targetType());
-    ble_->setConnectTimeoutMs(NORMAL_TIMEOUT_MS);
+    ble_->setConnectTimeoutMs(savedTimeout);
+    ble_->setConnectRetries(savedRetries);
 
     if (up) {
       forceOff();
@@ -129,7 +154,6 @@ class LinkGuard {
   static const uint32_t RETRY_INTERVAL_MS = 2500;
   // Short enough that the UI is only frozen for a few seconds per attempt.
   static const uint32_t RECONNECT_TIMEOUT_MS = 4000;
-  static const uint32_t NORMAL_TIMEOUT_MS = 30000;   // NimBLE's default
 
   // Prefer this session's peer; fall back to the stored one after a reboot.
   bool haveTarget() const { return target()[0] != '\0'; }
@@ -153,6 +177,7 @@ class LinkGuard {
   El15Client *ble_;
   State state_ = IDLE;
   uint8_t armed_ = prefs::Data::NONE;
+  bool wasConnected_ = false;   // latched by CONNECTED; a drop needs it set
   int attempts_ = 0;
   uint32_t nextTryMs_ = 0;
 };

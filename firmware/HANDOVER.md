@@ -263,16 +263,28 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
   for the sync and turns it off again (`netclock.cpp` always `radioOff()`s), and
   a sync is refused while a test runs — the BLE link is the only way to stop the
   load, so it must not be starved. Keep both rules if you add more Wi-Fi.
-- **Wi-Fi is RAM-starved, not coex-limited.** 320 KB, no PSRAM: the LVGL UI
-  (LV_MEM_CUSTOM → system heap), NimBLE, and the 82 KB 1/4-frame draw buffer
-  leave only **~1.5 KB free**, so `esp_wifi_init` (~50 KB) fails with NO_MEM.
-  Fix: `display::setLowMemMode(true)` shrinks the draw buffer to 16 lines for the
+- **RAM is the binding constraint — it gates BOTH BLE and Wi-Fi.** 320 KB, no
+  PSRAM, and the LVGL UI allocates from the system heap (`LV_MEM_CUSTOM`). This
+  session's UI growth (prefs, Wi-Fi/keyboard overlays, extra Settings cards) with
+  a 1/4-frame (112-line, 82 KB) draw buffer left only ~13 KB free — which starved
+  **NimBLE's connection establishment**, so every BLE connect failed with HCI
+  0x3e (looked like "connect failed"; scanning still worked). Fix: the draw
+  buffer is now **1/7 (64 lines, ~47 KB)** — see `BUF_LINES` in display.cpp —
+  freeing ~35 KB, bringing free heap to ~37 KB and letting connects succeed.
+  Keep a **≥~30 KB contiguous margin for BLE**; if you grow the UI or the buffer,
+  re-check that connects still work. (First-principles proof it was memory:
+  freeing heap right before a connect made it succeed instantly.)
+- **Wi-Fi needs even more (~50 KB contiguous) than the trimmed buffer leaves**,
+  so `display::setLowMemMode(true)` shrinks the draw buffer to 16 lines for the
   duration of a scan/sync, freeing ~70 KB; the UI keeps rendering (more, smaller
-  flush chunks). The full 82 KB block can NOT be reassembled afterwards (heap is
-  fragmented to ~18-40 KB max), so a successful **clock sync auto-reboots** to
-  get the fast buffer back (RTC + NVS persist, so nothing is lost). If you add
-  any other Wi-Fi feature, wrap it in the same low-mem window and expect the
-  post-op reboot. Do NOT try to raise the draw buffer back to full at runtime.
+  flush chunks). The full buffer can NOT be reassembled afterwards (fragmentation
+  ~18-40 KB max), so a successful **clock sync auto-reboots** to get it back
+  (RTC + NVS persist, nothing lost). Wrap any new Wi-Fi feature in the same
+  low-mem window. Do NOT try to raise the draw buffer back to full at runtime.
+- **Reclaiming buffer size = trim baseline heap.** If the UI is too slow at 1/7,
+  the way back to a taller buffer is to lazy-build + destroy the rarely-used
+  Wi-Fi/keyboard overlays (they sit resident today), then grow `BUF_LINES` while
+  keeping the BLE margin above.
 - **Loop stack is 12 KB** (`ARDUINO_LOOP_STACK_SIZE`), raised from 8 KB for
   FATFS's on-stack long-filename buffer. NVS, Wi-Fi and the SD writes all run on
   the loop task; don't drop it back.

@@ -31,14 +31,19 @@ static Arduino_GFX *g_gfx = g_amoled;
 namespace display {
 
 // ---- LVGL draw buffer ------------------------------------------------------
-// Partial buffer: 1/4 of the frame in ONE bank. AMOLED is 16bpp; a full
-// framebuffer (368*448*2 = ~322 KB) is too large for on-chip RAM. A single 1/4
-// buffer is the same RAM as the old 1/8 double buffer but HALVES the number of
-// flush chunks (4 vs 8) — each chunk pays a CASET/PASET/RAMWR overhead, which
-// was the reason effective QSPI throughput sat at ~half theoretical. Double
-// buffering bought nothing here because the flush is synchronous (no overlap of
-// render and transfer), so the second bank is better spent widening the first.
-static const uint32_t BUF_LINES = LCD_HEIGHT / 4;
+// Partial buffer, ONE bank. AMOLED is 16bpp; a full framebuffer
+// (368*448*2 = ~322 KB) is far too large for on-chip RAM, and each flush chunk
+// pays a CASET/PASET/RAMWR overhead, so a taller buffer = fewer chunks = faster.
+//
+// Sizing is a RAM tug-of-war: this board has 320 KB and no PSRAM, and NimBLE
+// needs a ~25-30 KB contiguous block free to ESTABLISH a connection. With the UI
+// this session grew (prefs, Wi-Fi/keyboard overlays, extra Settings cards) a
+// 1/4-frame (112-line, 82 KB) buffer left only ~13 KB free / ~12 KB largest
+// block, and BLE connects failed with HCI 0x3e. 1/7 (64 lines, ~47 KB) frees
+// ~35 KB, restoring the headroom BLE needs while keeping redraws reasonable
+// (7 flush chunks). If the UI ever slims back down, this can grow again — but
+// keep a >=~30 KB contiguous margin for the BLE link, or connects break.
+static const uint32_t BUF_LINES = LCD_HEIGHT / 7;
 static lv_color_t *g_buf1 = nullptr;
 static lv_disp_draw_buf_t g_drawBuf;
 static lv_disp_drv_t g_dispDrv;
@@ -536,15 +541,16 @@ static void idleTick() {
 }
 
 // ---- Low-memory mode (Wi-Fi window) ----------------------------------------
-// This board has 320 KB of RAM and no PSRAM. The full LVGL UI (LVGL allocates
-// from the system heap), NimBLE, and the 82 KB 1/4-frame draw buffer together
-// leave only ~1.5 KB free — so esp_wifi_init's ~50 KB fails with NO_MEM and the
-// Wi-Fi scan/NTP path can't run. Rather than tear BLE down (which would strand
-// a live load), we shrink the draw buffer for the duration of a Wi-Fi op: the
-// 82 KB buffer is swapped for a tiny one, freeing enough for Wi-Fi while the UI
-// keeps rendering (just in more, smaller flush chunks — slower, fine for a
-// settings screen). Restored the moment Wi-Fi is done.
-static const uint32_t SMALL_BUF_LINES = 16;   // ~11.5 KB vs the full ~82 KB
+// This board has 320 KB of RAM and no PSRAM. Even with the draw buffer trimmed
+// to fit the BLE stack (see BUF_LINES), the ~37 KB free is nowhere near the
+// ~50 KB esp_wifi_init wants, so a Wi-Fi scan/NTP sync would fail with NO_MEM.
+// Rather than tear BLE down (which would strand a live load), we shrink the draw
+// buffer for the duration of a Wi-Fi op: the ~47 KB buffer is swapped for a tiny
+// one, freeing enough for Wi-Fi while the UI keeps rendering (just in more,
+// smaller flush chunks — slower, fine for a settings screen). Restored, best
+// effort, the moment Wi-Fi is done (a successful NTP sync reboots to fully
+// reclaim the buffer — see onNetProgress).
+static const uint32_t SMALL_BUF_LINES = 16;   // ~11.5 KB, frees the most for Wi-Fi
 static bool g_lowMem = false;
 
 static bool allocDrawBuf(uint32_t lines) {

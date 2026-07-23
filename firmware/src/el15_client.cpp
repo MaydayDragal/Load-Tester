@@ -128,15 +128,23 @@ void El15Client::stopScan() {
 
 // ---- Connection ------------------------------------------------------------
 bool El15Client::connectTo(const char *address) {
-  // Reuse the address type discovered during the scan (public vs random); phones
-  // and some EL15 units advertise a random address, which a forced-public
-  // connect can't reach. Fall back to public only if we don't have it.
-  int type = BLE_ADDR_PUBLIC;
-  for (auto &x : scanAddrs_) if (x.toString() == std::string(address)) { type = x.getType(); break; }
-  return connectTo(address, type);
+  // Prefer the EXACT NimBLEAddress captured during the scan. For a phone's
+  // resolvable private address the scanned object is the peer as the controller
+  // actually saw and (if privacy is on) resolved it; a string round-trip can
+  // lose that, and connecting to a bare RPA that has since rotated gives the
+  // HCI 0x3e "connection failed to be established" we were chasing. Fall back to
+  // reconstructing only for an address we never scanned (the guard's stored
+  // peer, via the overload below).
+  for (auto &x : scanAddrs_)
+    if (x.toString() == std::string(address)) return connectAddr(x);
+  return connectAddr(NimBLEAddress(std::string(address), BLE_ADDR_PUBLIC));
 }
 
 bool El15Client::connectTo(const char *address, int addrType) {
+  return connectAddr(NimBLEAddress(std::string(address), (uint8_t)addrType));
+}
+
+bool El15Client::connectAddr(const NimBLEAddress &addr) {
   stopScan();
   setState(CONNECTING, "Connecting...");
   if (!client_) {
@@ -144,9 +152,25 @@ bool El15Client::connectTo(const char *address, int addrType) {
     client_->setClientCallbacks(&g_clientCallbacks, false);
   }
   client_->setConnectTimeout(connectTimeoutMs_);
-  NimBLEAddress addr(std::string(address), (uint8_t)addrType);
-  Serial.printf("[ble] connecting to %s (addr type %d)\n", address, addr.getType());
+  // Connecting to an Android RPA peripheral (the simulator) often fails the
+  // first connection establishment with HCI 0x3e — the link half-forms but the
+  // central misses the early connection events. Each retry sends a FRESH
+  // connection request, so several short attempts catch it where one does not.
+  // NimBLE blocks this call for timeout x (retries + 1); with a 4 s timeout and
+  // 4 retries that is ~20 s worst case on a truly dead peer (a healthy one
+  // connects on the first attempt in well under a second). connectFailRetries
+  // only re-tries the 0x3e establishment failure, which is exactly ours.
+  NimBLEClient::Config cfg = client_->getConfig();
+  cfg.connectFailRetries = connectRetries_;
+  client_->setConfig(cfg);
+  Serial.printf("[ble] connecting to %s (addr type %d)\n",
+                addr.toString().c_str(), addr.getType());
   if (!client_->connect(addr)) {
+    // rc 13 = BLE_HS_ETIMEOUT / HCI 0x3e: the peer never completed the
+    // handshake (out of range, rotated its address, or an Android RPA peripheral
+    // not accepting). Keep the client for reuse — deleting it here races the
+    // controller's late disconnect event ("client not found").
+    Serial.printf("[ble] connect() FAILED rc=%d\n", client_->getLastError());
     setState(IDLE, "Connect failed");
     return false;
   }
@@ -160,8 +184,8 @@ bool El15Client::connectTo(const char *address, int addrType) {
   if (notifyChar_->canNotify()) notifyChar_->subscribe(true, notifyCb);
   frameLen_ = 0;
   lastPollMs_ = 0;
-  snprintf(lastAddr_, sizeof(lastAddr_), "%s", address);
-  lastAddrType_ = addrType;
+  snprintf(lastAddr_, sizeof(lastAddr_), "%s", addr.toString().c_str());
+  lastAddrType_ = addr.getType();
   setState(CONNECTED, "Connected - FFF0");
   return true;
 }

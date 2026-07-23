@@ -125,12 +125,8 @@ bool startScan() {
   g_scanNextTryMs = 0;   // first kick attempt as soon as the STA is started
   g_startedMs = millis();
   WiFi.persistent(false);
-  Serial.printf("[ntp] scan: pre-init heap=%u free, largest block=%u\n",
-                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   bool modeOk = WiFi.mode(WIFI_STA);   // synchronous: runs esp_wifi_start
-  Serial.printf("[ntp] scan: WiFi.mode(STA)=%d getMode=%d started=%d heap=%u\n",
-                (int)modeOk, (int)WiFi.getMode(), (int)WiFi.STA.started(),
-                (unsigned)ESP.getFreeHeap());
+  if (!modeOk) Serial.println("[ntp] WiFi.mode(STA) failed");
   g_state = SCANNING;
   report(SCANNING, "Scanning for networks...");
   return true;

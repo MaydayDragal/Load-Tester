@@ -50,9 +50,14 @@ class El15Client : public El15Controller {
   const char *lastAddress() const { return lastAddr_; }
   int lastAddressType() const { return lastAddrType_; }
 
-  // How long connectTo() may block before giving up (NimBLE default 30 s). The
-  // recovery path shortens this so a retry loop stays responsive.
+  // Per-attempt connect timeout and how many extra 0x3e establishment retries
+  // connectTo() makes. The guard saves and restores both around its own attempts
+  // (it has its own outer retry loop, so it wants 0 inner retries and a short
+  // timeout) — hence the getters.
   void setConnectTimeoutMs(uint32_t ms) { connectTimeoutMs_ = ms; }
+  uint32_t connectTimeoutMs() const { return connectTimeoutMs_; }
+  void setConnectRetries(uint8_t n) { connectRetries_ = n; }
+  uint8_t connectRetries() const { return connectRetries_; }
 
   // El15Controller — command frames identical to the Android app.
   void setMode(int mode) override { write(el15::modeCommand(mode)); }
@@ -84,6 +89,7 @@ class El15Client : public El15Controller {
   void handleNotify(const uint8_t *data, size_t len); // loop task (reassembly)
   void handleDisconnect();                            // loop task
 
+  bool connectAddr(const NimBLEAddress &addr);   // shared connect body
   void setState(State s, const char *info);
   void write(const el15::Frame &f) { writeRaw(f.data(), f.size()); }
   void writeFixed(const uint8_t *d, size_t n) { writeRaw(d, n); }
@@ -110,5 +116,9 @@ class El15Client : public El15Controller {
 
   char lastAddr_[24] = "";
   int lastAddrType_ = 0;
-  uint32_t connectTimeoutMs_ = 30000;
+  // Per-attempt connect timeout + extra establishment retries. A present peer
+  // connects in well under a second; 4 s x (4 + 1) attempts catches a flaky RPA
+  // establishment while bounding a dead-peer connect to ~20 s.
+  uint32_t connectTimeoutMs_ = 4000;
+  uint8_t connectRetries_ = 4;
 };
