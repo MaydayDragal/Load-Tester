@@ -289,9 +289,13 @@ static lv_obj_t *btAhBig, *btWhSub, *btSaveBtn, *btSaveLbl;
 static const int BR_N = 10;
 static lv_obj_t *brVal[BR_N];
 
-static int pollMs = 500;  // status sampling interval, mirrored to BLE + R-test
-static const int RATE_MS[4] = {100, 250, 500, 1000};
-static const char *RATE_NAMES[4] = {"10 Hz", "4 Hz", "2 Hz", "1 Hz"};
+static int pollMs = 50;  // status sampling interval, mirrored to BLE + R-test
+// 50 ms (20 Hz) is the device's practical max: a poll-rate sweep showed the EL15
+// produces ~17-19 fresh samples/s (min ~23 ms between distinct frames), so 20 Hz
+// captures ~all of it at ~88% unique. 10 Hz is 100% unique; faster than 20 Hz
+// just re-fetches repeats and floods the BLE link. 1 Hz was dropped as useless.
+static const int RATE_MS[4] = {50, 100, 250, 500};
+static const char *RATE_NAMES[4] = {"20 Hz", "10 Hz", "4 Hz", "2 Hz"};
 static lv_obj_t *rateChip[4], *rateChipLbl[4];
 
 static lv_obj_t *connDot2, *connLabel2, *connDisc, *scanBtn, *deviceList;

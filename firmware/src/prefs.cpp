@@ -25,7 +25,7 @@ void writeAll() {
   g_nvs.putBool("mute", g_data.muted);
   g_nvs.putUShort("idleDim", g_data.idleDimS);
   g_nvs.putBool("pxShift", g_data.pixelShift);
-  g_nvs.putUShort("pollMs", g_data.pollMs);
+  g_nvs.putUShort("pollMs20", g_data.pollMs);   // key bumped from "pollMs" on purpose
   g_nvs.putFloat("fuse", g_data.fuseRating);
   g_nvs.putUChar("rtSteps", g_data.rtSteps);
   g_nvs.putBool("fourWire", g_data.fourWire);
@@ -56,7 +56,9 @@ void begin() {
   g_data.muted = g_nvs.getBool("mute", d.muted);
   g_data.idleDimS = g_nvs.getUShort("idleDim", d.idleDimS);
   g_data.pixelShift = g_nvs.getBool("pxShift", d.pixelShift);
-  g_data.pollMs = g_nvs.getUShort("pollMs", d.pollMs);
+  // Key intentionally bumped "pollMs" -> "pollMs20" so devices that stored the
+  // old 500 ms default re-read absent and pick up the new 50 ms (20 Hz) default.
+  g_data.pollMs = g_nvs.getUShort("pollMs20", d.pollMs);
   g_data.fuseRating = g_nvs.getFloat("fuse", d.fuseRating);
   g_data.rtSteps = g_nvs.getUChar("rtSteps", d.rtSteps);
   g_data.fourWire = g_nvs.getBool("fourWire", d.fourWire);

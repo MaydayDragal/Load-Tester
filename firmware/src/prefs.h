@@ -23,7 +23,7 @@ struct Data {
   bool pixelShift = true;    // AMOLED burn-in mitigation
 
   // Sampling
-  uint16_t pollMs = 500;
+  uint16_t pollMs = 50;   // 20 Hz — the EL15's practical max fresh-data rate
 
   // R-Test setup
   float fuseRating = 0;
