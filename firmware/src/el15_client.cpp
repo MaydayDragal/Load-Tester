@@ -11,6 +11,28 @@
 
 static El15Client *g_self = nullptr;
 
+#ifdef EL15_POLLTEST
+// Poll-rate sweep: at each interval, poll as commanded and compare each received
+// 28-byte status frame to the previous one. A frame that differs is FRESH data;
+// an identical frame is a wasted poll (the device hasn't re-sampled yet). As the
+// poll rate climbs past the device's true update rate, rx Hz keeps rising but
+// fresh Hz plateaus and the unique-% falls — the plateau is the max useful rate.
+namespace {
+const uint32_t PT_INTERVALS[] = {250, 200, 150, 100, 75, 50, 33, 25, 20};
+const int PT_N = (int)(sizeof(PT_INTERVALS) / sizeof(PT_INTERVALS[0]));
+const uint32_t PT_WINDOW_MS = 3500;
+int pt_idx = -1;
+bool pt_done = false;
+uint32_t pt_winStart = 0, pt_rx = 0, pt_changed = 0, pt_lastChangeMs = 0, pt_minGap = 0xFFFFFFFF;
+uint8_t pt_prev[28];
+bool pt_havePrev = false;
+void pt_resetWindow(uint32_t now) {
+  pt_winStart = now; pt_rx = 0; pt_changed = 0; pt_lastChangeMs = 0;
+  pt_minGap = 0xFFFFFFFF; pt_havePrev = false;
+}
+}  // namespace
+#endif
+
 // ---- Scan callback ---------------------------------------------------------
 class ScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice *dev) override {
@@ -182,6 +204,31 @@ bool El15Client::connectAddr(const NimBLEAddress &addr) {
   writeChar_ = svc->getCharacteristic(el15::WRITE_UUID);
   if (!notifyChar_ || !writeChar_) { disconnect(); setState(IDLE, "EL15 characteristics missing"); return false; }
   if (notifyChar_->canNotify()) notifyChar_->subscribe(true, notifyCb);
+
+  // Forensic GATT dump. A real EL15 that differs from the reverse-engineered
+  // reference capture — a different command characteristic, or a write char that
+  // only accepts write-WITH-response — otherwise presents as "connected, live
+  // telemetry, but every command ignored", which is exactly what we hit on first
+  // real hardware. Flags: R=read W=write(with-response) w=write-no-response
+  // N=notify I=indicate. If FFF3 shows "W" but not "w", the fix is to write with
+  // response (writeRaw does this automatically now).
+  // getCharacteristics(false): return the ALREADY-discovered characteristics.
+  // Passing true forces a re-discovery that frees and recreates every
+  // characteristic object — invalidating notifyChar_/writeChar_ resolved just
+  // above, so the next poll dereferences freed memory and panics on connect.
+  Serial.println("[ble] FFF0 characteristics:");
+  for (auto *c : svc->getCharacteristics(false)) {
+    Serial.printf("[ble]   %s h=%u %s%s%s%s%s\n",
+                  c->getUUID().toString().c_str(), c->getHandle(),
+                  c->canRead() ? "R" : "-",
+                  c->canWrite() ? "W" : "-",
+                  c->canWriteNoResponse() ? "w" : "-",
+                  c->canNotify() ? "N" : "-",
+                  c->canIndicate() ? "I" : "-");
+  }
+  Serial.printf("[ble] command char FFF3 supports: write-req=%d write-cmd=%d\n",
+                (int)writeChar_->canWrite(), (int)writeChar_->canWriteNoResponse());
+
   frameLen_ = 0;
   lastPollMs_ = 0;
   snprintf(lastAddr_, sizeof(lastAddr_), "%s", addr.toString().c_str());
@@ -213,8 +260,34 @@ void El15Client::shutdownAndDisconnect() {
 // ---- I/O -------------------------------------------------------------------
 void El15Client::writeRaw(const uint8_t *d, size_t n) {
   if (state_ != CONNECTED || !writeChar_) return;
-  // WRITE_NO_RESPONSE mirrors the Android write type; ignore transient failures.
-  writeChar_->writeValue(const_cast<uint8_t *>(d), n, false);
+
+  // FFF3 is write-no-response only, and the device silently DROPS a no-response
+  // write that arrives too close behind another one (proven on hardware: mode
+  // changes and the sweep's LOAD_ON-after-setpoint were being lost). So pace
+  // every CONTROL command (frame byte 3 != 0x08; the poll is 0x08) at least
+  // CTRL_GAP_MS apart from the previous control write AND clear of the next poll.
+  // Polls themselves are never paced — they self-retry every interval.
+  const bool isCtrl = (n >= 4 && d[3] != 0x08);
+  if (isCtrl) {
+    static const uint32_t CTRL_GAP_MS = 50;   // > one BLE connection interval
+    static uint32_t lastCtrlMs = 0;
+    uint32_t since = millis() - lastCtrlMs;
+    if (lastCtrlMs && since < CTRL_GAP_MS) delay(CTRL_GAP_MS - since);
+    lastCtrlMs = millis();
+  }
+
+  bool withResp = writeChar_->canWrite();
+  bool ok = writeChar_->writeValue(const_cast<uint8_t *>(d), n, withResp);
+  if (isCtrl) lastPollMs_ = millis();   // keep the next poll off this command
+
+  // Log control writes, but not the twice-a-second poll, so the serial log stays
+  // readable while still showing every mode/setpoint/load command.
+  if (isCtrl) {
+    Serial.printf("[ble] write %s (%s):", ok ? "OK" : "FAIL",
+                  withResp ? "with-resp" : "no-resp");
+    for (size_t i = 0; i < n; i++) Serial.printf(" %02X", d[i]);
+    Serial.println();
+  }
 }
 
 void El15Client::handleNotify(const uint8_t *data, size_t len) {
@@ -246,6 +319,34 @@ void El15Client::handleNotify(const uint8_t *data, size_t len) {
                       [&] { int sum = 0; for (int i = 0; i < 28; i++) sum += frameBuf_[i]; return sum & 0xFF; }());
       }
     }
+    // Rate-limited proof-of-life for received status. Used to answer "does
+    // telemetry keep flowing when we stop polling?" — if these lines continue
+    // with polling disabled, the device free-runs status and our FFF3 writes are
+    // unproven; if they stop, POLL (a FFF3 write) drives them and writes work.
+    if (s.valid) {
+      static uint32_t lastRxLogMs = 0;
+      uint32_t nowRx = millis();
+      if (nowRx - lastRxLogMs > 1000) {
+        lastRxLogMs = nowRx;
+        Serial.printf("[ble] status rx: V=%.2f I=%.3f mode=%s(0x%02X) load=%d  raw b5=0x%02X b6=0x%02X\n",
+                      s.voltage, s.current, s.modeStr, s.mode, (int)s.loadOn,
+                      frameBuf_[5], frameBuf_[6]);
+      }
+    }
+#ifdef EL15_POLLTEST
+    if (s.valid && pt_idx >= 0 && !pt_done) {
+      pt_rx++;
+      bool changed = !pt_havePrev || memcmp(pt_prev, frameBuf_, 28) != 0;
+      if (changed) {
+        pt_changed++;
+        uint32_t nowc = millis();
+        if (pt_lastChangeMs) { uint32_t g = nowc - pt_lastChangeMs; if (g < pt_minGap) pt_minGap = g; }
+        pt_lastChangeMs = nowc;
+      }
+      memcpy(pt_prev, frameBuf_, 28);
+      pt_havePrev = true;
+    }
+#endif
     if (onStatus) onStatus(s);
     memmove(frameBuf_, frameBuf_ + 28, frameLen_ - 28);
     frameLen_ -= 28;
@@ -257,9 +358,64 @@ void El15Client::poll() { writeFixed(el15::POLL, sizeof(el15::POLL)); }
 void El15Client::loopTick() {
   drainEvents();  // process queued BLE events on THIS (loop) task
   if (state_ != CONNECTED) return;
+
+#ifdef EL15_POLLTEST
+  if (!pt_done) {
+    uint32_t nowp = millis();
+    if (pt_idx < 0) {
+      pt_idx = 0; pt_resetWindow(nowp); pollIntervalMs = PT_INTERVALS[0];
+      Serial.println("[polltest] sweeping poll intervals; comparing 28-byte frames (fresh vs repeated)");
+    } else if (nowp - pt_winStart >= PT_WINDOW_MS) {
+      float sec = (nowp - pt_winStart) / 1000.0f;
+      float rxHz = pt_rx / sec, freshHz = pt_changed / sec;
+      int pct = pt_rx ? (int)(100.0f * pt_changed / pt_rx) : 0;
+      Serial.printf("[polltest] poll=%3ums | rx=%5.1f Hz | fresh=%5.1f Hz (%3d%% unique) | fastest fresh gap=%lums\n",
+                    (unsigned)PT_INTERVALS[pt_idx], rxHz, freshHz, pct,
+                    (unsigned long)(pt_minGap == 0xFFFFFFFF ? 0 : pt_minGap));
+      pt_idx++;
+      if (pt_idx >= PT_N) {
+        pt_done = true; pollIntervalMs = 500;
+        Serial.println("[polltest] DONE (poll restored to 500 ms)");
+      } else {
+        pt_resetWindow(nowp); pollIntervalMs = PT_INTERVALS[pt_idx];
+      }
+    }
+  }
+#endif
+
+#ifdef EL15_SELFTEST
+  // SAFE mode sweep: mode changes draw no current (load stays OFF), so this
+  // cannot energise anything. Step through every selectable mode ~2.5 s apart
+  // and command it; the "status rx: ... mode=" line then shows what the device
+  // actually switched to. Any commanded->reported mismatch is a bad SET opcode.
+  static const struct { int id; const char *name; } SWEEP[] = {
+    {el15::MODE_CC, "CC"}, {el15::MODE_CV, "CV"}, {el15::MODE_CC, "CC"},
+    {el15::MODE_CV, "CV"}, {el15::MODE_CR, "CR"}, {el15::MODE_CP, "CP"},
+    {el15::MODE_CAP, "CAP"}, {el15::MODE_DCR, "DCR"}, {el15::MODE_CC, "CC (restore)"},
+  };
+  static uint32_t connMs = 0;
+  static int stStage = -1;
+  if (connMs == 0) { connMs = millis(); stStage = -1; }
+  uint32_t stEl = millis() - connMs;
+  int want = (int)(stEl / 2500) - 1;   // stress at the previously-failing 2.5 s
+  if (want > stStage && want >= 0 && want < (int)(sizeof(SWEEP) / sizeof(SWEEP[0]))) {
+    stStage = want;
+    // Mirror the R-test start sequence — a setpoint write IMMEDIATELY followed by
+    // a second control write (here a mode change; safe, draws no current). If the
+    // second command lands (mode follows), the same pacing makes the sweep's
+    // LOAD_ON-after-setpoint land too. Load stays OFF throughout.
+    Serial.printf("[selftest] back-to-back setpoint(0) + MODE -> %s (0x%02X)\n",
+                  SWEEP[want].name, SWEEP[want].id);
+    write(el15::setpointCommand(0.0f));
+    write(el15::modeCommand(SWEEP[want].id));
+  }
+#endif
+
+#ifndef EL15_NO_POLL
   uint32_t now = millis();
   if (now - lastPollMs_ >= pollIntervalMs) {
     lastPollMs_ = now;
     poll();
   }
+#endif
 }

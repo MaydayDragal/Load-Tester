@@ -21,15 +21,34 @@ inline constexpr const char *SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34f
 inline constexpr const char *NOTIFY_UUID  = "0000fff1-0000-1000-8000-00805f9b34fb";
 inline constexpr const char *WRITE_UUID   = "0000fff3-0000-1000-8000-00805f9b34fb";
 
-// ---- Fixed command frames (captured, replayed verbatim) -------------------
+// ---- Fixed command frames --------------------------------------------------
+// Wire format: AF 07 03 <cmd> <len> <data...> <checksum>, where the checksum
+// byte makes the WHOLE frame sum to 0 (mod 256) — the same rule the status
+// parser enforces on incoming packets. A real EL15 silently drops any command
+// whose bytes don't sum to zero.
+//
+// The DM40GUI reference these were ported from got this wrong for everything but
+// POLL: its command constants were hand-written as prefix+value with NO checksum
+// byte, so on real hardware POLL worked (its 0x3F checksum was captured whole)
+// while load/mode/setpoint were dropped. Verified on a real unit 2026-07-24:
+// disabling polling stopped all telemetry, proving POLL (a FFF3 write) is
+// honoured, while the checksum-less commands did nothing. The last byte of each
+// frame below is that checksum; the command builders compute theirs at runtime.
 static const uint8_t POLL[]     = {0xAF, 0x07, 0x03, 0x08, 0x00, 0x3F};
-static const uint8_t LOAD_ON[]  = {0xAF, 0x07, 0x03, 0x09, 0x01, 0x04};
-static const uint8_t LOAD_OFF[] = {0xAF, 0x07, 0x03, 0x09, 0x01, 0x00};
-static const uint8_t LOCK[]     = {0xAF, 0x07, 0x03, 0x09, 0x01, 0x01};
+static const uint8_t LOAD_ON[]  = {0xAF, 0x07, 0x03, 0x09, 0x01, 0x04, 0x39};
+static const uint8_t LOAD_OFF[] = {0xAF, 0x07, 0x03, 0x09, 0x01, 0x00, 0x3D};
+static const uint8_t LOCK[]     = {0xAF, 0x07, 0x03, 0x09, 0x01, 0x01, 0x3C};
 
 static const uint8_t MODE_PREFIX[]     = {0xAF, 0x07, 0x03, 0x03, 0x01};
 static const uint8_t SETPOINT_PREFIX[] = {0xAF, 0x07, 0x03, 0x04, 0x04};
 static const uint8_t HEADER[]          = {0xDF, 0x07, 0x03, 0x08};
+
+// Trailing checksum byte that makes a frame sum to 0 (mod 256).
+inline uint8_t frameChecksum(const uint8_t *d, size_t n) {
+  int sum = 0;
+  for (size_t i = 0; i < n; i++) sum += d[i];
+  return (uint8_t)((0x100 - (sum & 0xFF)) & 0xFF);
+}
 
 // ---- Modes ----------------------------------------------------------------
 enum Mode {
@@ -99,6 +118,7 @@ using Frame = std::vector<uint8_t>;
 inline Frame modeCommand(int mode) {
   Frame f(MODE_PREFIX, MODE_PREFIX + sizeof(MODE_PREFIX));
   f.push_back((uint8_t)mode);
+  f.push_back(frameChecksum(f.data(), f.size()));   // sum-to-zero, or the load ignores it
   return f;
 }
 
@@ -108,6 +128,7 @@ inline Frame setpointCommand(float value) {
   uint8_t b[4];
   memcpy(b, &value, 4);  // ESP32 is little-endian, matching the wire format
   f.insert(f.end(), b, b + 4);
+  f.push_back(frameChecksum(f.data(), f.size()));   // sum-to-zero, or the load ignores it
   return f;
 }
 
