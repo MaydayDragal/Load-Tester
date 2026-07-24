@@ -88,25 +88,23 @@
 #define I2S_DOUT_GPIO     23     // ESP -> codec DSDIN (speaker)
 #define SPK_AMP_EN_BIT    (1 << 7)  // expander bit that powers the speaker amp
 
-// ---- TF / microSD slot (SPI mode, SHARED with the panel's SPI2 host) --------
+// ---- TF / microSD slot (bit-banged software SPI on dedicated pins) ----------
 // Verified against waveshareteam/ESP32-C6-Touch-AMOLED-1.8 pin_config.h, which
 // names them SDMMC_* out of habit — but the ESP32-C6 has NO SDMMC host
-// (soc_caps.h: no SOC_SDMMC_HOST_SUPPORTED), so the slot can only run in SPI
-// mode: CMD = MOSI, DATA/D0 = MISO, CLK = SCK.
+// (soc_caps.h: no SOC_SDMMC_HOST_SUPPORTED), so the slot runs SPI-mode SD:
+// CMD = MOSI, DATA/D0 = MISO, CLK = SCK.
 //
-// The C6 also has only ONE general-purpose SPI host (SOC_SPI_PERIPH_NUM = 2,
-// and SPI1 is the flash controller), and the AMOLED owns it in QSPI mode. The
-// card therefore lives on the SAME host as a second device, and sd_card.cpp
-// switches the shared clock/data signals between the panel's pins and these via
-// the GPIO matrix around every card access. Nothing may draw while the card is
-// mounted — see the routing note in sd_card.cpp.
+// The C6 has only ONE general-purpose SPI host (SPI1 is the flash controller)
+// and the AMOLED owns it in QSPI mode. Sharing that host with the card FAILED on
+// real hardware — the IDF sdspi driver can't transact on the panel's bus (card
+// init dies at CMD59, ESP_ERR_NOT_SUPPORTED). So the card is driven by a small
+// bit-banged software-SPI driver in sd_card.cpp on these dedicated pins,
+// independent of SPI2 entirely: no GPIO-matrix rerouting, and drawing to the
+// panel during a card access is fine. See the long note in sd_card.cpp.
 #define SD_SPI_SCK   11
 #define SD_SPI_MOSI  10   // card CMD
 #define SD_SPI_MISO  18   // card DAT0
 #define SD_SPI_CS     6
-// 20 MHz is the ESP-IDF default (SDMMC_FREQ_DEFAULT). Card init always probes
-// at 400 kHz first, so this only affects the data phase.
-#define SD_SPI_FREQ_KHZ 20000
 
 // ---- Backlight / brightness ------------------------------------------------
 // AMOLED brightness is a controller command (0x51), handled in display.cpp;

@@ -360,6 +360,42 @@ void setup() {
     // boot (its explicit reconnect-and-force-off takes precedence above).
     g_autoConnectPending = true;
   }
+
+#ifdef EL15_SDTEST
+  // On-device SD card exercise. Runs the SAME sd::info()/sd::saveCsv() paths the
+  // UI buttons use, on the loop task (so the shared-bus reroute never races a
+  // panel draw). Reports card presence/size, writes two real reports (checks the
+  // NNN auto-increment), and reads one back to prove the bytes actually landed.
+  delay(300);   // let the panel settle before we borrow its SPI bus
+  Serial.println("[sdtest] ===== SD CARD TEST =====");
+  char sdmsg[80];
+  bool okInfo = sd::info(sdmsg, sizeof(sdmsg));
+  Serial.printf("[sdtest] info : %-4s -> %s\n", okInfo ? "OK" : "FAIL", sdmsg);
+  if (okInfo) {
+    auto body = [](Print &f) {
+      report::fpf(f, "# EL15 SD self-test\n");
+      report::writeStamp(f);
+      report::fpf(f, "n,square\n");
+      for (int i = 1; i <= 5; i++) report::fpf(f, "%d,%d\n", i, i * i);
+      return f.getWriteError() == 0;
+    };
+    bool w1 = sd::saveCsv("SDTEST", body, sdmsg, sizeof(sdmsg));
+    Serial.printf("[sdtest] write1: %-4s -> %s\n", w1 ? "OK" : "FAIL", sdmsg);
+    char name1[24]; snprintf(name1, sizeof(name1), "%s", sdmsg);
+    bool w2 = sd::saveCsv("SDTEST", body, sdmsg, sizeof(sdmsg));
+    Serial.printf("[sdtest] write2: %-4s -> %s (expect the index to increment)\n",
+                  w2 ? "OK" : "FAIL", sdmsg);
+    if (w1) {
+      Serial.printf("[sdtest] readback of %s:\n", name1);
+      bool rb = sd::readBackTest(name1, sdmsg, sizeof(sdmsg));
+      Serial.printf("[sdtest] readback: %-4s -> %s\n", rb ? "OK" : "FAIL", sdmsg);
+    }
+    bool okInfo2 = sd::info(sdmsg, sizeof(sdmsg));
+    Serial.printf("[sdtest] info2: %-4s -> %s (free space should have dropped)\n",
+                  okInfo2 ? "OK" : "FAIL", sdmsg);
+  }
+  Serial.println("[sdtest] ===== END =====");
+#endif
 }
 
 // ---- Physical buttons ------------------------------------------------------
