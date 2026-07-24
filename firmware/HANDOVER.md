@@ -4,25 +4,69 @@ Living handover for the **standalone ESP32-C6 firmware** (`firmware/`) that turn
 a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
-**Last updated:** 2026-07-22.
-**Branch:** `claude/android-apk-load-tester-k82q4g` — pushed, working tree clean,
-in sync with `origin`. Tip commit `0ab80e8`.
+**Last updated:** 2026-07-24.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`). Committed + merged.
+
+---
+
+## 0. Latest session (2026-07-24) — FIRST REAL EL15 + SD card working
+
+This was the first session against a **real ALIENTEK EL15** (all prior work was
+simulator-only). Four things were found and fixed on hardware — read these before
+touching the BLE or SD code:
+
+1. **Command checksums (THE big one).** Load control did nothing on the real
+   unit — telemetry worked but mode/setpoint/LOAD_ON were silently ignored.
+   Cause: every command frame needs a trailing checksum byte that makes the whole
+   frame sum to 0 (mod 256); the DM40GUI-derived constants only had it on POLL.
+   Fixed in `el15_protocol.h` (`frameChecksum()` + baked-in bytes). Proven: with
+   polling disabled ALL telemetry stopped, so POLL is the only thing that ever
+   worked — and it's the only checksummed frame. See §10.
+2. **Connect crash.** `getCharacteristics(true)` re-discovered the service and
+   freed the notify/write characteristic objects we'd just resolved → use-after-
+   free → reboot on connect. Now `getCharacteristics(false)`.
+3. **Dropped no-response writes.** FFF3 is write-no-response only, and the device
+   drops a command that lands too close behind another no-response write. Two
+   symptoms — mode changes colliding with the 500 ms poll, and the R-test's
+   `setSetpoint`→`setLoad(true)` back-to-back. Fix in `El15Client::writeRaw`:
+   pace every CONTROL write ≥50 ms from the previous one AND defer the next poll.
+4. **SD card writes now work** — on **bit-banged software SPI**, because the C6's
+   one SPI host is owned by the panel and the IDF sdspi driver can't share it.
+   See §10.
+
+Also: **default poll rate is now 50 ms (20 Hz)** — a sweep showed the EL15 tops
+out at ~17-19 fresh samples/s, so 20 Hz captures ~all of it; faster just refetches
+repeats and floods the link (§11). Serial now also carries useful bring-up logs:
+a per-connect **GATT characteristics dump**, a per-control-write line
+(`[ble] write OK/FAIL …`), and a 1 Hz `[ble] status rx: …` line. They're low-noise
+and handy on hardware; strip them (in `el15_client.cpp`) for a silent build.
+
+**Test scaffolding** lives behind build flags, compiled out of normal builds:
+`-D EL15_SDTEST` (boot-time SD read/write/readback in `main.cpp`),
+`-D EL15_POLLTEST` (poll-rate sweep in `el15_client.cpp`),
+`-D EL15_SELFTEST` (safe mode-cycle sweep). Flash e.g.
+`PLATFORMIO_BUILD_FLAGS="-D EL15_SDTEST" "$PIO" run -d firmware -t upload …`.
 
 ---
 
 ## 1. Build / flash / monitor (read first)
 
-PlatformIO Core is **off-PATH** at `~/.platformio/penv/Scripts/pio.exe`. Board
-enumerates as **COM4**. Bash + PowerShell both available.
+PlatformIO Core is **off-PATH** at `~/.platformio/penv/Scripts/pio.exe`. The board
+enumerates on a COM port that **hops between resets** (seen COM4 and COM7) — find
+it with `"$PIO" device list` (or `[System.IO.Ports.SerialPort]::GetPortNames()`).
+Bash + PowerShell both available.
 
 ```bash
 PIO=~/.platformio/penv/Scripts/pio.exe
-"$PIO" run -d firmware                                 # build (-Wall -Wextra on)
-"$PIO" run -d firmware -t upload --upload-port COM4    # flash
+PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
+"$PIO" run -d firmware                                  # build (-Wall -Wextra on)
+"$PIO" run -d firmware -t upload --upload-port "$PORT"  # flash
 ```
-Serial is 115200. Read serial from PowerShell (the `pio device monitor` holds
-the port); a `System.IO.Ports.SerialPort` one-liner works well for short grabs.
-Boot prints `[boot] reset reason: …` (power-on / PANIC / BROWNOUT / WDT / USB) —
+Read serial passively with a `System.IO.Ports.SerialPort` one-liner (opening the
+port asserts DTR/RTS and resets the board, which is usually what you want).
+**If the board vanishes from USB entirely** (no COM port at all — happened once
+under a very fast poll flood), physically unplug/replug the USB cable to recover.
+Serial is 115200. Boot prints `[boot] reset reason: …` (power-on / PANIC / BROWNOUT / WDT / USB) —
 use it when chasing spontaneous resets. `[audio] ready (ES8311)` confirms the
 codec. Occasional `Wire.cpp requestFrom Error -1` are benign transient touch I²C
 hiccups.
@@ -51,7 +95,7 @@ display.{h,cpp}     CO5300/SH8601 AMOLED (QSPI 80 MHz) + touch + LVGL + touch-sn
 audio.{h,cpp}       ES8311 codec feedback (continuous-stream I2S tone synth)
 es8311.{c,h},        vendored Espressif/Waveshare ES8311 driver (Arduino I²C HAL)
   es8311_reg.h
-sd_card.{h,cpp}     microSD over the shared SPI host (mount/write/unmount per op)
+sd_card.{h,cpp}     microSD on bit-banged software SPI (SdFat); own driver (§12)
 report.h            CSV test reports (RTEST_/BATT_) written via sd_card
 prefs.{h,cpp}       NVS persistence (debounced) + synchronous in-flight/creds flags
 link_guard.h        link-loss auto-stop supervisor + crash-recovery (header-only)
@@ -95,7 +139,8 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 - **RTC:** PCF85063 at 0x51. Read via `rtcTime()`; now also settable via
   `setRtcTime()` (clears the oscillator-stop flag), driven by the NTP sync.
 - **SD/TF slot:** SPI mode (C6 has no SDMMC), SCK=11 MOSI=10 MISO=18 **CS=6**,
-  on the panel's SPI2 host with signals re-routed per access. See `sd_card.cpp`.
+  driven by a **bit-banged software-SPI** driver independent of the panel's SPI2
+  bus — sharing that bus failed. See §12 and `sd_card.cpp`.
 - **Buttons:** **BOOT = GPIO9** (active-low strapping pin). **PWR = PMIC key**.
 - Unused hardware still on the board: QMI8658 IMU, 802.15.4 radio, RTC
   backup-battery pads. Wi-Fi is now used (NTP only). See `FEATURE_IDEAS.md`.
@@ -179,11 +224,12 @@ line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
   keep-alive window.
 - Full R-test / capacity runs against the **phone simulator or a real EL15**
   (no on-device demo now, so these can't be auto-driven from firmware).
-- **Real ALIENTEK EL15** still untested in-house.
-- **SD card**: written but never run against a card. Check (a) the panel still
-  draws normally after a save — that path re-routes the shared SPI bus, (b)
-  `RTEST_NNN.CSV` appears and opens in a spreadsheet, (c) with no card in the
-  slot the button says "No card detected" rather than claiming a save.
+- **Real ALIENTEK EL15**: load control, all modes, and telemetry now VERIFIED on
+  hardware (§0, §10). Full R-test / capacity runs with real current still pending.
+- **SD card**: read+write verified on hardware via the test scaffolding (§12);
+  the **UI Save path is still untested** — run Settings ▸ SD ▸ Check card, then an
+  R-test/battery Save, and confirm `RTEST_NNN.CSV` opens in a spreadsheet and that
+  with no card the button honestly says "No card detected".
 - **Persistence / burn-in / NTP / Kelvin (this session):** all compile and the
   board boots clean, but none is confirmed working end-to-end. To verify:
   change brightness/volume/sample-rate → reboot → they stick; leave it idle and
@@ -218,12 +264,11 @@ line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
   done-callback calling `lv_disp_flush_ready`, restore double buffering. Roughly
   halves redraw cost. (User asked about Arduino vs IDF — conclusion: stay
   Arduino, drop to IDF APIs only here and for I²S if needed.)
-- ~~SD card save~~ **done** (Phase 0 of CAPACITY_PLAN): `sd_card.cpp` + `report.h`
-  write real `RTEST_NNN.CSV` / `BATT_NNN.CSV` files, and both Save buttons now
-  report the file name or the actual failure. **Untested on hardware** — needs a
-  card in the slot. Read the shared-bus note in `sd_card.cpp` before touching
-  either the panel or the card: pins are SPI SCK=11 MOSI=10 MISO=18 **CS=6**
-  (verified against Waveshare's `pin_config.h`).
+- ~~SD card save~~ **done + verified on hardware** (2026-07-24): rewritten onto
+  bit-banged software SPI via SdFat (§12) after the shared-bus scheme proved
+  impossible. `sd_card.cpp` + `report.h` write real `RTEST_NNN.CSV` /
+  `BATT_NNN.CSV`; read/write proven end-to-end. Only the UI Save button path
+  remains to be exercised.
 - ~~NVS persistence~~ **done** — `prefs.cpp` persists brightness, volume/mute,
   sample rate, screen-protection, R-test + battery setup, Wi-Fi creds and the
   last device; debounced commit from `loop()`, restored in `ui::begin()` before
@@ -313,5 +358,79 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
 - `FEATURE_IDEAS.md` — full feature/UX/audio/buttons backlog.
 - `UI_DESIGN_BRIEF.md` — v2 "Focus" UI spec.
 
-*Everything is committed and pushed. `backup/session-work-pre-merge` is a local
-safety branch at the pre-merge snapshot (`08f87b8`) — safe to delete.*
+---
+
+## 10. EL15 wire protocol on real hardware (2026-07-24)
+
+The protocol is confirmed against a real unit now, not just the simulator.
+
+- **Frame format:** `AF 07 03 <cmd> <len> <data…> <checksum>`. The checksum is the
+  byte that makes the whole frame sum to **0 mod 256** — the same rule the status
+  parser enforces on incoming packets. `el15_protocol.h frameChecksum()` computes
+  it; `LOAD_ON/OFF/LOCK` carry it baked in, `modeCommand()/setpointCommand()`
+  append it. Do NOT send a command without it — the device silently drops it.
+- **GATT:** service FFF0, notify FFF1 (`--wN-`), **command char FFF3 (`--w--`,
+  write-no-response ONLY)**. The per-connect dump logs this. `writeRaw` uses
+  no-response because that's all FFF3 offers.
+- **Telemetry is POLL-driven:** the device sends a status frame only in reply to a
+  POLL write; it does not free-run. (Proven by disabling polling — all telemetry
+  stopped.) So a working POLL is proof FFF3 writes land.
+- **Control writes must be paced** (see §0.3): ≥50 ms apart and clear of the poll,
+  or the device drops the one that arrives too soon. `writeRaw` enforces this.
+- **All 6 mode opcodes verified** on hardware (CC 01, CV 09, CR 11, CP 19,
+  CAP 02, DCR 0A) — commanded mode == device-reported `b5`.
+
+## 11. Poll-rate finding (2026-07-24)
+
+Swept 250→20 ms polling, comparing full 28-byte frames for fresh-vs-repeated:
+
+| poll | rx Hz | fresh Hz | % unique |
+|---|---|---|---|
+| 100 ms | 10.0 | 10.0 | 100% |
+| 75 ms | 13.1 | 12.9 | 97% |
+| **50 ms** | 19.7 | **17.4** | 88% |
+| 33 ms | 27.1 | 16.8 | 62% |
+| 20 ms | 40.8 | 16.6 | 40% |
+
+The EL15 produces **~17-19 fresh samples/s** (min ~23 ms between distinct frames).
+**50 ms (20 Hz) is the practical max** — it captures ~all the fresh data; faster
+just refetches repeats and floods the link (and a 20 ms flood once dropped the
+board off USB). **50 ms is now the default** (`prefs`, and the Settings chips are
+`20/10/4/2 Hz`). The NVS key was bumped `pollMs`→`pollMs20` so existing devices
+re-default cleanly.
+
+## 12. SD card — bit-banged software SPI (2026-07-24)
+
+**The C6 has ONE general-purpose SPI host and the AMOLED owns it in QSPI mode.**
+The old "share the bus via GPIO-matrix reroute" scheme (now deleted) never worked:
+the IDF `sdspi` driver can't transact on the panel's bus — card init dies at CMD59
+(`ESP_ERR_NOT_SUPPORTED`). So the card runs entirely in **software SPI** on its
+dedicated pins (SCK 11 / MOSI 10 / MISO 18 / CS 6), independent of SPI2 — a screen
+redraw and a card access no longer interfere at all.
+
+Implementation (`sd_card.cpp`, via **SdFat**):
+- A small custom `SdSpiBaseClass` driver (`SPI_DRIVER_SELECT=3`) that bit-bangs
+  with plain `digitalWrite/digitalRead` — their ~1 µs overhead gives an inherently
+  slow, reliable clock (~250 kHz). SdFat's built-in `SoftSpiDriver` uses fast
+  register GPIO that was too fast → 512-byte data-block writes corrupted.
+- **`USE_SD_CRC=1`** — the card enforces command CRCs; without real CRC7 SdFat
+  sends a fixed bogus byte and ACMD41 is rejected (`R1=0x08`). Also protects data.
+- **`SHARED_SPI`** (not DEDICATED) — a DEDICATED multi-block write was left
+  un-terminated over the link, failing the next file open. SHARED cycles CS per op.
+- **Mount once, stay mounted** + init retries — re-running card init over soft SPI
+  is flaky; the card is on dedicated pins so there's no reason to unmount.
+- `report.h` writes via SdFat's `Print` (`fpf()` printf helper), not `FILE*`.
+- Build flags: `SPI_DRIVER_SELECT=3`, `USE_SD_CRC=1`, lib `greiman/SdFat`.
+
+Verified end-to-end: mount → two writes with incrementing `SDTEST_NNN.CSV` →
+byte-correct readback (with real RTC timestamp) → card healthy. A **wedged card**
+(from an aborted write) reports CMD0 `R1=0x00` and only a **physical reseat /
+power-cycle** clears it — an ESP reset won't.
+
+**Still untested:** the actual UI Save path (Settings ▸ SD ▸ Check card, and the
+R-test/battery Save buttons) — exercise once. Delete the `SDTEST_00N.CSV` files
+left from testing.
+
+---
+
+*Everything is committed and merged to `main`.*
