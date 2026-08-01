@@ -20,13 +20,17 @@ measured, not merely compiled**: 0.5 A / 10 s, repeats agreeing to 0.18–0.9 %,
 with σ_R honest to within ~1.4× of the true run-to-run spread (§10).
 
 **Built but never run with real current:** the battery capacity test in every
-form — pause/resume, rated-capacity metrics, auto-save, the per-sample CSV — and
-the link guard against a genuine unattended drop.
+form — pause/resume, rated-capacity metrics, auto-save, the per-sample CSV, and
+now the charge-state time estimate and pack-resistance measurement — plus the
+link guard against a genuine unattended drop.
 
 **Highest-value work next, in order:**
 
 1. **Run a capacity test with real current.** Nothing about it has been. One
-   small protected cell with the cutoff set high is enough.
+   small protected cell with the cutoff set high is enough. Now also the only way
+   to check the charge-state time estimate: watch that the ETA settles within the
+   first ~10 % of charge travel, that `[batt] pack+lead resistance …` reports a
+   plausible figure, and that the countdown lands near zero at the actual cutoff.
 2. **Tap the SD Save buttons.** The path underneath is verified; the buttons
    themselves still never have been.
 3. **Finish the R-test sweep matrix** (duration 10/30/60 s × sample rate
@@ -41,6 +45,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-01 | **Capacity test: real time remaining + C-rate from pack size.** New `battery_model.h` (per-chemistry OCV-vs-charge curves, standard test C-rates). The ETA now measures pack internal resistance from the switch-on sag, reads charge state off the curve, learns the pack's capacity during the run, and counts down to the CUTOFF — so it works with no rated capacity and no longer assumes a full pack. Setup gained C-rate chips that set the current from the rated capacity. `CAPACITY_PLAN.md` §4b/§4c. **Compile-clean only — no capacity run has ever drawn real current.** |
 | 2026-08-01 | R-test rebuilt as a **continuous triangular sweep** with live graphs, replacing the stepped ladder — then four defects found by running it against real hardware (§9), and the ramp/sample timing tuned by measurement (§10). |
 | 2026-08-01 | **Capacity overhaul**: pause/resume, rated-capacity metrics (C-rate, ETA, state of health), auto-save, flash-buffered per-sample CSV. **SD/RTC**: FAT directory timestamps, re-init after eject. Screen-timeout options. Fixed a running test being torn down by the user's own scan (§7). |
 | 2026-08-01 | Documentation audit — every doc realigned with the code. |
@@ -129,7 +134,10 @@ el15_client.{h,cpp} BLE central (NimBLE 2.5): scan/connect/subscribe/poll/reasse
 el15_controller.h   El15Controller interface ONLY (demo simulator removed)
 resistance_test.h   fuse-aware CONTINUOUS current sweep — triangular ramp, live
                     incremental fit, slope uncertainty, 4-wire/tare correction
-capacity_test.h     battery discharge / capacity engine
+capacity_test.h     battery discharge / capacity engine — also measures pack
+                    internal resistance and estimates time-to-cutoff from charge state
+battery_model.h     per-chemistry OCV-vs-charge-state curves + standard test
+                    C-rates (header-only, pure); shared by the engine and the UI
 display.{h,cpp}     CO5300/SH8601 AMOLED (QSPI 80 MHz) + touch + LVGL + touch-snap
                     engine + PMIC/RTC read+set + buttons + sleep + burn-in shift/dim
 audio.{h,cpp}       ES8311 codec feedback (continuous-stream I2S tone synth)
@@ -238,6 +246,7 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 | **SD Save from the UI buttons** (now also automatic on completion) | ❌ never exercised |
 | **Capacity test with real current** — any part of it | ❌ never done |
 | **Pause/resume, rated-capacity metrics, running-test chip** | ❌ compile-clean, needs a real run |
+| **Charge-state time estimate, pack-resistance measurement, C-rate chips** | ❌ compile-clean, needs a real run — see §14 |
 | Link guard, crash recovery, brownout auto-off, load-safe power-off | ❌ never fired for real |
 | NVS persistence, burn-in shift/dim, NTP sync, Kelvin + tare | ❌ compile-clean only |
 
@@ -615,7 +624,45 @@ session's git history.
 
 ---
 
-## 13. Doc map — read in this order
+## 13. The capacity test's battery model (2026-08-01)
+
+`battery_model.h` holds a per-cell open-circuit-voltage curve for each chemistry
+plus the C-rates that chemistry is conventionally tested at. Two features hang
+off it; the full rationale is in `CAPACITY_PLAN.md` §4b/§4c. What matters here:
+
+- **The old ETA was wrong twice over** — it assumed the pack started full, and it
+  counted down to the *rating* when the *cutoff* is what ends the run. The new one
+  reads charge state off the curve and targets the cutoff.
+- **A loaded voltage cannot be looked up on a rested curve.** It must be referred
+  back through I·R first. R (pack + contacts + leads) is measured from the
+  switch-on sag against priming's open-circuit reading, over active discharge
+  seconds 1.5–5, sampled only while the load is regulating, with a 3-sample
+  quorum. Get this wrong and every charge figure is wrong: 2 A through 150 mΩ is
+  0.3 V, most of the gap between 40 % and 70 % on Li-ion.
+- **Use the same R at both ends.** The cutoff is compared against the *loaded*
+  voltage, so the charge state it corresponds to is the one at `cutoff + I·R`.
+  Because both the reading and the target carry the same R, lead resistance
+  shifts them together instead of biasing the time between them. Do not
+  "improve" one end without the other.
+- **Capacity is learned, not trusted.** After 10 % of charge travel,
+  `Q = Ah drawn / charge travelled`. That is what lets an ETA exist with no
+  rated capacity entered, and what stops the estimate depending on the curve's
+  absolute calibration. A nameplate rating only *bounds* the learned value
+  (0.05×…5×) — it never overrides it, because measuring how wrong the nameplate
+  is happens to be the point of the test.
+- **The filter is time-based, not per-sample.** The sample rate is a user setting
+  spanning 2–20 Hz; a fixed per-sample coefficient would make the charge-state
+  filter ten times slower at the bottom of that range.
+- **Fallbacks are labelled, never silent.** Custom chemistry has no curve, and a
+  run where R was never measurable never invents one. Both drop to the old
+  rated-capacity estimate and the UI says "(from the rating)".
+- **The curves are per family, not per cell.** Every charge figure in the UI is
+  prefixed "~" for that reason. LiFePO4's plateau spans ~150 mV from 20 % to
+  90 %, so its charge readout is coarse until the knee — the learned-capacity
+  term carries it there. Do not present any of this as a measured state of
+  charge.
+
+## 14. Doc map — read in this order
 
 New to the tree? `README.md` (what it is and how to build) → this file §0/§3/§7
 (state, hardware facts, gotchas) → `FIRST_CONTACT.md` (what to do at the bench).

@@ -13,6 +13,7 @@
 #include <lvgl.h>
 
 #include "audio.h"
+#include "battery_model.h"
 #include "display.h"
 #include "prefs.h"
 #include <math.h>
@@ -271,14 +272,13 @@ static char wifiNames[WIFI_MAX][33];
 static int wifiCount = 0;
 static lv_obj_t *setVolVal, *setMuteBtn, *setMuteLbl;
 // ---- Battery capacity test state ---------------------------------------------
-struct BattChem { const char *name; float nom, full, cut; int maxCells; };
-static const BattChem BATT_CHEMS[5] = {
-    {"Li-ion", 3.7f, 4.2f, 3.0f, 14},
-    {"LiFePO4", 3.2f, 3.65f, 2.5f, 16},
-    {"Lead-acid", 2.0f, 2.13f, 1.75f, 24},   // per 2 V cell; 24 = 48 V bank
-    {"NiMH", 1.2f, 1.4f, 1.0f, 40},
-    {"Custom", 0, 0, 0, 0},
-};
+// Chemistry data (per-cell voltages, discharge curve, standard test C-rates)
+// lives in battery_model.h so the engine and the UI cannot drift apart: the
+// engine reads the same curve to estimate time remaining that this screen reads
+// to suggest a cell count and a discharge current.
+using BattChem = battmodel::Chem;
+static const BattChem *const BATT_CHEMS = battmodel::CHEMS;
+static const int BATT_CHEM_N = battmodel::CHEM_N;
 static int battChem = 0, battCells = 3;
 static float battCutoff = 9.0f;          // = cells x per-cell cutoff, or custom
 static bool battCutoffCustom = false;
@@ -286,9 +286,16 @@ static float battAmps = 1.0f;
 enum BattPhase { BT_IDLE, BT_RUN, BT_REST, BT_RESULT };
 static BattPhase btPhase = BT_IDLE;
 static CapacityTest::Result lastBatt;
-// Nameplate capacity in Ah (0 = not entered). Drives the C-rate hint, the
-// time-remaining estimate while discharging and the state-of-health result row.
+// Nameplate capacity in Ah (0 = not entered). Drives the C-rate chips, the
+// state-of-health result row, and the fallback time estimate for chemistries
+// with no discharge curve.
 static float battRatedAh = 0;
+// Selected test C-rate as an index into the chemistry's cRate[] presets, or -1
+// when the user typed a current by hand. While a rate is selected the current
+// FOLLOWS the pack size — enter 3000 mAh at 0.2C and the controller works out
+// 0.60 A — which is the way a datasheet specifies a capacity test. Typing a
+// current directly drops back to -1 and the chips go quiet.
+static int battCRateIdx = -1;
 // Mirrors the engine's paused state so the chrome and the run card can show it
 // without asking the engine on every redraw.
 static bool battPausedFlag = false;
@@ -319,15 +326,18 @@ static uint32_t btLastElapsed = 0;
 static lv_obj_t *btIdleBox, *btRunBox, *btResultBox, *btChartCard;
 static lv_obj_t *btChemVal, *btCellsVal, *btVocLbl, *btCutoffVal, *btAmpsVal, *btStartBtn, *btStartLbl, *btStatusLbl;
 static lv_obj_t *btRatedVal, *btRateHint;
+static lv_obj_t *btCRateChip[battmodel::CRATE_N], *btCRateChipLbl[battmodel::CRATE_N];
 static lv_obj_t *btPhaseLbl, *btElapsedLbl, *btVLbl, *btCutSub, *btILbl, *btAhLbl, *btWhLbl, *btTempLbl;
 static lv_obj_t *btEtaLbl, *btPauseCard, *btPauseWhyLbl, *btResumeBtn;
 static lv_obj_t *btChart, *btChartYLbl, *btChartXLbl;
 static lv_chart_series_t *btSer;
 static lv_obj_t *btAhBig, *btWhSub, *btSaveBtn, *btSaveLbl;
-// Result rows. The last three only appear when a rated capacity was entered.
-static const int BR_N = 14;
+// Result rows. BR_RATED..BR_CRATE only appear when a rated capacity was entered;
+// BR_IR..BR_IMPLIED only when the battery model established itself during the run.
+static const int BR_N = 17;
 enum { BR_DUR, BR_REASON, BR_STARTV, BR_ENDV, BR_REBOUND, BR_AVGV, BR_AVGI,
-       BR_TEMP, BR_CUTOFF, BR_CURRENT, BR_PAUSED, BR_RATED, BR_SOH, BR_CRATE };
+       BR_TEMP, BR_CUTOFF, BR_CURRENT, BR_PAUSED, BR_RATED, BR_SOH, BR_CRATE,
+       BR_IR, BR_SOCSPAN, BR_IMPLIED };
 static lv_obj_t *brVal[BR_N], *brRow[BR_N];
 
 static int pollMs = 50;  // status sampling interval, mirrored to BLE + R-test
@@ -810,7 +820,7 @@ static void buildLoadBar() {
     if (isBatt()) {
       if (battCutoff <= 0.05f || battAmps <= 0.005f) return;
       if (!connected) { showScreen(SCR_CONNECT); return; }
-      if (A.startBatt) { A.startBatt(battCutoff, battAmps, battRatedAh); enterBattRun(); }
+      if (A.startBatt) { A.startBatt(battCutoff, battAmps, battRatedAh, battChem, battCells); enterBattRun(); }
       return;
     }
     // The warning gate blocks only turning the load ON: with a protection
@@ -1427,6 +1437,7 @@ static void persistSetup() {
     d.battCutoffCustom = battCutoffCustom;
     d.battAmps = battAmps;
     d.battRatedMah = battRatedAh * 1000.0f;
+    d.battCRateIdx = (int8_t)battCRateIdx;
   });
 }
 
@@ -2170,6 +2181,31 @@ static void battHistReset() {
   btFiltInit = false; btRangeInit = false;
 }
 
+// The EL15's own envelope applied to a requested discharge current. Voc comes
+// from the live reading when something is connected; with nothing connected only
+// the 12 A ceiling can be applied here. The engine re-clamps against the real
+// source voltage at priming either way — this is about the setup screen telling
+// the truth before the user commits, rather than promising a current the load
+// will quietly refuse.
+static float clampBattAmps(float a) {
+  if (a < 0.01f) a = 0.01f;
+  float cap = el15::MAX_CURRENT_A;
+  if (connected && lastStatus.valid && lastStatus.voltage > el15::MIN_VOLTAGE_V)
+    cap = LV_MIN(cap, el15::MAX_POWER_W / lastStatus.voltage);
+  return a > cap ? cap : a;
+}
+
+// Work the discharge current out from the selected C-rate and the pack's rated
+// capacity: 0.2C of a 3000 mAh pack is 0.60 A. This is the direction a datasheet
+// specifies a capacity test in — a capacity figure only means something at a
+// stated rate — so the controller does the arithmetic rather than the user.
+// No-ops when no rate is selected (the user typed a current by hand) or no
+// rating has been entered.
+static void applyCRate() {
+  if (battCRateIdx < 0 || battCRateIdx >= battmodel::CRATE_N || battRatedAh <= 0) return;
+  battAmps = clampBattAmps(BATT_CHEMS[battChem].cRate[battCRateIdx] * battRatedAh);
+}
+
 static void battHistPush(float v) {
   // Light EMA first: the raw load-ADC voltage carries a few mV of noise that
   // otherwise shows as squiggle. The discharge is slow, so the lag is trivial.
@@ -2250,19 +2286,49 @@ static void refreshBatt() {
     else snprintf(b, sizeof(b), "not set");
     lv_label_set_text(btRatedVal, b);
     lv_obj_set_style_text_color(btRatedVal, battRatedAh > 0 ? COL_ACCENT2 : COL_FAINT, 0);
-    // With a rating we can state the plan in the terms a battery datasheet uses
-    // (C-rate + expected runtime); without one, say exactly what is lost.
-    char hint[192];
-    if (battRatedAh > 0 && battAmps > 0.005f) {
+    // C-rate chips. Live only once a rating is known, since a C-rate without a
+    // capacity to multiply is meaningless.
+    bool rated = battRatedAh > 0;
+    for (int i = 0; i < battmodel::CRATE_N; i++) {
+      char cb[24];   // %g is worst-case wide; the real values render as "0.05C"
+      snprintf(cb, sizeof(cb), "%gC", c.cRate[i]);
+      lv_label_set_text(btCRateChipLbl[i], cb);
+      bool on = rated && battCRateIdx == i;
+      lv_obj_set_style_bg_color(btCRateChip[i], on ? lv_color_hex(0x1d1b33) : COL_INSET, 0);
+      lv_obj_set_style_border_color(btCRateChip[i], on ? COL_ACCENT : COL_BORDER, 0);
+      lv_obj_set_style_text_color(btCRateChipLbl[i],
+                                  on ? COL_ACCENT2 : rated ? COL_MUTED : COL_FAINT, 0);
+    }
+    // State the plan in the terms a battery datasheet uses (C-rate + expected
+    // runtime); without a rating, say exactly what is lost — which since the
+    // discharge-curve estimate landed is only the C-rate and state of health,
+    // not the time remaining.
+    char hint[224];
+    int n = 0;
+    bool curve = battmodel::hasCurve(battChem);
+    if (rated && battAmps > 0.005f) {
       float cRate = battAmps / battRatedAh;
       float hrs = battRatedAh / battAmps;
-      snprintf(hint, sizeof(hint), "%.2fC - a healthy pack should last about %dh %02dm. "
-               "Enables time-remaining and state-of-health.",
-               cRate, (int)hrs, (int)((hrs - (int)hrs) * 60));
+      n = snprintf(hint, sizeof(hint), "%.2fC - a healthy pack should last about %dh %02dm.",
+                   cRate, (int)hrs, (int)((hrs - (int)hrs) * 60));
+      // Say so when the load's envelope, not the chosen rate, is setting the
+      // current — otherwise the chip reads as selected while the test runs slower.
+      if (battCRateIdx >= 0) {
+        float want = c.cRate[battCRateIdx] * battRatedAh;
+        if (want > battAmps * 1.02f && n < (int)sizeof(hint))
+          n += snprintf(hint + n, sizeof(hint) - n,
+                        " Capped from %.2f A by the load's 150 W / 12 A envelope.", want);
+      }
+    } else if (rated) {
+      n = snprintf(hint, sizeof(hint), "Pick a test rate above to set the discharge current.");
     } else {
-      snprintf(hint, sizeof(hint), "Optional. Enter the pack's rated mAh to get C-rate, "
-               "time remaining and a state-of-health figure.");
+      n = snprintf(hint, sizeof(hint),
+                   "Optional. Enter the pack's rated mAh to set the current from a C-rate "
+                   "and get a state-of-health figure.");
     }
+    if (!curve && n < (int)sizeof(hint))
+      snprintf(hint + n, sizeof(hint) - n,
+               " Custom has no discharge curve, so time remaining falls back to the rating.");
     lv_label_set_text(btRateHint, hint);
     bool valid = battCutoff > 0.05f && battAmps > 0.005f;
     lv_obj_set_style_bg_color(btStartBtn, valid ? COL_ACCENT : lv_color_hex(0x161d26), 0);
@@ -2357,11 +2423,15 @@ static void buildBatt() {
     lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, nullptr);
   };
   bRow(setupCard, "Chemistry - tap to cycle", &btChemVal, [](lv_event_t *) {
-    battChem = (battChem + 1) % 5;
+    battChem = (battChem + 1) % BATT_CHEM_N;
     const BattChem &c = BATT_CHEMS[battChem];
     if (c.maxCells && battCells > c.maxCells) battCells = c.maxCells;
     battCutoffCustom = false;
     if (c.maxCells) battCutoff = c.cut * battCells;
+    // The preset rates are per chemistry (lead-acid is rated at the C20 hour
+    // rate, the lithium chemistries at 0.2C), so a selected chip means a
+    // different current here than it did a moment ago.
+    applyCRate();
     refreshBatt();
   });
   // cells -/+ row
@@ -2406,6 +2476,30 @@ static void buildBatt() {
   // state of health) is simply hidden when it is left at 0, so the test never
   // pretends to know a pack's rating.
   bRow(setupCard, "Rated capacity (mAh) - optional", &btRatedVal, [](lv_event_t *) { openKeypad(6); });
+  // C-rate chips: the discharge current is worked out FROM the pack size rather
+  // than typed. Greyed out until a rating is entered, and dropped the moment the
+  // user types a current by hand.
+  lbl(setupCard, "Test rate - tap to set the current", COL_MUTED, F12);
+  lv_obj_t *crRow = cont(setupCard);
+  lv_obj_set_size(crRow, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(crRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(crRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(crRow, 6, 0);
+  lv_obj_set_style_pad_ver(crRow, 4, 0);
+  for (int i = 0; i < battmodel::CRATE_N; i++) {
+    btCRateChip[i] = flatBtn(crRow);
+    lv_obj_set_flex_grow(btCRateChip[i], 1);
+    lv_obj_set_height(btCRateChip[i], 34);
+    styleCard(btCRateChip[i], COL_INSET, COL_BORDER, 9, 0);
+    btCRateChipLbl[i] = lbl(btCRateChip[i], "", COL_MUTED, F14);
+    lv_obj_center(btCRateChipLbl[i]);
+    lv_obj_add_event_cb(btCRateChip[i], [](lv_event_t *e) {
+      if (engineBusy() || battRatedAh <= 0) return;
+      battCRateIdx = (int)(intptr_t)lv_event_get_user_data(e);
+      applyCRate();
+      refreshBatt();
+    }, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+  }
   btRateHint = lbl(setupCard, "", COL_FAINT, F12);
   lv_label_set_long_mode(btRateHint, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(btRateHint, LV_PCT(100));
@@ -2419,7 +2513,7 @@ static void buildBatt() {
     if (engineBusy()) return;
     if (battCutoff <= 0.05f || battAmps <= 0.005f) return;
     if (!connected) { showScreen(SCR_CONNECT); return; }
-    if (A.startBatt) { A.startBatt(battCutoff, battAmps, battRatedAh); enterBattRun(); }
+    if (A.startBatt) { A.startBatt(battCutoff, battAmps, battRatedAh, battChem, battCells); enterBattRun(); }
   }, LV_EVENT_CLICKED, nullptr);
 
   // ---- discharge curve (shared by running + result) ----
@@ -2553,7 +2647,8 @@ static void buildBatt() {
       "Duration", "Stop reason", "Start voltage", "End voltage (loaded)",
       "Rebound (rested)", "Average voltage", "Average current", "Temp range",
       "Cutoff", "Discharge current", "Paused for",
-      "Rated capacity", "State of health", "Discharge rate"};
+      "Rated capacity", "State of health", "Discharge rate",
+      "Pack + lead resistance", "Charge used", "Implied full capacity"};
   for (int i = 0; i < BR_N; i++) {
     brVal[i] = kvRow(rowsCard, BR_KEYS[i]);
     brRow[i] = lv_obj_get_parent(brVal[i]);
@@ -2709,10 +2804,20 @@ static void kpSet() {
   if (kpTarget == 1) { if (!engineBusy()) { setpoint = v; if (A.setSetpoint) A.setSetpoint(v); } refreshAdjust(); refreshMonitor(); }
   else if (kpTarget == 3) { estWireLen = v < 0 ? 0 : v > 100 ? 100 : v; refreshRtest(); }
   else if (kpTarget == 4) { if (!engineBusy()) { battCutoff = v < 0.1f ? 0.1f : v > 60 ? 60 : v; battCutoffCustom = true; } refreshBatt(); refreshMonitor(); }
-  else if (kpTarget == 5) { if (!engineBusy()) { battAmps = v < 0.01f ? 0.01f : v > 12 ? 12 : v; } refreshBatt(); }
+  // A current typed by hand overrides the C-rate chips — the user has said what
+  // they want in amps, so the current must stop chasing the rated capacity.
+  else if (kpTarget == 5) { if (!engineBusy()) { battAmps = v < 0.01f ? 0.01f : v > 12 ? 12 : v; battCRateIdx = -1; } refreshBatt(); }
   // Rated capacity in mAh, stored in Ah. 0 clears it (metrics go back to hidden);
-  // capped at 999 Ah, well past anything a 12 A load will ever finish.
-  else if (kpTarget == 6) { if (!engineBusy()) { battRatedAh = v <= 0 ? 0 : (v > 999000 ? 999.0f : v / 1000.0f); } refreshBatt(); }
+  // capped at 999 Ah, well past anything a 12 A load will ever finish. Telling
+  // the controller the pack's size is all it needs to work the test current out,
+  // so a selected rate is re-applied against the new capacity immediately.
+  else if (kpTarget == 6) {
+    if (!engineBusy()) {
+      battRatedAh = v <= 0 ? 0 : (v > 999000 ? 999.0f : v / 1000.0f);
+      applyCRate();
+    }
+    refreshBatt();
+  }
   // Sweep shape. Clamped to the EL15's own 12 A ceiling here; the engine applies
   // the fuse/power caps too, once it knows the source voltage.
   else if (kpTarget == 7) { if (!engineBusy()) rtStartA = v < 0 ? 0 : (v > 12 ? 12 : v); refreshRtest(); }
@@ -3675,7 +3780,7 @@ void onBattProgress(float v, float i, float ah, float wh, float temp, uint32_t e
   setTextIf(btPhaseLbl, phase == 3 ? "PAUSED - load off"
                         : phase == 2 ? "RESTING - load off" : "DISCHARGING");
   lv_obj_set_style_text_color(btPhaseLbl, phase == 3 ? COL_AMBER : COL_ACCENT, 0);
-  char b[96];
+  char b[160];   // the charge/ETA/progress line is the long one
   char el[16];
   hhmmss((int)elapsedS, el, sizeof(el));
   setTextIf(btElapsedLbl, el);
@@ -3685,20 +3790,26 @@ void onBattProgress(float v, float i, float ah, float wh, float temp, uint32_t e
   snprintf(b, sizeof(b), "%.1f Wh", wh); setTextIf(btWhLbl, b);
   snprintf(b, sizeof(b), "%.1f\xC2\xB0" "C", temp); setTextIf(btTempLbl, b);
 
-  // Progress against the nameplate rating: how much of it has come out, and how
-  // long the rest should take at the present current. Suppressed without a
-  // rating — an ETA with no reference to measure against would be invented.
-  if (battRatedAh > 0) {
-    float pct = ah / battRatedAh * 100.0f;
-    uint32_t left = (phase == 1 && A.battRemainingS) ? A.battRemainingS() : 0;
+  // Where the run stands: state of charge read off the chemistry's discharge
+  // curve, the time left before the CUTOFF (not before the rating — the cutoff
+  // is what actually ends the test), and progress against the nameplate when one
+  // was entered. Each part is shown only when it is actually known, and the SoC
+  // carries a "~" because a curve for the family is not a curve for your cell.
+  float socPct = (phase == 1 && A.battSocPct) ? A.battSocPct() : -1;
+  uint32_t left = (phase == 1 && A.battRemainingS) ? A.battRemainingS() : 0;
+  bool fromCurve = A.battEtaFromCurve && A.battEtaFromCurve();
+  if (socPct >= 0 || left > 0 || battRatedAh > 0) {
+    int n = 0;
+    if (socPct >= 0) n += snprintf(b + n, sizeof(b) - n, "~%.0f%% charge left", socPct);
     if (left > 0) {
       char rem[16];
       hhmmss((int)left, rem, sizeof(rem));
-      snprintf(b, sizeof(b), "%.0f%% of %.0f mAh drawn  -  approx %s left",
-               pct, battRatedAh * 1000.0f, rem);
-    } else {
-      snprintf(b, sizeof(b), "%.0f%% of %.0f mAh drawn", pct, battRatedAh * 1000.0f);
+      n += snprintf(b + n, sizeof(b) - n, "%sapprox %s to cutoff%s",
+                    n ? "  -  " : "", rem, fromCurve ? "" : " (from the rating)");
     }
+    if (battRatedAh > 0 && n < (int)sizeof(b))
+      snprintf(b + n, sizeof(b) - n, "%s%.0f%% of %.0f mAh drawn",
+               n ? "\n" : "", ah / battRatedAh * 100.0f, battRatedAh * 1000.0f);
     setTextIf(btEtaLbl, b);
     lv_obj_clear_flag(btEtaLbl, LV_OBJ_FLAG_HIDDEN);
   } else {
@@ -3768,6 +3879,33 @@ void onBattComplete(const CapacityTest::Result &r) {
         r.sohPct >= 80 ? COL_GREEN : r.sohPct >= 60 ? COL_AMBER : COL_RED, 0);
     snprintf(b, sizeof(b), "%.2fC", r.cRate); lv_label_set_text(brVal[BR_CRATE], b);
   }
+  // Battery-model rows, each shown only if the run actually established it.
+  if (r.internalResistanceOhm > 0) {
+    fmtOhm(b, sizeof(b), r.internalResistanceOhm);   // ASCII "mohm" — Montserrat has no omega
+    lv_label_set_text(brVal[BR_IR], b);
+    lv_obj_clear_flag(brRow[BR_IR], LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(brRow[BR_IR], LV_OBJ_FLAG_HIDDEN);
+  }
+  // The span of charge the run covered. A partial discharge is exactly when the
+  // headline Ah understates the pack, so say so rather than let the state-of-
+  // health row be read as a verdict on a run that started at 60 %.
+  if (r.startSocPct >= 0 && r.endSocPct >= 0) {
+    snprintf(b, sizeof(b), "~%.0f%% -> ~%.0f%%", r.startSocPct, r.endSocPct);
+    lv_label_set_text(brVal[BR_SOCSPAN], b);
+    lv_obj_set_style_text_color(brVal[BR_SOCSPAN],
+        r.startSocPct >= 90 ? COL_ACCENT2 : COL_AMBER, 0);
+    lv_obj_clear_flag(brRow[BR_SOCSPAN], LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(brRow[BR_SOCSPAN], LV_OBJ_FLAG_HIDDEN);
+  }
+  if (r.impliedFullAh > 0) {
+    snprintf(b, sizeof(b), "~%.0f mAh", r.impliedFullAh * 1000.0f);
+    lv_label_set_text(brVal[BR_IMPLIED], b);
+    lv_obj_clear_flag(brRow[BR_IMPLIED], LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(brRow[BR_IMPLIED], LV_OBJ_FLAG_HIDDEN);
+  }
   battChartRefresh();
   refreshBatt();
   showScreen(SCR_BATT);
@@ -3805,6 +3943,7 @@ void begin(const UiActions &actions) {
   battCutoffCustom = p.battCutoffCustom;
   battAmps = p.battAmps;
   battRatedAh = p.battRatedMah / 1000.0f;
+  battCRateIdx = p.battCRateIdx >= battmodel::CRATE_N ? -1 : p.battCRateIdx;
   if (A.setPollRate) A.setPollRate(pollMs);
 
   scrRoot = lv_scr_act();

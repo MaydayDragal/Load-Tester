@@ -44,12 +44,12 @@ lifting; several of these are small deltas on existing code.
 |---|---|---|
 | **Solar panel I-V + max-power-point curve** | **S** | The R-test *already* sweeps current and records V/I. Plot P = V·I, mark the peak → Vmp/Imp/Pmax/fill factor. Highest value-per-line-of-code in this list. |
 | **PSU / charger characterisation** | M | Load-regulation curve, current-limit discovery, OCP/OVP trip point, drop-out behaviour. Same sweep engine, different reporting. |
-| **Battery internal resistance (pulse IR)** | S–M | Distinct from the circuit R-test: short high-current pulse, measure ΔV/ΔI. The industry-standard cell-health number. |
+| **Battery internal resistance (pulse IR)** | S–M | Distinct from the circuit R-test: short high-current pulse, measure ΔV/ΔI. The industry-standard cell-health number. **Partly landed:** the capacity test already measures pack+lead resistance from its switch-on sag (one step, at the discharge current) and reports it. A dedicated pulse test would give a cleaner number at a defined pulse current, and would not need a full discharge to get it. |
 | **Peukert exponent / capacity vs C-rate** | M | Run capacity tests at 2–3 currents, fit the exponent. Tells you real runtime at any load. |
 | **State-of-health tracking** | S | ~~Compare measured Ah to rated Ah~~ **done** (result row + CSV, from the optional rated-capacity input). What is left is *trending* it across saved tests per battery ID, which needs on-device history. |
 | **Parasitic-draw / standby test** | S | Very low current, very long duration, high-resolution Ah. Mostly a UI preset over the capacity engine. |
 | **Step / pulse / profile discharge** | M | Programmable sequence (e.g. 1 A 30 s → 5 A 10 s, repeat). Simulates real loads. Engine hook exists in the capacity plan. |
-| **Runtime-to-cutoff prediction** | S | Extrapolate from a partial discharge instead of running it to empty. |
+| **Runtime-to-cutoff prediction** | S | Extrapolate from a partial discharge instead of running it to empty. **Half done:** the live estimate already predicts time-to-cutoff from charge state, and the result reports an implied full capacity from a partial run. What is missing is the *deliberate* version — stop early on purpose and report the extrapolation as the headline result. |
 | **Supercapacitor capacity** | S | Capacity engine with a different integration window. |
 | **LED / diode I-V characterisation** | S | Sweep in low-current CC, plot forward curve. |
 | **Wire ampacity / thermal derating** | M | Ramp current, watch temperature rise, stop at a limit. |
@@ -169,7 +169,7 @@ Small screen, so every pixel should carry information.
 | **Min / max / avg capture with hold** | S | Live statistics on the Monitor, resettable. Standard DMM behaviour that's missing here. |
 | **Delta (relative) mode** | S | Zero the reading, show change from that point. Invaluable for finding a bad connection by wiggling it. |
 | **Trend arrows on slow-moving values** | S | Temperature and voltage drift direction at a glance. |
-| ~~Time-remaining estimate during capacity tests~~ | **done** | Enter the pack's rated mAh and the run screen shows "% of rated drawn" plus an ETA to the rating at the present current; the result adds state of health and C-rate. |
+| ~~Time-remaining estimate during capacity tests~~ | **done** | The run screen shows "~N% charge left" and an ETA **to the cutoff**, read off the chemistry's discharge curve with the pack's internal resistance measured from the switch-on sag and its capacity learned during the run — so it needs no rated capacity and does not assume the pack started full. With a rating it also shows "% of rated drawn"; the result adds state of health, C-rate, pack resistance, the charge span covered and an implied full capacity. `battery_model.h` + `CAPACITY_PLAN.md` §4c. |
 | **Tappable telemetry bar** | S | Cycle the bar's contents (W/fan/temp/runtime → Wh/Ah/mΩ/cell-V) instead of it being fixed. |
 
 ## 10. Screen structure

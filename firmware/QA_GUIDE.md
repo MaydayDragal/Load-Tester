@@ -125,7 +125,8 @@ firmware/src/
   el15_client.{h,cpp} BLE central: scan/connect/subscribe/poll/reassemble/pace
   el15_controller.h   El15Controller interface ONLY (no on-device simulator)
   resistance_test.h   fuse-aware bidirectional sweep engine + slope uncertainty
-  capacity_test.h     battery discharge / capacity engine
+  capacity_test.h     battery discharge / capacity engine (+ SoC-based ETA)
+  battery_model.h     chemistry OCV-vs-charge curves + standard test C-rates
   display.{h,cpp}     panel + touch + LVGL + PMIC/RTC + buttons + sleep + burn-in
   audio.{h,cpp}       ES8311 tone feedback (continuous-stream I2S task, prio 8)
   es8311.{c,h}        vendored codec driver
@@ -282,18 +283,47 @@ window and no collect window.
   Lead-acid 2.0/2.13/1.75 per 2 V cell · NiMH 1.2/1.4/1.0 · Custom), cell count
   −/+ with per-chemistry max (14/16/24/40 S), auto-filled cutoff (= cells ×
   per-cell cutoff, editable), discharge current, **optional rated capacity
-  (mAh)**, **Start**. With a rating entered the hint line states the C-rate and
-  the runtime a healthy pack should manage.
+  (mAh)**, a **C-rate chip row**, **Start**. With a rating entered the hint line
+  states the C-rate and the runtime a healthy pack should manage.
+- **C-rate → current:** the four chips carry the chemistry's own conventional
+  rates (lead-acid 0.05/0.1/0.2/0.5C — it is rated at the C20 hour rate; every
+  other chemistry 0.1/0.2/0.5/1C). Tapping one sets the discharge current to
+  `C × rated capacity`, clamped to the load's 12 A / 150 W envelope (the hint
+  says so when it clamps). Entering a rating re-applies the selected chip, so
+  telling the controller the pack size is enough to get a current. Typing a
+  current by hand deselects the chips until one is tapped again.
+  *Test:* rating 3000 mAh + 0.2C → 0.60 A; switch to Lead-acid and the same chip
+  index becomes 0.1C → 0.30 A; type 1.5 A and the chips go quiet.
 - **Running:** elapsed, hero V, I, Ah, Wh, temp, live discharge curve (fixed
-  time frame, smoothing, stepped auto-zoom Y scale), **STOP**. With a rating:
-  "% of rated drawn" plus an estimated time remaining.
+  time frame, smoothing, stepped auto-zoom Y scale), **STOP**, plus a
+  charge/time line: **"~62% charge left - approx 1:04:20 to cutoff"**, and
+  "% of rated drawn" when a rating was entered.
+- **Time remaining** comes from the chemistry's discharge curve
+  (`battery_model.h`), not from the rating: the pack's internal resistance is
+  measured from the switch-on sag, every later reading is referred back through
+  it to an open-circuit voltage, and state of charge is read off the curve. The
+  pack's real capacity is then learned from Ah drawn per unit of charge state
+  travelled, so **an estimate appears with no rating entered at all**, and it
+  targets the cutoff rather than the rating. Custom chemistry has no curve and
+  falls back to the old rated-capacity estimate, which the UI labels
+  "(from the rating)".
+  *Test:* start a discharge on a part-charged pack with NO rating entered — the
+  ETA should appear a few seconds in (once R is measured) and settle within the
+  first ~10 % of charge travel. Serial prints `[batt] pack+lead resistance … ;
+  cutoff is ~N% SoC` and `[batt] start of charge ~N%`. Expect the SoC figure to
+  be *approximate*, especially on the LiFePO4 plateau.
 - **Paused:** an amber card gives the reason (controller battery critical, BLE
   link lost) and a **RESUME** button. The load is off and the clock is stopped,
   but nothing is discarded.
 - **Result:** Ah/mAh, Wh, duration, start/end/rebound V, avg V/I, temp range,
   stop reason, "Paused for" (only if it happened), and — with a rating —
   rated capacity, **state of health** (green ≥80 %, amber ≥60 %, red below) and
-  C-rate. **Saved to SD automatically**; the button is the retry.
+  C-rate. When the battery model established itself the result also carries
+  **pack + lead resistance**, the **charge span the run covered**
+  ("~94% → ~4%", amber when it did not start near full — a partial discharge is
+  exactly when the measured Ah understates the pack), and an **implied full
+  capacity** extrapolated from that span. **Saved to SD automatically**; the
+  button is the retry.
 - *Test the pause path:* start a discharge, then pull the EL15's power (or walk
   out of range). Expect PAUSED + a reason, not a finished test; restore the link
   and tap RESUME; confirm Ah continues from where it was rather than restarting.

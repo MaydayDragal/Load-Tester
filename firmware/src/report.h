@@ -133,6 +133,21 @@ inline bool saveBatt(const CapacityTest::Result &r, char *msg, size_t msgLen) {
       fpf(f, "state_of_health,%.1f,%%\n", r.sohPct);
       fpf(f, "discharge_rate,%.3f,C\n", r.cRate);
     }
+    // Battery-model figures (see battery_model.h). Written only when the run
+    // established them — a chemistry with no discharge curve produces none, and
+    // an invented zero would read as a measurement.
+    if (r.internalResistanceOhm > 0)
+      fpf(f, "internal_resistance,%.5f,ohm\n", r.internalResistanceOhm);
+    if (r.startSocPct >= 0) {
+      fpf(f, "start_state_of_charge,%.1f,%%\n", r.startSocPct);
+      fpf(f, "end_state_of_charge,%.1f,%%\n", r.endSocPct);
+    }
+    // Full-pack capacity implied by Ah drawn per unit of charge state travelled.
+    // Unlike `capacity` above this remains meaningful for a partial discharge.
+    if (r.impliedFullAh > 0) {
+      fpf(f, "implied_full_capacity,%.4f,Ah\n", r.impliedFullAh);
+      fpf(f, "implied_full_capacity_mah,%.1f,mAh\n", r.impliedFullAh * 1000.0f);
+    }
 
     // ---- Per-sample datapoints ----------------------------------------------
     // Streamed straight out of the flash log written during the run, one CSV row

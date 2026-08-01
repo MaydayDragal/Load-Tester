@@ -25,7 +25,7 @@ and runs its own resistance-sweep and battery-capacity test engines.
 | **Graph** | Live two-series auto-scaling V/I chart |
 | **Modes** | CC / CV / CR / CP / CAP / DCR, plus **RT** and **BATT** UI-only pseudo-modes |
 | **R-Test** | Fuse-aware **continuous current sweep** — a smooth triangular ramp (start → max → start) over an editable duration, fitting every reading. Live V / I / resistance graphs while it runs; result gives series resistance with a real **± uncertainty**, Voc, R², est. short-circuit current, sag, peak power, temp range, max fan; 2-wire/4-wire (Kelvin) with a shorted-probe **tare**; circuit-resistance estimator (wire mm²/length, connections, fuse type). See [`RTEST_ACCURACY.md`](RTEST_ACCURACY.md) |
-| **Battery capacity** | Chemistry presets, cell count with Voc auto-suggest, auto cutoff, CC discharge with local Ah/Wh integration, debounced cutoff + safety caps, rest/rebound, live discharge curve. See [`CAPACITY_PLAN.md`](CAPACITY_PLAN.md) |
+| **Battery capacity** | Chemistry presets, cell count with Voc auto-suggest, auto cutoff, **C-rate chips that set the test current from the pack's rated capacity**, CC discharge with local Ah/Wh integration, debounced cutoff + safety caps, rest/rebound, live discharge curve, and a **time-to-cutoff estimate read off the chemistry's discharge curve** (pack internal resistance measured from the switch-on sag, capacity learned during the run — no nameplate rating required). See [`CAPACITY_PLAN.md`](CAPACITY_PLAN.md) |
 | **Reports** | Real `RTEST_NNN.CSV` / `BATT_NNN.CSV` written to microSD, with an RTC timestamp when the clock has been set |
 | **Settings** | Sample rate · connection/auto-connect · brightness · volume + mute · screen protection · clock (Wi-Fi NTP) · SD card check · battery · system info · restart |
 | **Safety** | BOOT-button hardware e-stop · link-loss auto-stop supervisor · crash/reboot recovery · controller-brownout auto-off · load-safe power-off · engine mutual exclusion |
@@ -53,7 +53,8 @@ el15_client.{h,cpp} BLE central (NimBLE 2.5): scan/connect/subscribe/poll/reasse
 el15_controller.h   El15Controller interface (the engines talk to this, not to BLE)
 resistance_test.h   fuse-aware continuous sweep engine — triangular current ramp,
                     incremental (live) least-squares fit, uncertainty, tare
-capacity_test.h     battery discharge / capacity engine
+capacity_test.h     battery discharge / capacity engine (+ pack IR & charge-state ETA)
+battery_model.h     chemistry OCV curves + standard test C-rates (header-only, pure)
 display.{h,cpp}     CO5300/SH8601 AMOLED (QSPI 80 MHz) + touch + LVGL + touch-snap
                     + PMIC/RTC read+set + buttons + sleep + burn-in shift/dim
 audio.{h,cpp}       ES8311 codec feedback (continuous-stream I2S tone synth)

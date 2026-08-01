@@ -15,6 +15,7 @@
 
 #include <Arduino.h>
 #include <functional>
+#include "battery_model.h"
 #include "el15_controller.h"
 #include "el15_protocol.h"
 #include "sample_log.h"
@@ -36,6 +37,15 @@ class CapacityTest {
     float sohPct = 0;      // measured / rated x 100 — state of health
     float cRate = 0;       // discharge current expressed in C
     uint32_t pausedS = 0;  // total time spent paused (excluded from durationS)
+    // Battery-model figures. All are 0 / -1 when the chemistry carries no
+    // voltage curve (Custom) or the model never established itself.
+    float internalResistanceOhm = 0;  // pack + contacts + leads, from the switch-on sag
+    float startSocPct = -1;           // state of charge when the discharge began
+    float endSocPct = -1;             // ... and when it stopped
+    // Full-pack capacity implied by this run: Ah drawn per unit of state of
+    // charge travelled, extrapolated to the whole 0-100 % range. Meaningful even
+    // for a PARTIAL discharge, which the measured capacityAh above is not.
+    float impliedFullAh = 0;
   };
 
   // Configuration — set before start().
@@ -45,6 +55,12 @@ class CapacityTest {
   uint32_t maxDurationS = 12u * 3600u;   // safety cap (counts ACTIVE time only)
   float maxAh = 50;                      // safety cap
   uint32_t restS = 60;                   // post-cutoff rebound window (0 = none)
+  // Battery model for the time-remaining estimate: an index into
+  // battmodel::CHEMS and the pack's series cell count. A chemistry with no
+  // voltage curve (Custom), or a cell count of 0, leaves the engine on the old
+  // rated-capacity estimate — nothing else changes.
+  int chemistry = -1;
+  int cells = 0;
 
   // Callbacks (fired on the loop task).
   // phase: 1 = discharging, 2 = resting, 3 = paused.
@@ -70,14 +86,49 @@ class CapacityTest {
     return (end - tStart_ - paused) / 1000;
   }
 
-  // Estimated seconds until the rated capacity is reached at the present
-  // current. 0 = unknown (no rating entered, or not discharging).
+  // Estimated seconds of discharge left. 0 = no estimate available.
+  //
+  // Preferred path (a chemistry with a voltage curve): how much state of charge
+  // is still to be travelled before the CUTOFF is reached, scaled by the pack's
+  // capacity. That capacity is learned from this very run — Ah drawn per unit of
+  // SoC travelled — so the estimate stops depending on the curve's absolute
+  // calibration within the first few minutes, and works with no nameplate rating
+  // entered at all.
+  //
+  // Fallback (Custom chemistry, unknown cell count, or before the model has
+  // established itself): the old rated-capacity estimate. It assumes the pack
+  // started full and that the run ends at the rating rather than at the cutoff,
+  // which is exactly what the curve path exists to fix.
   uint32_t remainingS() const {
-    if (state_ != DISCHARGING || ratedAh <= 0 || effA_ <= 0.001f) return 0;
+    if (state_ != DISCHARGING || effA_ <= 0.001f) return 0;
+    if (socValid_) {
+      float q = qLearned_ > 0 ? qLearned_ : ratedAh;
+      if (q > 0) {
+        float left = (socNow_ - socCut_) * q;
+        if (left <= 0) return 0;
+        return (uint32_t)(left / effA_ * 3600.0f);
+      }
+    }
+    if (ratedAh <= 0) return 0;
     float left = ratedAh - ah_;
     if (left <= 0) return 0;
     return (uint32_t)(left / effA_ * 3600.0f);
   }
+
+  // Live battery-model readouts for the UI. socPct is < 0 until the model has
+  // measured the pack's internal resistance and taken its first reading, which
+  // takes a few seconds of discharge.
+  float socPct() const { return socValid_ ? socNow_ * 100.0f : -1.0f; }
+  // True when remainingS() is coming from the discharge curve rather than from
+  // the nameplate rating — the UI says which, because they are not equally
+  // trustworthy and the user should know what they are looking at.
+  bool etaFromCurve() const {
+    return socValid_ && (qLearned_ > 0 || ratedAh > 0);
+  }
+  // Pack + contact + lead resistance measured from the switch-on sag (0 = not
+  // measured yet). A useful number in its own right: it is most of what
+  // separates a tired pack from a healthy one at the same capacity.
+  float internalResistanceOhm() const { return rIntDone_ ? rInt_ : 0.0f; }
 
   void start() {
     if (running()) return;
@@ -92,6 +143,9 @@ class CapacityTest {
     stopReason_ = "";
     pausedMs_ = 0; pauseStartMs_ = 0; pauseReason_ = "";
     tStart_ = 0; endMs_ = 0;
+    rInt_ = 0; rIntSum_ = 0; rIntN_ = 0; rIntDone_ = false;
+    socNow_ = socStart_ = socCut_ = 0; socValid_ = false;
+    ahAtSocStart_ = 0; qLearned_ = 0; lastSocMs_ = 0;
     // Open the flash-backed datapoint log. A failure here is non-fatal: the
     // test still runs and reports, the CSV just carries no per-sample block.
     logging_ = samplelog::start();
@@ -209,6 +263,7 @@ class CapacityTest {
     if (!haveSample_) { haveSample_ = true; minT_ = maxT_ = s.temperature; }
     else { minT_ = min(minT_, s.temperature); maxT_ = max(maxT_, s.temperature); }
     fanMax_ = max(fanMax_, s.fanSpeed);
+    updateModel(s, now);
 
     uint32_t el = elapsedS();
     // Offer every reading to the flash log; its tier schedule decides which are
@@ -252,6 +307,102 @@ class CapacityTest {
  private:
   enum State { IDLE, PRIMING, DISCHARGING, PAUSED, RESTING };
   enum TimerCb { NONE, PRIME_DONE, REST_DONE };
+
+  // ---- Battery model -------------------------------------------------------
+  // Window over which the switch-on sag is averaged into an internal-resistance
+  // figure. It starts late enough for the load to be regulating at the commanded
+  // current and ends before the pack has meaningfully discharged.
+  static const uint32_t IR_WINDOW_START_MS = 1500;
+  static const uint32_t IR_WINDOW_END_MS = 5000;
+  static const int IR_MIN_SAMPLES = 3;            // quorum before R is trusted
+  static constexpr float IR_MAX_OHM = 20.0f;      // beyond this it is a bad reading, not a pack
+  static constexpr float SOC_TAU_S = 30.0f;       // state-of-charge filter time constant
+  static constexpr float SOC_LEARN_MIN = 0.10f;   // SoC travel before capacity is learned
+
+  bool haveCurve() const {
+    return battmodel::hasCurve(chemistry) && cells > 0;
+  }
+
+  // Internal resistance, state of charge, and the pack capacity implied by the
+  // two together. Called once per discharging sample.
+  //
+  // The voltage the load reports is the cells' open-circuit voltage minus I*R of
+  // the pack, its contacts and the test leads, so it cannot be looked up on a
+  // RESTED voltage curve directly — at 2 A through 150 mohm that is 0.3 V, which
+  // on Li-ion is most of the difference between 40 % and 70 % charged. Priming
+  // gives the open-circuit voltage and the first seconds of discharge give the
+  // loaded voltage at a known current, so R falls straight out of the two.
+  //
+  // Using the SAME R at both ends is what makes the estimate self-consistent:
+  // the engine cuts on the LOADED voltage, so the state of charge the run will
+  // actually stop at is the one at (cutoff + I*R), and any lead resistance in R
+  // therefore shifts both the current reading and the target together instead of
+  // biasing the time between them.
+  void updateModel(const el15::Status &s, uint32_t now) {
+    if (!haveCurve()) return;
+
+    if (!rIntDone_) {
+      // Active discharge time, not wall clock: a pause in the first seconds
+      // would otherwise run the window out while the load was off.
+      uint32_t since = now - tStart_ - pausedMs_;
+      // Only sample once the load is actually regulating at the commanded
+      // current — a reading taken while it is still ramping in would divide a
+      // real sag by a fraction of the real current and overstate R badly.
+      if (since >= IR_WINDOW_START_MS && s.current > effA_ * 0.8f) {
+        float r = (startV_ - s.voltage) / s.current;
+        if (r > 0 && r < IR_MAX_OHM) { rIntSum_ += r; rIntN_++; }
+      }
+      // Close the window on TIME AND a quorum of samples. Requiring both means a
+      // run whose first seconds were lost (a pause, or a load slow to regulate)
+      // measures R late rather than not at all — and a load that never reaches
+      // the commanded current never fabricates one, which correctly leaves the
+      // estimate on its rated-capacity fallback.
+      if (since < IR_WINDOW_END_MS || rIntN_ < IR_MIN_SAMPLES) return;
+      rInt_ = rIntSum_ / rIntN_;
+      rIntDone_ = true;
+      socCut_ = battmodel::socFromOcv(chemistry, (cutoffV + effA_ * rInt_) / (float)cells);
+      if (socCut_ < 0) socCut_ = 0;
+      Serial.printf("[batt] pack+lead resistance %.1f mohm (%d samples); cutoff is ~%.0f%% SoC\n",
+                    rInt_ * 1000.0f, rIntN_, socCut_ * 100.0f);
+      return;
+    }
+
+    float soc = battmodel::socFromOcv(chemistry,
+                                      (s.voltage + s.current * rInt_) / (float)cells);
+    if (soc < 0) return;
+    if (!socValid_) {
+      socNow_ = socStart_ = soc;
+      ahAtSocStart_ = ah_;   // the first few seconds of Ah predate this anchor
+      socValid_ = true;
+      lastSocMs_ = now;
+      Serial.printf("[batt] start of charge ~%.0f%% (%s, %dS)\n",
+                    socStart_ * 100.0f, battmodel::CHEMS[chemistry].name, cells);
+    } else {
+      // Time-constant filter rather than a fixed per-sample coefficient: the
+      // sample rate is a user setting (2-20 Hz), and a fixed coefficient would
+      // make the filter ten times slower at the bottom of that range. A gap
+      // (link stall, a resume after a pause) is skipped rather than integrated.
+      float dt = (now - lastSocMs_) / 1000.0f;
+      lastSocMs_ = now;
+      if (dt > 0 && dt < 10.0f) socNow_ += (soc - socNow_) * (dt / (dt + SOC_TAU_S));
+    }
+
+    // Learn the pack's real capacity: Ah out per unit of state of charge
+    // travelled. This is the step that turns "trust the curve" into a
+    // measurement — after the first 10 % of travel the curve only has to get the
+    // SHAPE right, not the absolute calibration, and an estimate becomes
+    // possible with no nameplate rating entered at all.
+    float travelled = socStart_ - socNow_;
+    if (travelled > SOC_LEARN_MIN) {
+      float q = (ah_ - ahAtSocStart_) / travelled;
+      // A nameplate rating is not authoritative — measuring how far it is out is
+      // the point of the test — but it does bound what is a plausible reading
+      // versus arithmetic on noise.
+      bool sane = q > 0.001f && q < 2000.0f;
+      if (sane && ratedAh > 0) sane = q > ratedAh * 0.05f && q < ratedAh * 5.0f;
+      if (sane) qLearned_ = q;
+    }
+  }
 
   void finishPriming() {
     float voc = vOc_;
@@ -305,6 +456,12 @@ class CapacityTest {
     r.cutoffV = cutoffV;
     r.currentA = effA_;
     r.stopReason = stopReason_[0] ? stopReason_ : "Completed";
+    r.internalResistanceOhm = rIntDone_ ? rInt_ : 0;
+    r.startSocPct = socValid_ ? socStart_ * 100.0f : -1;
+    r.endSocPct = socValid_ ? socNow_ * 100.0f : -1;
+    // Only claim an implied full capacity if one was actually learned. A run
+    // stopped after 2 % of travel has not measured anything worth extrapolating.
+    r.impliedFullAh = qLearned_;
     if (onComplete) onComplete(r);
   }
 
@@ -336,4 +493,13 @@ class CapacityTest {
   bool haveSample_ = false;
   bool logging_ = false;
   const char *stopReason_ = "";
+
+  // Battery-model state (see updateModel).
+  float rInt_ = 0, rIntSum_ = 0;
+  int rIntN_ = 0;
+  bool rIntDone_ = false;
+  float socNow_ = 0, socStart_ = 0, socCut_ = 0;
+  bool socValid_ = false;
+  float ahAtSocStart_ = 0, qLearned_ = 0;
+  uint32_t lastSocMs_ = 0;
 };

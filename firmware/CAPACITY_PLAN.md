@@ -41,7 +41,10 @@ status.*
   keypad. This is the "automatic min voltage stop point."
 - **Discharge current** via keypad/steps, clamped to min(12 A, 150 W ÷ Voc).
   Optional capacity hint (mAh) enables a C-rate helper (0.2C/0.5C/1C chips)
-  and an ETA/progress estimate while running.
+  and an ETA/progress estimate while running. **Done 2026-08-01** — the chips
+  carry each chemistry's *own* conventional rates (lead-acid at the C20 hour
+  rate, the rest at 0.2C per IEC) and the ETA was rebuilt on the discharge curve
+  rather than the rating (§4c).
 - **Safety caps**: max duration (default 12 h) and max Ah (default 1.5× the
   hint, or 50 Ah) — belt-and-braces stops.
 
@@ -189,9 +192,76 @@ run has yet drawn real current**.
 - Every exit path runs `finishSafely()` (LOAD OFF + setpoint 0), and every
   `stop()` fires exactly one of `onComplete` / `onError` — a mid-discharge stop
   yields a valid *partial* result rather than discarding the data.
-- **Not implemented from §2.1:** the capacity hint / C-rate chips / ETA, and the
-  per-chemistry plausibility warning on cell count (the count is capped per
-  chemistry, but no amber mismatch warning is shown).
+- **Not implemented from §2.1:** the per-chemistry plausibility warning on cell
+  count (the count is capped per chemistry, and the Voc line turns amber when the
+  per-cell voltage is implausible, but there is no explicit mismatch warning).
+
+## 4b. Test current from pack size — C-rate chips (2026-08-01)
+
+A capacity figure only means something at a stated rate, and every chemistry has
+a conventional one. So the setup screen takes the pack's **size** and works the
+**current** out, instead of asking for amps and reporting the rate afterwards.
+
+- Four chips per chemistry, from `battmodel::Chem::cRate`: lead-acid
+  **0.05 / 0.1 / 0.2 / 0.5C** (it is rated at the C20 = 0.05C hour rate by
+  convention), everything else **0.1 / 0.2 / 0.5 / 1C** with 0.2C as the default
+  (IEC 61960 for Li-ion, IEC 61951 for NiMH).
+- Tapping a chip sets `current = C × ratedAh`, clamped to the load's 12 A /
+  150 W envelope; the hint says so explicitly when the clamp, not the chip, is
+  what set the current.
+- Entering (or changing) the rated capacity re-applies the selected chip, so
+  telling the controller the pack size is by itself enough to get a test current.
+- Typing a current by hand sets the selection to −1 and the chips go quiet —
+  an explicit amps figure must not be silently overwritten by a later rating
+  edit. The selection persists in NVS (`btCRIdx`).
+
+## 4c. Time remaining from the discharge curve (2026-08-01)
+
+The old estimate was `(ratedAh − drawn) / current`: pure coulomb counting against
+the nameplate. It was wrong in two independent ways — it assumed the pack started
+**full**, and it counted down to the **rating** when what actually ends the test
+is the **cutoff voltage**. A half-charged pack showed roughly double the truth,
+and a deliberately high cutoff showed an ETA long past the point the run stops.
+
+The replacement reads charge state off the chemistry's own voltage curve
+(`battery_model.h`, curves per family with a per-cell OCV table):
+
+1. **Internal resistance first.** The load reports a voltage sagged by I·R of the
+   pack, its contacts and the leads, so it cannot be looked up on a *rested* OCV
+   curve directly — at 2 A through 150 mΩ that is 0.3 V, which on Li-ion is most
+   of the difference between 40 % and 70 % charged. Priming already measures the
+   open-circuit voltage; the first seconds of discharge give the loaded voltage
+   at a known current; R falls out of the two. Averaged over a 1.5–5 s window
+   (active time, so a pause cannot burn it) and only over samples where the load
+   is actually regulating, with a 3-sample quorum before it is trusted.
+2. **Charge state** = `socFromOcv(chem, (V + I·R) / cells)`, filtered with a 30 s
+   time-constant EMA — time-based, not per-sample, because the sample rate is a
+   user setting spanning 2–20 Hz.
+3. **The target is the cutoff, in charge terms.** The engine cuts on the *loaded*
+   voltage, so the run stops at the charge state corresponding to `cutoff + I·R`.
+   Using the same R at both ends is what keeps lead resistance from biasing the
+   answer: it shifts the current reading and the target together.
+4. **Capacity is learned, not assumed.** After 10 % of charge travel,
+   `Q = Ah drawn / charge travelled`. From then on the curve only has to get the
+   *shape* right, not the absolute calibration — and **an estimate exists with no
+   rated capacity entered at all**, which the old version could not do.
+5. `remaining = (charge now − charge at cutoff) × Q / I`.
+
+Fallbacks are explicit rather than silent: Custom chemistry has no curve, and a
+run whose R was never measurable never invents one — both drop to the old
+rated-capacity estimate, and the UI labels that figure "(from the rating)".
+
+Byproducts worth having, all on the result and in the CSV: **pack + lead
+resistance**, the **charge span the run covered** (a partial discharge is exactly
+when the measured Ah understates the pack, so the state-of-health row should not
+be read without it), and an **implied full capacity** extrapolated from that span.
+
+Honest limits: these are curves for a chemistry *family*, not for your cell, so
+every charge-state figure in the UI is prefixed "~". LiFePO4's plateau spans
+~150 mV between 20 % and 90 %, so its charge readout is coarse mid-run and only
+sharpens at the knee — the learned-capacity term is doing most of the work there.
+R is measured once at switch-on and held, though it rises as a pack empties;
+there is only ever one open-circuit reading to measure it against.
 
 ## 5. Open questions (answers change the plan)
 

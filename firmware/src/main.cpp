@@ -286,12 +286,14 @@ void setup() {
     ok ? audio::success() : audio::failure();
     return ok;
   };
-  actions.startBatt  = [](float cutoffV, float amps, float ratedAh) {
+  actions.startBatt  = [](float cutoffV, float amps, float ratedAh, int chem, int cells) {
     if (g_test.running()) return;   // never let two engines drive the load
     g_guard.arm(prefs::Data::CAPACITY);
     g_batt.cutoffV = cutoffV;
     g_batt.dischargeA = amps;
-    g_batt.ratedAh = ratedAh;   // 0 = not given; SoH/ETA are then suppressed
+    g_batt.ratedAh = ratedAh;   // 0 = not given; SoH is then suppressed
+    g_batt.chemistry = chem;    // drives the discharge-curve time estimate
+    g_batt.cells = cells;
     g_batt.start();
   };
   actions.stopBatt   = []() { g_batt.stop(); };
@@ -304,6 +306,8 @@ void setup() {
     return g_batt.resume();
   };
   actions.battRemainingS = []() { return g_batt.remainingS(); };
+  actions.battSocPct = []() { return g_batt.socPct(); };
+  actions.battEtaFromCurve = []() { return g_batt.etaFromCurve(); };
   actions.saveBatt   = [](char *msg, size_t len) {
     bool ok = report::saveBatt(g_lastBatt, msg, len);
     ok ? audio::success() : audio::failure();

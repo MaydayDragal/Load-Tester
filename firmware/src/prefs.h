@@ -41,9 +41,14 @@ struct Data {
   float battCutoff = 9.0f;
   bool battCutoffCustom = false;
   float battAmps = 1.0f;
-  // Nameplate capacity in mAh, 0 = not specified. Drives the C-rate, the
-  // time-remaining estimate and the state-of-health figure.
+  // Nameplate capacity in mAh, 0 = not specified. Drives the C-rate chips and
+  // the state-of-health figure.
   float battRatedMah = 0;
+  // Selected test C-rate, as an index into the chemistry's presets in
+  // battery_model.h; -1 means the user typed a discharge current by hand and the
+  // current should stop following the rated capacity. Defaults to index 1, which
+  // is the conventional rating rate for every chemistry but lead-acid.
+  int8_t battCRateIdx = 1;
 
   // Wi-Fi (for NTP time sync only; the radio is otherwise off)
   char ssid[33] = "";

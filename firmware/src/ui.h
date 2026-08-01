@@ -28,16 +28,25 @@ struct UiActions {
                      bool fourWire, float tareOhm)> startRTest;
   std::function<void()> stopRTest;
   // ratedAh is the pack's nameplate capacity, or 0 when the user did not enter
-  // one — state-of-health and time-remaining are then suppressed rather than
-  // guessed at.
-  std::function<void(float cutoffV, float amps, float ratedAh)> startBatt;
+  // one — state-of-health is then suppressed rather than guessed at. chem/cells
+  // select the discharge-curve model behind the time-remaining estimate (see
+  // battery_model.h); a chemistry with no curve leaves the engine on its
+  // rated-capacity fallback.
+  std::function<void(float cutoffV, float amps, float ratedAh, int chem, int cells)> startBatt;
   std::function<void()> stopBatt;
   // Re-energise a discharge that was paused (controller battery, link loss).
   // False = there was nothing paused to resume.
   std::function<bool()> resumeBatt;
-  // Engine's estimate of seconds left to the rated capacity at the present
-  // current; 0 when unknown (no rating entered, or not discharging).
+  // Engine's estimate of seconds of discharge left; 0 when it has none.
   std::function<uint32_t()> battRemainingS;
+  // Live state of charge in percent, or < 0 before the model has established
+  // itself (it needs a few seconds of discharge to measure the pack's internal
+  // resistance first). Always shown as an approximation — see battery_model.h.
+  std::function<float()> battSocPct;
+  // True when battRemainingS() comes from the discharge curve rather than from
+  // the nameplate rating alone. The UI labels which, because they are not
+  // equally trustworthy.
+  std::function<bool()> battEtaFromCurve;
 
   // SD card. All three block for up to ~2 s (card init dominates) and report
   // honestly: true = written, and `msg` holds the file name; false = nothing was

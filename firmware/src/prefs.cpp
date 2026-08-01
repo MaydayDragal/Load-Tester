@@ -38,6 +38,7 @@ void writeAll() {
   g_nvs.putBool("btCutCust", g_data.battCutoffCustom);
   g_nvs.putFloat("btAmps", g_data.battAmps);
   g_nvs.putFloat("btRated", g_data.battRatedMah);
+  g_nvs.putChar("btCRIdx", g_data.battCRateIdx);
   g_nvs.putString("ssid", g_data.ssid);
   g_nvs.putString("pass", g_data.pass);
   g_nvs.putShort("tz", g_data.tzMinutes);
@@ -74,6 +75,7 @@ void begin() {
   g_data.battCutoffCustom = g_nvs.getBool("btCutCust", d.battCutoffCustom);
   g_data.battAmps = g_nvs.getFloat("btAmps", d.battAmps);
   g_data.battRatedMah = g_nvs.getFloat("btRated", d.battRatedMah);
+  g_data.battCRateIdx = g_nvs.getChar("btCRIdx", d.battCRateIdx);
   g_nvs.getString("ssid", g_data.ssid, sizeof(g_data.ssid));
   g_nvs.getString("pass", g_data.pass, sizeof(g_data.pass));
   g_data.tzMinutes = g_nvs.getShort("tz", d.tzMinutes);
