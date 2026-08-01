@@ -20,6 +20,18 @@ holes found in that audit and already patched — listed so you know they were c
 > **Still to do: steps 15–16b (the safety drills) and all of Phase 2 (real
 > current).** No current has yet been drawn on the real unit. Start at step 15.
 >
+> ## Update 2026-08-01
+>
+> **Step 17 (bench PSU, first real current) is DONE** — via the R-test's
+> continuous sweep, at 0.3–0.5 A on a ~20 V bench source, repeating to better
+> than 1 %. Steps 18–23 (real pack, capacity test) are still outstanding, and
+> **no capacity test has ever drawn real current.**
+>
+> **New hazard, read before any bench work:** opening a serial monitor RESETS
+> this board. Doing it mid-sweep rebooted the controller with ~1 A flowing and
+> left the EL15 sinking until its own protection tripped. Attach the monitor
+> BEFORE starting anything, or open the port with DTR/RTS both false. HANDOVER §1.
+>
 > Two corrections to the text below, from what was learned that day:
 > **step 13 is obsolete** — the poll default is now **50 ms (20 Hz)**, which was
 > measured as the device's practical maximum, so leave it there rather than at

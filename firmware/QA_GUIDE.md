@@ -98,10 +98,21 @@ GFX **1.6.7**, NimBLE **2.5.0**, LVGL **8.4.0**, SdFat 2.x. Code is adapted to
 these; watch for drift on `pio update`.
 
 **Test scaffolding** (compiled out of normal builds):
-`-D EL15_SDTEST` (boot-time SD write/readback), `-D EL15_POLLTEST` (poll-rate
-sweep), `-D EL15_SELFTEST` (safe mode-cycle sweep, load stays OFF),
-`-D EL15_NO_POLL` (disable polling — proves telemetry is poll-driven). E.g.
+`-D EL15_SDTEST` (boot-time SD write/readback + FAT stamp + LittleFS log check),
+`-D EL15_RTUNE` (R-test tuning matrix — **draws current**; waits for a key press),
+`-D EL15_POLLTEST` (poll-rate sweep), `-D EL15_SELFTEST` (safe mode-cycle sweep,
+load stays OFF), `-D EL15_NO_POLL` (disable polling — proves telemetry is
+poll-driven). E.g.
 `PLATFORMIO_BUILD_FLAGS="-D EL15_SDTEST" "$PIO" run -d firmware -t upload …`.
+**Clear `PLATFORMIO_BUILD_FLAGS` before building a shippable image** — it is an
+env var and persists silently across commands in the same shell.
+
+> ⚠ **Opening a serial monitor RESETS this board.** The USB-Serial/JTAG
+> peripheral reads DTR/RTS transitions as a reset request. Never attach one while
+> the load may be energised — doing so mid-sweep once rebooted the controller
+> with ~1 A flowing and left the EL15 sinking until its own protection tripped.
+> To read serial without resetting, open the port with DTR and RTS both false and
+> do not pulse RTS. See HANDOVER §1.
 
 ---
 
@@ -396,8 +407,20 @@ energy/capacity, or DCR I1/I2/mΩ).
   a POLL write; it does not free-run. So a working POLL is proof FFF3 writes land.
 - **Control writes must be paced.** FFF3 is write-no-response only and the device
   drops a command landing too close behind another one. `writeRaw` holds every
-  *control* write ≥50 ms from the previous one and defers the next poll. Polls
-  themselves are never paced.
+  *control* write ≥50 ms from the previous one. Polls themselves are never paced,
+  but they are held `ctrlPollGapMs` (25 ms) clear of a control write.
+- **LOAD_ON at a 0.000 A CC setpoint does nothing.** The write is accepted, but
+  the device reports `load=0`, sinks no current, and never recovers on its own —
+  a sweep starting from 0 A ran to completion with `I=0` throughout. Always
+  command a non-zero current *before* LOAD_ON. The sweep engine floors its ramp
+  at 0.05 A and re-asserts LOAD_ON if a mid-sweep packet reports the load off.
+- **The initial LOAD_ON does not always land**, so the re-assert also has to be
+  prompt — at a 1 s interval it cost the first second of a ramp, which is the
+  low-current end where the fit most needs span.
+- **A protection can stay latched from a previous run.** Priming tolerates a
+  warning for a 4 s grace period while pushing CC / setpoint 0 / LOAD OFF (the
+  state that lets the device shed a trip) before giving up. Mid-sweep, a trip
+  aborts immediately.
 - **Poll rate:** the EL15 produces ~17–19 fresh samples/s (min ~23 ms between
   distinct frames), so **50 ms (20 Hz) is the practical max** and is the default.
   Faster just refetches repeats and floods the link.

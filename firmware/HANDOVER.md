@@ -5,202 +5,48 @@ a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
 **Last updated:** 2026-08-01.
-**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `6adea41`.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `d255deb`.
+`origin/main` and `origin/claude/…` are kept at the same commit, and pushing the
+branch does NOT move main — push both.
 
 ---
 
-## 0a. Latest session (2026-08-01c) — R-test is now a continuous sweep
+## 0. Where things stand
 
-The stepped current ladder is gone. `resistance_test.h` now ramps current
-**smoothly up and back down** over a user-set duration and fits EVERY status
-packet, instead of dwelling at 8-20 discrete levels with a settle window and a
-collect window at each.
+**Proven on the real EL15:** connect, telemetry, all six mode opcodes, setpoint,
+LOAD ON/OFF, SD read/write (including FAT timestamps and re-init after an
+eject), the flash-backed datapoint log, and the **continuous R-test sweep — now
+measured, not merely compiled**: 0.5 A / 10 s, repeats agreeing to 0.18–0.9 %,
+with σ_R honest to within ~1.4× of the true run-to-run spread (§10).
 
-- **Why:** the ladder spent ~2.3 s per level to buy ~10 usable readings, so the
-  sweep length was a side effect of the step count rather than something the
-  user chose. A 30 s ramp at the 20 Hz default collects ~300 points in the time
-  the 8-step ladder collected ~80, and the duration becomes a plain editable
-  number.
-- **Setup is now Start current / Max current / Duration** (5-900 s, default 30),
-  replacing Steps. Max current 0 means "whatever the fuse safely allows"; the
-  engine still clamps everything to `min(80 % fuse, 12 A, 150 W / Voc, 40 A)`
-  and the setup screen shows the live cap so you can see it before starting.
-- **Live graphs on the running screen**, laid out like the capacity test: big
-  V / I / R readouts, a V + I vs time chart on two Y axes, and a resistance vs
-  time chart that appears once the fit has enough current span to mean anything.
-- **The fit is incremental** — six running sums, no sample buffer — which is
-  what makes the live R free and means the engine allocates nothing between
-  start and completion.
-- **Drift cancellation is preserved.** The ramp is symmetric in time, so every
-  current is visited once up and once down about the midpoint; that is the same
-  argument the up-then-down ladder relied on. The reported curve bins samples
-  into 32 current bands, each averaging its two visits.
-- **Setpoint cadence must stay slower than the poll**: every control write
-  defers the next poll (the device drops crowded commands), so updating the ramp
-  faster than we poll would starve telemetry and collect nothing.
-  `setpointStepMs() = max(100, pollIntervalMs + 50)` enforces it, and the setup
-  hint quotes the resulting sample count rather than the raw poll rate.
-- Result rows/CSV now report what was **measured** (current range, sag, peak
-  power, temp range, max fan, raw sample count, band count) rather than
-  re-deriving them from the binned curve.
+**Built but never run with real current:** the battery capacity test in every
+form — pause/resume, rated-capacity metrics, auto-save, the per-sample CSV — and
+the link guard against a genuine unattended drop.
 
-Two chart-safety details worth keeping: the live refresh is throttled to ~6 Hz
-(three 120-point series resampled at 20 Hz is ~7000 chart writes/s for a curve
-the eye cannot follow), and the resistance chart picks its scale from the data
-because `lv_coord_t` is int16 — milliohms for a low-R circuit would overflow on
-a multi-ohm result.
+**Highest-value work next, in order:**
 
-`RTEST_ACCURACY.md` §6 records what carried over from the stepped analysis and
-what the ramp changes, including a new caveat: with ~300 samples the reported
-σ_R is ~2x tighter, which is only honest if the sample errors are independent.
+1. **Run a capacity test with real current.** Nothing about it has been. One
+   small protected cell with the cutoff set high is enough.
+2. **Tap the SD Save buttons.** The path underneath is verified; the buttons
+   themselves still never have been.
+3. **Finish the R-test sweep matrix** (duration 10/30/60 s × sample rate
+   20/10/4 Hz). Cut short when the bench source collapsed — §10.
+4. **Port the command checksum to the Android app.** `El15Protocol.kt` still
+   emits checksum-less frames, so the app can read a real EL15 but cannot drive
+   it. One helper plus five call sites.
 
-**Not yet run with real current.**
+### Session log
 
----
+Detail is in `git log`; this is just the shape of things.
 
-## 0b. Earlier that day (2026-08-01b) — capacity-test overhaul + SD/RTC fixes
-
-Eight features/fixes, all built and flashed to the board. Flash **69.0 %** of the
-3 MB slot, RAM **18.2 %** static, clean under `-Wall -Wextra`.
-
-1. **CSV file dates were wrong — fixed.** The report *body* was always right; what
-   was wrong was the **FAT directory timestamp**, so a file browser showed the
-   card's default date. SdFat only stamps directory entries if you give it a
-   clock, and nothing ever did. `sd_card.cpp` now installs a
-   `FsDateTime::setCallback` that reads the PCF85063. Verified on hardware: the
-   file's FAT stamp and the CSV body now both read `2026-08-01 12:56:16`. The
-   report also gained separate `# Date` / `# Time` rows, which a spreadsheet
-   parses natively (the combined string imports as text).
-2. **SD card re-initialises after an eject/insert.** The card was mounted once
-   and kept forever, so pulling it left SdFat serving a cached FAT, and a
-   re-inserted card (back in native SD mode) ignored SPI until CMD0/ACMD41 ran
-   again. Every entry point now probes with CMD10 first and drops the mount if
-   the card does not answer; failures anywhere call `sd::invalidate()`, and
-   Settings ▸ SD ▸ Check card always re-inits.
-3. **Per-datapoint logging, buffered in flash.** New `sample_log.{h,cpp}`:
-   LittleFS on the 896 KB `spiffs` partition, 24-byte records, 32-record RAM
-   batches. Bounded by a **tier schedule** — tier 0 samples every 2 s until it
-   has spent half the 8 000-record budget, then the interval doubles and the
-   next tier gets half of what is left, so each tier covers the same wall-clock
-   span and an arbitrarily long test still produces a complete curve. The CSV
-   gains an `elapsed_s,voltage_v,current_a,power_w,capacity_ah,capacity_mah,
-   energy_wh,temperature_c` block streamed straight out of flash. Verified:
-   600 offered samples stored 300 at 2 s, replayed byte-correct.
-   **The 8 000-record cap is set by the SD link, not the flash** — writing rows
-   over the ~250 kHz bit-banged bus costs ~2 s per 1 000 rows, and `replay()`
-   yields a tick per batch so the idle-task watchdog is not starved.
-4. **Results auto-save when a test completes.** Both engines. The UI paints
-   "Writing to card…" and flushes before the blocking call; a failure leaves the
-   reason on the button, which stays tappable to retry (the result and its flash
-   log survive until the next test starts).
-5. **Capacity tests PAUSE instead of dying.** `CapacityTest` gained a `PAUSED`
-   state: load off, clock stopped, every accumulator and the flash log kept.
-   A critical controller battery pauses (and **auto-resumes** when USB/charge
-   returns); a dropped BLE link pauses. The run card shows an amber reason and a
-   RESUME button. `durationS` counts active time only, and the result carries
-   `pausedS`.
-6. **Fixed: a battery test could not be returned to.** Root cause was in
-   `main.cpp` — the BLE state handler treated *any* non-CONNECTED state as a
-   drop and called `g_batt.stop()`, so opening Connect and tapping **Scan**
-   mid-discharge tore the test down (mid-priming it died as "Cancelled", leaving
-   nothing to save). It now latches `g_wasConnected` and only acts on a real
-   drop. Backed up by UI fixes: `showScreen()` now re-derives the R-test/battery
-   view from the engine's actual phase, and a **running-test chip** in the status
-   strip appears on every other screen and taps straight back into the live test.
-   The R-test's old force-navigate-on-every-progress hijack (QA_REPORT L6) is
-   gone — the chip replaces it.
-7. **Optional rated capacity → real battery metrics.** New keypad row (mAh,
-   persisted). Setup shows the C-rate and expected runtime; the run screen shows
-   "% of rated drawn" and an ETA; the result adds **state of health**
-   (green ≥80 %, amber ≥60 %, red below), rated capacity and C-rate. All of it
-   is hidden when no rating is entered — nothing is guessed.
-8. **Screen timeout is now selectable** at Never / 30 s / 1 min / 5 min /
-   10 min / 30 min (two rows of three), with a line spelling out that it dims at
-   the chosen interval and blanks at 5× it.
-
-Hardware-verified this session (via `EL15_SDTEST`, no current drawn): RTC read,
-SD info/write/increment/readback, the FAT timestamp, mount invalidation and
-re-init, LittleFS mount (**costs only ~2.3 KB of heap** — 43.0 KB free before,
-40.8 KB after, and BLE still auto-connects afterwards), and the log's tier
-schedule + replay. **Still unverified: anything that draws real current** — no
-capacity or R-test run has been performed on the connected EL15.
-
-Leftover: `SDTEST_003.CSV` / `SDTEST_004.CSV` are on the card from this session.
-
----
-
-## 0c. Earlier that day (2026-08-01) — documentation audit, no functional change
-
-A read-only pass over the whole firmware tree to bring every doc back in line
-with the code. Build re-verified at `6adea41`: **clean under `-Wall -Wextra`**,
-flash **2,113,255 B** of the 3 MB `huge_app` slot (67 %), **RAM 17.8 %** static.
-
-Docs rewritten or corrected: `README.md` (was still claiming the firmware had
-never been compiled or flashed), `QA_GUIDE.md` (was describing the deleted
-on-device demo simulator, five screens, and a stubbed SD save), `QA_REPORT.md`
-(now carries a resolution table — 10 of its 12 H/M findings are fixed),
-`RTEST_ACCURACY.md` (the tare/4-wire item is implemented), `CAPACITY_PLAN.md`
-(§2.4 still described the abandoned shared-SPI scheme; phases 0/1/2/4 are done),
-`FEATURE_IDEAS.md` (audio, both buttons, SD, RTC, PMIC and Wi-Fi were all still
-listed as "completely unused"), `FIRST_CONTACT.md` (phases 0–1 are complete).
-
-Three small code changes, all comment/warning level:
-- `sd::unmount()` is `[[maybe_unused]]` — it was the build's only warning.
-- Stale comments corrected in `sd_card.cpp`, `ui.h`, `main.cpp`, `display.cpp`,
-  `board_config.h` and `platformio.ini`, which still described the SD card as
-  sharing the panel's SPI bus and the draw buffer as 1/8 frame (it is 1/7).
-
-Two findings worth acting on:
-1. **The Android app never got the checksum fix.** `app/.../El15Protocol.kt`
-   still builds `LOAD_ON/LOAD_OFF/LOCK/modeCommand/setpointCommand` with **no
-   trailing sum-to-zero byte** — the exact defect that made load control silently
-   do nothing on the real EL15 until it was fixed here on 2026-07-24. The app can
-   read telemetry (POLL carries its checksum) but cannot drive a real unit. Port
-   `frameChecksum()` across. See QA_REPORT "N1".
-2. **`is_shared_interface = true` on the panel bus is now vestigial.** Its only
-   purpose was sharing the SPI host with the SD card, which moved to software SPI
-   on 2026-07-24. It costs a bus-lock round-trip per flush chunk. Left alone
-   (a panel change wants hardware eyes on it) but flagged in `display.cpp`.
-
----
-
-## 0. Previous session (2026-07-24) — FIRST REAL EL15 + SD card working
-
-This was the first session against a **real ALIENTEK EL15** (all prior work was
-simulator-only). Four things were found and fixed on hardware — read these before
-touching the BLE or SD code:
-
-1. **Command checksums (THE big one).** Load control did nothing on the real
-   unit — telemetry worked but mode/setpoint/LOAD_ON were silently ignored.
-   Cause: every command frame needs a trailing checksum byte that makes the whole
-   frame sum to 0 (mod 256); the DM40GUI-derived constants only had it on POLL.
-   Fixed in `el15_protocol.h` (`frameChecksum()` + baked-in bytes). Proven: with
-   polling disabled ALL telemetry stopped, so POLL is the only thing that ever
-   worked — and it's the only checksummed frame. See §10.
-2. **Connect crash.** `getCharacteristics(true)` re-discovered the service and
-   freed the notify/write characteristic objects we'd just resolved → use-after-
-   free → reboot on connect. Now `getCharacteristics(false)`.
-3. **Dropped no-response writes.** FFF3 is write-no-response only, and the device
-   drops a command that lands too close behind another no-response write. Two
-   symptoms — mode changes colliding with the 500 ms poll, and the R-test's
-   `setSetpoint`→`setLoad(true)` back-to-back. Fix in `El15Client::writeRaw`:
-   pace every CONTROL write ≥50 ms from the previous one AND defer the next poll.
-4. **SD card writes now work** — on **bit-banged software SPI**, because the C6's
-   one SPI host is owned by the panel and the IDF sdspi driver can't share it.
-   See §10.
-
-Also: **default poll rate is now 50 ms (20 Hz)** — a sweep showed the EL15 tops
-out at ~17-19 fresh samples/s, so 20 Hz captures ~all of it; faster just refetches
-repeats and floods the link (§11). Serial now also carries useful bring-up logs:
-a per-connect **GATT characteristics dump**, a per-control-write line
-(`[ble] write OK/FAIL …`), and a 1 Hz `[ble] status rx: …` line. They're low-noise
-and handy on hardware; strip them (in `el15_client.cpp`) for a silent build.
-
-**Test scaffolding** lives behind build flags, compiled out of normal builds:
-`-D EL15_SDTEST` (boot-time SD read/write/readback in `main.cpp`),
-`-D EL15_POLLTEST` (poll-rate sweep in `el15_client.cpp`),
-`-D EL15_SELFTEST` (safe mode-cycle sweep). Flash e.g.
-`PLATFORMIO_BUILD_FLAGS="-D EL15_SDTEST" "$PIO" run -d firmware -t upload …`.
+| Date | What happened |
+|---|---|
+| 2026-08-01 | R-test rebuilt as a **continuous triangular sweep** with live graphs, replacing the stepped ladder — then four defects found by running it against real hardware (§9), and the ramp/sample timing tuned by measurement (§10). |
+| 2026-08-01 | **Capacity overhaul**: pause/resume, rated-capacity metrics (C-rate, ETA, state of health), auto-save, flash-buffered per-sample CSV. **SD/RTC**: FAT directory timestamps, re-init after eject. Screen-timeout options. Fixed a running test being torn down by the user's own scan (§7). |
+| 2026-08-01 | Documentation audit — every doc realigned with the code. |
+| 2026-07-24 | **First real EL15.** Command checksums (§9), connect crash, control-write pacing, SD on bit-banged software SPI (§11), 20 Hz poll default (§10). |
+| 2026-07-22 | Audio (ES8311, continuous-stream I²S), UI perf (QSPI 80 MHz), R-test accuracy work, on-device demo simulator removed in favour of the Android simulator app. |
+| 2026-07-21 | Touch-snap engine, Settings screen, capacity test, physical buttons, engine mutual exclusion. Heap-corruption panic diagnosed (§7). |
 
 ---
 
@@ -217,8 +63,28 @@ PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
 "$PIO" run -d firmware                                  # build (-Wall -Wextra on)
 "$PIO" run -d firmware -t upload --upload-port "$PORT"  # flash
 ```
-Read serial passively with a `System.IO.Ports.SerialPort` one-liner (opening the
-port asserts DTR/RTS and resets the board, which is usually what you want).
+### ⚠ Opening a serial monitor RESETS this board
+
+The USB-Serial/JTAG peripheral treats DTR/RTS transitions as a reset request, so
+attaching a monitor reboots the firmware (`[boot] reset reason: USB`). That is
+usually harmless and often what you want — but **never do it while the load may
+be energised**. On 2026-08-01 a monitor attached during a live sweep rebooted the
+controller with ~1 A flowing; the EL15 was left sinking with nothing commanding
+it until its own protection tripped.
+
+Rules that follow from that:
+- A `-t upload` ends with a reset, so the firmware is **already running** by the
+  time your next command opens the port. Anything that auto-starts on boot will
+  be mid-run when you attach.
+- To read serial WITHOUT resetting: open the port with `DtrEnable` and
+  `RtsEnable` both `false` and do **not** pulse RTS. You lose the boot banner but
+  the board keeps running.
+- To read serial WITH a reset (to catch boot output), pulse RTS — but only once
+  you know the load is off.
+- Anything unattended that drives the load must wait for an explicit go signal
+  rather than auto-starting. `EL15_RTUNE` does this (§12).
+
+Read serial passively with a `System.IO.Ports.SerialPort` one-liner.
 **If the board vanishes from USB entirely** (no COM port at all — happened once
 under a very fast poll flood), physically unplug/replug the USB cable to recover.
 Serial is 115200. Boot prints `[boot] reset reason: …` (power-on / PANIC / BROWNOUT / WDT / USB) —
@@ -226,9 +92,28 @@ use it when chasing spontaneous resets. `[audio] ready (ES8311)` confirms the
 codec. Occasional `Wire.cpp requestFrom Error -1` are benign transient touch I²C
 hiccups.
 
+### Test scaffolding (build-flag gated, compiled out of normal builds)
+
+| Flag | What it does |
+|---|---|
+| `EL15_SDTEST` | Boot-time SD info / write ×2 / readback + FAT stamp, plus a LittleFS datapoint-log exercise. **Draws no current.** |
+| `EL15_RTUNE` | R-test tuning matrix — §12. **Draws current**; waits for a key press. |
+| `EL15_POLLTEST` | Poll-rate sweep, fresh-vs-repeated frames per interval. |
+| `EL15_SELFTEST` | Safe mode-cycle sweep (load stays OFF). |
+| `EL15_NO_POLL` | Disable polling entirely — proves telemetry is poll-driven. |
+
+```bash
+PLATFORMIO_BUILD_FLAGS="-D EL15_SDTEST" "$PIO" run -d firmware -t upload --upload-port "$PORT"
+```
+
+**Clear `PLATFORMIO_BUILD_FLAGS` before building a shippable image.** It is an
+environment variable, so it persists silently across commands in the same shell
+and you will flash a test build without noticing. Verify from the boot log: a
+harness announces itself, a clean build says nothing.
+
 Framework is **Arduino** via the `pioarduino` platform (arduino-esp32 3.1.3).
 Resolved lib versions: LVGL 8.4.0, Arduino_GFX 1.6.7, NimBLE-Arduino 2.5.0,
-ESP_I2S 3.1.3. A **stale** native-ESP-IDF build also exists in the tree
+ESP_I2S 3.1.3, SdFat 2.x, LittleFS (bundled). A **stale** native-ESP-IDF build also exists in the tree
 (`CMakeLists.txt`, `main/CMakeLists.txt`) — it predates the audio feature and
 does **not** list `audio.cpp`/`es8311.c`, so it won't link until updated. The
 PlatformIO/Arduino build is the one that works and is flashed.
@@ -241,7 +126,7 @@ PlatformIO/Arduino build is the one that works and is flashed.
 main.cpp            owns objects, routes events, buttons, emergency stop
 el15_protocol.h     wire protocol (header-only, pure): parse + command frames
 el15_client.{h,cpp} BLE central (NimBLE 2.5): scan/connect/subscribe/poll/reassemble
-el15_controller.h   El15Controller interface ONLY (demo simulator removed — see §5)
+el15_controller.h   El15Controller interface ONLY (demo simulator removed)
 resistance_test.h   fuse-aware CONTINUOUS current sweep — triangular ramp, live
                     incremental fit, slope uncertainty, 4-wire/tare correction
 capacity_test.h     battery discharge / capacity engine
@@ -275,7 +160,7 @@ host task is higher still.
 
 ---
 
-## 3. Hardware facts (verified this session — trust these)
+## 3. Hardware facts (verified on this board — trust these)
 
 Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 - **No PSRAM.** 512 KB on-chip HP SRAM (~320 KB usable), 16 MB flash. LVGL uses a
@@ -336,41 +221,11 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 
 ---
 
-## 5. What happened this session (2026-07-22)
-
-Large session. Highlights, newest first:
-
-1. **Audio** added (ES8311). Two follow-up fixes: task priority raise (didn't
-   fix it), then the real fix — **continuous I²S streaming** instead of
-   stop/restart per tone (short tones were "cutting in and out"; a single
-   continuous tone was clean → the restart was the glitch).
-2. **UI perf:** QSPI 40→80 MHz, single 1/4 draw buffer (half the flush chunks,
-   same RAM), refr period 30→16 ms. ~15–20 % faster redraws. Profiling showed
-   the flush is partly **CPU-bound in Arduino_GFX** and rendering is ~half the
-   cost — the real next lever is an async `esp_lcd` DMA flush (see §7).
-3. **R-Test accuracy:** bidirectional sweep (drift cancellation), slope standard
-   error `R ± σ` with tolerance-based "reliable", adaptive collect window.
-4. **R-Test chart:** switched SCATTER→LINE (scatter renderer drew stray green
-   edge line) and resample levels across full width.
-5. **No-demo transition:** merged `origin` (which had removed the on-device demo
-   + added simulator-app QA), then removed `El15Simulator`/`g_sim`/demo routing
-   from our tree. Bench-testing is now the Android simulator over BLE.
-6. Earlier in the session (commit `08f87b8`): touch-snap engine + responsiveness,
-   header/layout redesign, Settings screen, R-test overhaul + estimator, the
-   whole battery capacity test, adjustable sample rate, the two buttons, and the
-   engine mutual-exclusion + manual-control-gating safety fixes.
-7. A multi-agent QA audit ran; **2 confirmed high-severity findings were fixed**
-   (both engines could drive the load at once; manual controls live during a
-   test). The audit's full output had more findings — not all were triaged (see
-   §7).
-
----
-
-## 6. Verified good / not yet verified
+## 5. Verified good / not yet verified
 
 | Area | State |
 |---|---|
-| Build, clean under `-Wall -Wextra` | ✅ 2.11 MB / 3 MB slot, RAM 17.8 % static |
+| Build, clean under `-Wall -Wextra` | ✅ 2.18 MB / 3 MB slot, RAM 19.4 % static |
 | Clean boot, no panic/bootloop; ES8311 init; buttons don't phantom-fire | ✅ |
 | Audio tones clean (after the continuous-stream fix) | ✅ |
 | BLE connect to a random-address peer (phone simulator) | ✅ |
@@ -379,8 +234,9 @@ Large session. Highlights, newest first:
 | R-test V-I chart full-width, battery graph time axis smooth | ✅ |
 | **SD write path incl. FAT timestamps + re-init after eject** | ✅ 2026-08-01 (via `EL15_SDTEST`) |
 | **Flash datapoint log** — mount, tier schedule, replay | ✅ 2026-08-01 |
+| **R-test continuous sweep with real current** | ✅ 2026-08-01 — 0.5 A, 0.18–0.9 % run-to-run (§10) |
 | **SD Save from the UI buttons** (now also automatic on completion) | ❌ never exercised |
-| **Any test with real current** through a real EL15 | ❌ never done |
+| **Capacity test with real current** — any part of it | ❌ never done |
 | **Pause/resume, rated-capacity metrics, running-test chip** | ❌ compile-clean, needs a real run |
 | Link guard, crash recovery, brownout auto-off, load-safe power-off | ❌ never fired for real |
 | NVS persistence, burn-in shift/dim, NTP sync, Kelvin + tare | ❌ compile-clean only |
@@ -393,9 +249,10 @@ Large session. Highlights, newest first:
   keep-alive window.
 - Full R-test / capacity runs against the **phone simulator or a real EL15**
   (no on-device demo now, so these can't be auto-driven from firmware).
-- **Real ALIENTEK EL15**: load control, all modes, and telemetry now VERIFIED on
-  hardware (§0, §10). Full R-test / capacity runs with real current still pending.
-- **SD card**: read+write verified on hardware via the test scaffolding (§12);
+- **Real ALIENTEK EL15**: load control, all modes, telemetry and now a full
+  **R-test sweep with real current** are VERIFIED (§9, §10). A **capacity run
+  with real current is still completely unproven**.
+- **SD card**: read+write verified on hardware via the test scaffolding (§11);
   the **UI Save path is still untested** — run Settings ▸ SD ▸ Check card, then an
   R-test/battery Save, and confirm `RTEST_NNN.CSV` opens in a spreadsheet and that
   with no card the button honestly says "No card detected".
@@ -414,16 +271,30 @@ Large session. Highlights, newest first:
 
 ---
 
-## 7. Open items & next steps (prioritized)
+## 6. Open items & next steps (prioritized)
 
 **Do these first — validate what already exists**
+- **Run a CAPACITY test with real current.** The R-test has now been proven with
+  real current (§10); the capacity engine has not, in any form — pause/resume,
+  rated-capacity metrics, auto-save and the per-sample CSV are all unexercised.
+  A small protected cell with the cutoff set high is enough.
+  `FIRST_CONTACT.md` Phase 2, steps 19–23.
 - **Exercise the SD Save buttons.** Settings ▸ SD ▸ Check card, then an
-  R-test/battery Save. Highest-value untested path in the tree. Delete the
-  leftover `SDTEST_00N.CSV` files while you're there.
-- **Run a test with real current** (bench PSU first, then a small protected
-  cell) — `FIRST_CONTACT.md` Phase 2, steps 17–23.
+  R-test/battery Save. The path underneath is verified; the buttons are not.
+  Delete the leftover `SDTEST_00N.CSV` files while you're there.
 - **Drill the safety layers** (link-guard hot drop, crash recovery, PWR
   long-press) — `FIRST_CONTACT.md` steps 15–16b. None has ever fired for real.
+- **Finish the R-test tuning matrix** (§10, §12). The duration and sample-rate
+  arms are still unmeasured — the bench source collapsed part-way through.
+
+**Loose ends from this session**
+- **The in-flight recovery flag stuck as set across several boots** even after
+  the guard reported clearing it, so every boot offered recovery. It stopped
+  reproducing once instrumented and is currently clean. `prefs::armInFlight()`
+  now logs each transition and whether the NVS write took —
+  `[prefs] inFlight -> N (NVS WRITE FAILED)` is the smoking gun to watch for.
+- **The bench source collapsed mid-sweep once** (20 V → ~0 V at 0.5 A, self
+  recovering). Unexplained. The harness's 10 %-of-Voc sag guard caught it.
 
 **Safety / correctness**
 - **Port the command checksum to the Android app.** `El15Protocol.kt` still
@@ -479,8 +350,21 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
 
 ---
 
-## 8. Gotchas & lessons (don't relearn these)
+## 7. Gotchas & lessons (don't relearn these)
 
+- **A non-CONNECTED BLE state is NOT a link drop.** `main.cpp`'s state handler
+  used to tear down any running test whenever the state wasn't `CONNECTED` — but
+  `SCANNING` and `CONNECTING` aren't either, so the user opening Connect and
+  tapping **Scan** mid-discharge silently killed the test, and mid-priming it
+  died as "Cancelled" leaving nothing to save. Latch `g_wasConnected` and act
+  only on a real drop from a live link. The link guard keeps its own copy of the
+  same latch for the same reason.
+- **A stale protection must not veto the next test.** Priming used to abort the
+  instant it saw a warning bit, so a trip left over from a link drop or a
+  controller reset made the R-test unusable. Priming already commands the exact
+  state that lets the device shed a trip (CC / setpoint 0 / LOAD OFF), so it now
+  keeps pushing that for a 4 s grace period. A trip *during* a sweep still aborts
+  immediately — current is flowing then.
 - **Heap-corruption panic (2026-07-21):** rebuilding LVGL result rows per test
   (`lv_obj_clean` + chart `set_point_count` realloc) interleaved frees with chart
   buffer reallocs → Load-access-fault in the next layout pass. **Fix pattern kept
@@ -544,7 +428,7 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
 
 ---
 
-## 9. Companion docs
+## 8. Companion docs
 
 All refreshed 2026-08-01 against `6adea41`.
 
@@ -567,7 +451,7 @@ All refreshed 2026-08-01 against `6adea41`.
 
 ---
 
-## 10. EL15 wire protocol on real hardware (2026-07-24)
+## 9. EL15 wire protocol on real hardware (2026-07-24)
 
 The protocol is confirmed against a real unit now, not just the simulator.
 
@@ -582,7 +466,7 @@ The protocol is confirmed against a real unit now, not just the simulator.
 - **Telemetry is POLL-driven:** the device sends a status frame only in reply to a
   POLL write; it does not free-run. (Proven by disabling polling — all telemetry
   stopped.) So a working POLL is proof FFF3 writes land.
-- **Control writes must be paced** (see §0.3): ≥50 ms apart and clear of the poll,
+- **Control writes must be paced** (§9): ≥50 ms apart and clear of the poll,
   or the device drops the one that arrives too soon. `writeRaw` enforces this.
 - **All 6 mode opcodes verified** on hardware (CC 01, CV 09, CR 11, CP 19,
   CAP 02, DCR 0A) — commanded mode == device-reported `b5`.
@@ -596,7 +480,9 @@ The protocol is confirmed against a real unit now, not just the simulator.
   stepped ladder never hit this because its first level was `maxCurrent/n`,
   never zero. Found 2026-08-01 on real hardware.
 
-## 11. Poll-rate finding (2026-07-24)
+## 10. Sample-rate and sweep tuning (measured)
+
+### Poll rate (2026-07-24)
 
 Swept 250→20 ms polling, comparing full 28-byte frames for fresh-vs-repeated:
 
@@ -615,7 +501,54 @@ board off USB). **50 ms is now the default** (`prefs`, and the Settings chips ar
 `20/10/4/2 Hz`). The NVS key was bumped `pollMs`→`pollMs20` so existing devices
 re-default cleanly.
 
-## 12. SD card — bit-banged software SPI (2026-07-24)
+### Control-write vs poll timing (2026-08-01)
+
+A control write used to reset `lastPollMs_`, pushing the next poll a **whole poll
+interval** away. During an R-test sweep — which re-commands the setpoint at
+10 Hz — that halved the sample rate: a 20 Hz poll delivered ~12 Hz of data.
+`El15Client::ctrlPollGapMs` now holds the poll off by a short gap instead, so the
+two cadences are independent. Two *control* writes still need their 50 ms
+(that is the separation the device enforces by dropping the second).
+
+Three-way A/B on real hardware, 0.5 A over 10 s, all in one session so the DUT
+could not drift between arms:
+
+| gap | samples / 10 s | σ_R | R² | run-to-run spread |
+|---|---|---|---|---|
+| **25 ms** | **150, 150** | 0.95 mΩ | 0.979 | 0.18 % |
+| 40 ms | 143, 120 | 0.82 mΩ | 0.986 | 1.46 % |
+| 60 ms | 95, 87 | 0.97 mΩ | 0.987 | 0.24 % |
+
+**σ_R is flat across all three** — the tighter gap costs nothing in fitted
+uncertainty and buys 70 % more samples. The extra points are individually
+noisier (R² 0.979 vs 0.987) by almost exactly the factor the larger *n*
+compensates for, which is why σ lands in the same place. **Default 25 ms.**
+
+Do not chase a true 20 Hz during a sweep: ~15 Hz is near the ceiling, because the
+device only produces ~17–19 fresh samples/s and a sweep also carries a 10 Hz
+command stream.
+
+The 40 ms arm's poor spread was **not** the gap — one of its runs lost the first
+second of the ramp because the initial LOAD_ON did not land (§10) and the
+re-assert interval was 1 s. That is now 400 ms.
+
+### R-test repeatability (measured)
+
+0.5 A / 10 s / 20 Hz, three repeats: **R = 84.15 mΩ, run-to-run spread 0.61 mΩ
+(0.72 %)**, R² 0.995–0.998, ΔT under 1.1 °C. The fit's self-reported σ_R averaged
+0.45 mΩ against that 0.61 mΩ spread — the right order of magnitude, mildly
+**optimistic**. Worth knowing, since the `reliable` flag is gated on σ_R.
+
+Two cautions for anyone repeating this:
+- **Absolute R is not comparable across sessions.** The same physical setup read
+  53.6 mΩ, then 84.2 mΩ, then 77.4 mΩ across this session's reflashes. Contact
+  resistance moves. Compare *within* a session, or use the tare/4-wire workflow.
+- **The bench source collapsed mid-run once** (20 V → ~0 V during a 20 s sweep at
+  0.5 A, recovering on its own afterwards). The harness aborts if sag exceeds
+  10 % of Voc, which is what caught it. Cause unknown; the duration/sample-rate
+  matrix is still unfinished because of it.
+
+## 11. SD card — bit-banged software SPI (2026-07-24)
 
 **The C6 has ONE general-purpose SPI host and the AMOLED owns it in QSPI mode.**
 The old "share the bus via GPIO-matrix reroute" scheme (now deleted) never worked:
@@ -650,9 +583,41 @@ its header. Delete the `SDTEST_00N.CSV` files left from bring-up.
 
 ---
 
+## 12. The R-test tuning harness (`EL15_RTUNE`)
+
+In `main.cpp`, gated like the other scaffolding. Runs a matrix of sweeps
+back-to-back and prints one CSV row per run, then a summary.
+
+**It reports run-to-run SPREAD, not just the σ each fit claims about itself** —
+a fit can be confidently wrong, and only repetition shows it. Every config runs
+`REPEATS` times.
+
+```bash
+PLATFORMIO_BUILD_FLAGS="-D EL15_RTUNE -D RTUNE_PEAK_A=0.5f" "$PIO" run -d firmware -t upload --upload-port "$PORT"
+# add -D EL15_RTUNE_STAGE2 for the duration/rate matrix
+# add -D EL15_RTUNE_STAGE3 for the ctrl->poll gap matrix
+```
+
+Safety properties, all of which exist because something went wrong without them:
+- **Never auto-starts.** Connects, prints `ready - press any key`, waits. Every
+  reset your monitoring causes therefore happens before anything is energised
+  (§1).
+- **Forces LOAD OFF on boot** if the in-flight flag is set, instead of waiting
+  for a banner tap — a headless rig has nobody to tap.
+- **Aborts if sag exceeds 10 % of Voc**, i.e. if the source is not stiff enough
+  for the current being asked of it.
+- `RTUNE_PEAK_A` is deliberately far below what the fuse/ratings would allow.
+  Accuracy tuning is about repeatability, not amplitude.
+
+Driving it from the host: open the port **without** pulsing RTS, wait for the
+ready line, write one byte, then capture. There is a worked example in this
+session's git history.
+
+---
+
 ## 13. Doc map — read in this order
 
-New to the tree? `README.md` (what it is and how to build) → this file §0a/§3/§8
+New to the tree? `README.md` (what it is and how to build) → this file §0/§3/§7
 (state, hardware facts, gotchas) → `FIRST_CONTACT.md` (what to do at the bench).
 `QA_GUIDE.md` is the reference you come back to per feature.
 

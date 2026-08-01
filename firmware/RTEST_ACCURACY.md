@@ -230,6 +230,45 @@ into the fit.
   and down-ramp visits. That keeps the V-I chart readable and the CSV compact
   without the engine allocating per sample.
 
+### Measured on real hardware (2026-08-01)
+
+First numbers from an actual EL15 rather than reasoning. DUT was a bench source
+of ~20 V through test leads; absolute R is not the point, repeatability is.
+
+**0.5 A / 10 s / 20 Hz, three repeats:** R = 84.15 mΩ, **run-to-run spread
+0.61 mΩ (0.72 %)**, R² 0.995–0.998, ~123 samples, ΔT < 1.1 °C.
+
+**Is σ_R honest?** This is the question §2.2 rests on, since "reliable" is gated
+on it. Measured both ways:
+
+| Sweep | mean σ_R | true run-to-run spread | verdict |
+|---|---|---|---|
+| 0.3 A / 10 s | 0.81 mΩ | 0.67 mΩ | slightly conservative |
+| 0.5 A / 10 s | 0.45 mΩ | 0.61 mΩ | slightly optimistic |
+
+So σ_R is the right order of magnitude — within ~1.4× either way — which is what
+the reliability gate actually needs. It is **not** a conservative bound; do not
+read it as one.
+
+**Sample rate vs. quality.** A three-way A/B of the control-write-to-poll gap
+(HANDOVER §10) found σ_R *flat* at 0.82–0.97 mΩ while the sample count ranged
+from 87 to 150. More samples came with proportionally noisier individual points
+(R² 0.979 at 150 samples vs 0.987 at 90), and the two effects cancelled almost
+exactly. **Sample count is not the limiting factor at these currents** — which
+retro-justifies §2.3 being demoted: the fit is limited by something systematic,
+not by counting statistics.
+
+**What that implies for §2.1.** If white noise is not the binding constraint, the
+residual error is systematic — drift, contact resistance, regulation lag — and
+the symmetric ramp's drift cancellation is doing the real work. Two observations
+support that: the same physical setup read 53.6, then 84.2, then 77.4 mΩ across
+one session's reflashes (contact resistance moving between sessions, not within
+them), and ΔT stayed under 1.1 °C so self-heating was *not* the dominant term at
+0.5 A. At higher currents it would be, and the ramp symmetry matters more.
+
+**Untested:** whether longer sweeps help. The 20 s and 60 s arms were lost when
+the bench source collapsed mid-run.
+
 ### Still not done (from §5)
 
 - **Curvature/residual flag** (§2.5) — arguably easier now: with 300 points and
