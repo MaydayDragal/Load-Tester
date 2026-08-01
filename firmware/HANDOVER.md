@@ -4,12 +4,118 @@ Living handover for the **standalone ESP32-C6 firmware** (`firmware/`) that turn
 a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
-**Last updated:** 2026-07-24.
-**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`). Committed + merged.
+**Last updated:** 2026-08-01.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `6adea41`.
 
 ---
 
-## 0. Latest session (2026-07-24) — FIRST REAL EL15 + SD card working
+## 0a. Latest session (2026-08-01b) — capacity-test overhaul + SD/RTC fixes
+
+Eight features/fixes, all built and flashed to the board. Flash **69.0 %** of the
+3 MB slot, RAM **18.2 %** static, clean under `-Wall -Wextra`.
+
+1. **CSV file dates were wrong — fixed.** The report *body* was always right; what
+   was wrong was the **FAT directory timestamp**, so a file browser showed the
+   card's default date. SdFat only stamps directory entries if you give it a
+   clock, and nothing ever did. `sd_card.cpp` now installs a
+   `FsDateTime::setCallback` that reads the PCF85063. Verified on hardware: the
+   file's FAT stamp and the CSV body now both read `2026-08-01 12:56:16`. The
+   report also gained separate `# Date` / `# Time` rows, which a spreadsheet
+   parses natively (the combined string imports as text).
+2. **SD card re-initialises after an eject/insert.** The card was mounted once
+   and kept forever, so pulling it left SdFat serving a cached FAT, and a
+   re-inserted card (back in native SD mode) ignored SPI until CMD0/ACMD41 ran
+   again. Every entry point now probes with CMD10 first and drops the mount if
+   the card does not answer; failures anywhere call `sd::invalidate()`, and
+   Settings ▸ SD ▸ Check card always re-inits.
+3. **Per-datapoint logging, buffered in flash.** New `sample_log.{h,cpp}`:
+   LittleFS on the 896 KB `spiffs` partition, 24-byte records, 32-record RAM
+   batches. Bounded by a **tier schedule** — tier 0 samples every 2 s until it
+   has spent half the 8 000-record budget, then the interval doubles and the
+   next tier gets half of what is left, so each tier covers the same wall-clock
+   span and an arbitrarily long test still produces a complete curve. The CSV
+   gains an `elapsed_s,voltage_v,current_a,power_w,capacity_ah,capacity_mah,
+   energy_wh,temperature_c` block streamed straight out of flash. Verified:
+   600 offered samples stored 300 at 2 s, replayed byte-correct.
+   **The 8 000-record cap is set by the SD link, not the flash** — writing rows
+   over the ~250 kHz bit-banged bus costs ~2 s per 1 000 rows, and `replay()`
+   yields a tick per batch so the idle-task watchdog is not starved.
+4. **Results auto-save when a test completes.** Both engines. The UI paints
+   "Writing to card…" and flushes before the blocking call; a failure leaves the
+   reason on the button, which stays tappable to retry (the result and its flash
+   log survive until the next test starts).
+5. **Capacity tests PAUSE instead of dying.** `CapacityTest` gained a `PAUSED`
+   state: load off, clock stopped, every accumulator and the flash log kept.
+   A critical controller battery pauses (and **auto-resumes** when USB/charge
+   returns); a dropped BLE link pauses. The run card shows an amber reason and a
+   RESUME button. `durationS` counts active time only, and the result carries
+   `pausedS`.
+6. **Fixed: a battery test could not be returned to.** Root cause was in
+   `main.cpp` — the BLE state handler treated *any* non-CONNECTED state as a
+   drop and called `g_batt.stop()`, so opening Connect and tapping **Scan**
+   mid-discharge tore the test down (mid-priming it died as "Cancelled", leaving
+   nothing to save). It now latches `g_wasConnected` and only acts on a real
+   drop. Backed up by UI fixes: `showScreen()` now re-derives the R-test/battery
+   view from the engine's actual phase, and a **running-test chip** in the status
+   strip appears on every other screen and taps straight back into the live test.
+   The R-test's old force-navigate-on-every-progress hijack (QA_REPORT L6) is
+   gone — the chip replaces it.
+7. **Optional rated capacity → real battery metrics.** New keypad row (mAh,
+   persisted). Setup shows the C-rate and expected runtime; the run screen shows
+   "% of rated drawn" and an ETA; the result adds **state of health**
+   (green ≥80 %, amber ≥60 %, red below), rated capacity and C-rate. All of it
+   is hidden when no rating is entered — nothing is guessed.
+8. **Screen timeout is now selectable** at Never / 30 s / 1 min / 5 min /
+   10 min / 30 min (two rows of three), with a line spelling out that it dims at
+   the chosen interval and blanks at 5× it.
+
+Hardware-verified this session (via `EL15_SDTEST`, no current drawn): RTC read,
+SD info/write/increment/readback, the FAT timestamp, mount invalidation and
+re-init, LittleFS mount (**costs only ~2.3 KB of heap** — 43.0 KB free before,
+40.8 KB after, and BLE still auto-connects afterwards), and the log's tier
+schedule + replay. **Still unverified: anything that draws real current** — no
+capacity or R-test run has been performed on the connected EL15.
+
+Leftover: `SDTEST_003.CSV` / `SDTEST_004.CSV` are on the card from this session.
+
+---
+
+## 0b. Earlier that day (2026-08-01) — documentation audit, no functional change
+
+A read-only pass over the whole firmware tree to bring every doc back in line
+with the code. Build re-verified at `6adea41`: **clean under `-Wall -Wextra`**,
+flash **2,113,255 B** of the 3 MB `huge_app` slot (67 %), **RAM 17.8 %** static.
+
+Docs rewritten or corrected: `README.md` (was still claiming the firmware had
+never been compiled or flashed), `QA_GUIDE.md` (was describing the deleted
+on-device demo simulator, five screens, and a stubbed SD save), `QA_REPORT.md`
+(now carries a resolution table — 10 of its 12 H/M findings are fixed),
+`RTEST_ACCURACY.md` (the tare/4-wire item is implemented), `CAPACITY_PLAN.md`
+(§2.4 still described the abandoned shared-SPI scheme; phases 0/1/2/4 are done),
+`FEATURE_IDEAS.md` (audio, both buttons, SD, RTC, PMIC and Wi-Fi were all still
+listed as "completely unused"), `FIRST_CONTACT.md` (phases 0–1 are complete).
+
+Three small code changes, all comment/warning level:
+- `sd::unmount()` is `[[maybe_unused]]` — it was the build's only warning.
+- Stale comments corrected in `sd_card.cpp`, `ui.h`, `main.cpp`, `display.cpp`,
+  `board_config.h` and `platformio.ini`, which still described the SD card as
+  sharing the panel's SPI bus and the draw buffer as 1/8 frame (it is 1/7).
+
+Two findings worth acting on:
+1. **The Android app never got the checksum fix.** `app/.../El15Protocol.kt`
+   still builds `LOAD_ON/LOAD_OFF/LOCK/modeCommand/setpointCommand` with **no
+   trailing sum-to-zero byte** — the exact defect that made load control silently
+   do nothing on the real EL15 until it was fixed here on 2026-07-24. The app can
+   read telemetry (POLL carries its checksum) but cannot drive a real unit. Port
+   `frameChecksum()` across. See QA_REPORT "N1".
+2. **`is_shared_interface = true` on the panel bus is now vestigial.** Its only
+   purpose was sharing the SPI host with the SD card, which moved to software SPI
+   on 2026-07-24. It costs a bus-lock round-trip per flush chunk. Left alone
+   (a panel change wants hardware eyes on it) but flagged in `display.cpp`.
+
+---
+
+## 0. Previous session (2026-07-24) — FIRST REAL EL15 + SD card working
 
 This was the first session against a **real ALIENTEK EL15** (all prior work was
 simulator-only). Four things were found and fixed on hardware — read these before
@@ -96,11 +202,13 @@ audio.{h,cpp}       ES8311 codec feedback (continuous-stream I2S tone synth)
 es8311.{c,h},        vendored Espressif/Waveshare ES8311 driver (Arduino I²C HAL)
   es8311_reg.h
 sd_card.{h,cpp}     microSD on bit-banged software SPI (SdFat); own driver (§12)
+sample_log.{h,cpp}  per-datapoint capacity log buffered in flash (LittleFS),
+                    tier-scheduled so a long run stays inside a fixed budget
 report.h            CSV test reports (RTEST_/BATT_) written via sd_card
 prefs.{h,cpp}       NVS persistence (debounced) + synchronous in-flight/creds flags
 link_guard.h        link-loss auto-stop supervisor + crash-recovery (header-only)
 netclock.{h,cpp}    Wi-Fi scan + NTP → PCF85063 (radio powered only per op)
-ui.{cpp,h}          LVGL UI (~2700 lines) — all screens, overlays, result rows
+ui.{cpp,h}          LVGL UI (~3100 lines) — all screens, overlays, result rows
 board_config.h      ALL board pins (display, touch, PMIC, RTC, audio, buttons, SD)
 include/lv_conf.h   LVGL config (fonts, chart, refr period 16 ms, indev 10 ms)
 platformio.ini      pioarduino platform, qio_qspi, huge_app.csv, -Wall -Wextra
@@ -211,10 +319,22 @@ Large session. Highlights, newest first:
 
 ## 6. Verified good / not yet verified
 
-**Verified on hardware:** clean boot (no panic/bootloop), ES8311 init, BLE
-connect to a random-address peer, buttons don't phantom-fire at boot, audio tones
-clean after the streaming fix, R-test V-I chart renders full-width with no stray
-line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
+| Area | State |
+|---|---|
+| Build, clean under `-Wall -Wextra` | ✅ 2.11 MB / 3 MB slot, RAM 17.8 % static |
+| Clean boot, no panic/bootloop; ES8311 init; buttons don't phantom-fire | ✅ |
+| Audio tones clean (after the continuous-stream fix) | ✅ |
+| BLE connect to a random-address peer (phone simulator) | ✅ |
+| **Real EL15:** connect, live telemetry, all 6 mode opcodes, setpoint, LOAD ON/OFF | ✅ 2026-07-24 |
+| **SD card:** mount, write ×2 with auto-increment, byte-correct readback | ✅ 2026-07-24 (via `EL15_SDTEST`) |
+| R-test V-I chart full-width, battery graph time axis smooth | ✅ |
+| **SD write path incl. FAT timestamps + re-init after eject** | ✅ 2026-08-01 (via `EL15_SDTEST`) |
+| **Flash datapoint log** — mount, tier schedule, replay | ✅ 2026-08-01 |
+| **SD Save from the UI buttons** (now also automatic on completion) | ❌ never exercised |
+| **Any test with real current** through a real EL15 | ❌ never done |
+| **Pause/resume, rated-capacity metrics, running-test chip** | ❌ compile-clean, needs a real run |
+| Link guard, crash recovery, brownout auto-off, load-safe power-off | ❌ never fired for real |
+| NVS persistence, burn-in shift/dim, NTP sync, Kelvin + tare | ❌ compile-clean only |
 
 **Needs a human's eyes/ears (couldn't verify remotely):**
 - Display integrity at **80 MHz** QSPI — user hasn't reported artifacts, but
@@ -247,9 +367,27 @@ line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
 
 ## 7. Open items & next steps (prioritized)
 
+**Do these first — validate what already exists**
+- **Exercise the SD Save buttons.** Settings ▸ SD ▸ Check card, then an
+  R-test/battery Save. Highest-value untested path in the tree. Delete the
+  leftover `SDTEST_00N.CSV` files while you're there.
+- **Run a test with real current** (bench PSU first, then a small protected
+  cell) — `FIRST_CONTACT.md` Phase 2, steps 17–23.
+- **Drill the safety layers** (link-guard hot drop, crash recovery, PWR
+  long-press) — `FIRST_CONTACT.md` steps 15–16b. None has ever fired for real.
+
 **Safety / correctness**
-- **Triage the rest of the QA audit** (task `wyoedvuk0` output; only the top 2
-  were fixed). Re-run `/code-review` or the workflow if needed.
+- **Port the command checksum to the Android app.** `El15Protocol.kt` still
+  builds every command frame without the trailing sum-to-zero byte, so the app
+  can read a real EL15 but cannot control it — the same bug this firmware had
+  until 2026-07-24. One `frameChecksum()` helper plus five call sites.
+- ~~Triage the rest of the QA audit~~ **done 2026-08-01** — re-read against
+  `6adea41` and recorded in `QA_REPORT.md`. 10 of 12 H/M findings are fixed, M1
+  was a deliberate semantics decision (documented), and **M3 is still open**: a
+  scan window that simply expires never resets the state, so the UI keeps saying
+  "Scanning". Open low-severity leftovers: L1 (fuse keypad unreachable), L4 (DCR
+  hero shows `dcrI1`), L6 (progress callbacks yank you back to the R-test
+  screen), L8 (informative connect-failure text overwritten by "Disconnected").
 - ~~BLE-drop supervisor during a capacity discharge~~ **done** — `link_guard.h`
   now reconnects and force-pushes LOAD OFF on any hot link loss, with a locked
   alarm banner, and an NVS in-flight flag offers the same recovery after a
@@ -264,6 +402,12 @@ line, battery graph time axis smooth. Build is clean under `-Wall -Wextra`.
   done-callback calling `lv_disp_flush_ready`, restore double buffering. Roughly
   halves redraw cost. (User asked about Arduino vs IDF — conclusion: stay
   Arduino, drop to IDF APIs only here and for I²S if needed.)
+- **Free flush throughput: drop `is_shared_interface`.** `display.cpp` still
+  builds the panel bus in shared mode, which acquires/releases the SPI lock on
+  every flush chunk. Its only reason was the SD card sharing SPI2, which stopped
+  being true on 2026-07-24. Setting it `false` is a one-word change worth a few
+  percent per redraw — but it changes how the panel is driven, so verify on
+  hardware (garbling / wrong colors) before keeping it.
 - ~~SD card save~~ **done + verified on hardware** (2026-07-24): rewritten onto
   bit-banged software SPI via SdFat (§12) after the shared-bus scheme proved
   impossible. `sd_card.cpp` + `report.h` write real `RTEST_NNN.CSV` /
@@ -336,27 +480,41 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
 - **NVS commits are debounced** (`prefs::tick()`, 1.5 s settle) so a slider drag
   is one flash write, but the in-flight recovery flag and Wi-Fi creds are
   written synchronously on purpose — they have to survive the very next event.
-- **One SPI host, two peripherals:** the C6 has a single general-purpose SPI
-  controller (SPI2) and the AMOLED owns it. The SD card is a second *device* on
-  it, and `sd_card.cpp` swings the clock/data signals between the two pin sets
-  through the GPIO matrix around each card access. Consequences to preserve:
-  Arduino_GFX must be constructed with `is_shared_interface = true` (otherwise
-  it holds the bus lock forever and the card hangs), the card is never left
-  mounted, and nothing may draw while it is — the UI paints its "Writing to
-  card..." state and calls `lv_refr_now()` *before* the blocking save.
+- **One SPI host, and the panel owns it.** The C6 has a single general-purpose
+  SPI controller (SPI2) and the AMOLED holds it in QSPI mode. Making the SD card
+  a second *device* on that host — swinging the signals between two pin sets
+  through the GPIO matrix per access — **was tried and does not work**: the IDF
+  `sdspi` driver can't transact on the panel's bus (card init dies at CMD59).
+  That scheme is deleted. The card runs on **bit-banged software SPI** on its own
+  pins (§12), so a redraw and a card access no longer interact at all. Two
+  leftovers from the old scheme: `Arduino_GFX` is still constructed with
+  `is_shared_interface = true` (now unnecessary, costs a lock round-trip per
+  flush chunk — see §7), and the UI still paints its "Saving..." state with
+  `lv_refr_now()` before calling in, which is still correct because the save
+  **blocks the loop task** for ~1 s even though it no longer blocks the bus.
 
 ---
 
 ## 9. Companion docs
 
-- `README.md` — build/flash + overview (also documents the ESP-IDF build).
-- `QA_GUIDE.md` — advanced-QA test matrix & procedures (predates newest features;
-  extend it as features land).
-- `QA_REPORT.md` — earlier defect report (some items since fixed).
-- `RTEST_ACCURACY.md` — R-test measurement methodology & remaining improvements.
-- `CAPACITY_PLAN.md` — battery-test roadmap (Phase 0 SD now landed).
-- `FEATURE_IDEAS.md` — full feature/UX/audio/buttons backlog.
-- `UI_DESIGN_BRIEF.md` — v2 "Focus" UI spec.
+All refreshed 2026-08-01 against `6adea41`.
+
+- `README.md` — build/flash, feature set, hardware notes, architecture.
+- `FIRST_CONTACT.md` — ordered real-EL15 bench checklist. **Phases 0–1 done;
+  start at step 15.**
+- `QA_GUIDE.md` — per-feature test matrix & procedures, wire protocol, safety
+  behavior, known gaps.
+- `QA_REPORT.md` — the 2026-07-21 code audit, now with a resolution table for
+  every finding plus three new ones.
+- `RTEST_ACCURACY.md` — R-test methodology; items 1–4 implemented, 5–6 open.
+- `CAPACITY_PLAN.md` — battery-test roadmap; phases 0/1/2/4 done, 3 (per-sample
+  CSV streaming) open.
+- `FEATURE_IDEAS.md` — full feature/UX/audio/buttons backlog, with what's landed
+  struck through.
+- `UI_DESIGN_BRIEF.md` — v2 "Focus" UI spec. A **design-time brief**, written
+  before the hardware was explored: it predates the physical buttons, audio,
+  Settings, and the battery screen, and its §1 still mentions a built-in demo
+  simulator. Read it as the visual language, not as a feature list.
 
 ---
 
@@ -427,10 +585,17 @@ byte-correct readback (with real RTC timestamp) → card healthy. A **wedged car
 (from an aborted write) reports CMD0 `R1=0x00` and only a **physical reseat /
 power-cycle** clears it — an ESP reset won't.
 
-**Still untested:** the actual UI Save path (Settings ▸ SD ▸ Check card, and the
-R-test/battery Save buttons) — exercise once. Delete the `SDTEST_00N.CSV` files
-left from testing.
+**Still untested (as of 2026-08-01):** the actual UI Save path — Settings ▸ SD ▸
+Check card, and the R-test/battery **Save** buttons. Exercise it once and confirm
+the CSV opens in a spreadsheet with a real RTC timestamp and the probe wiring in
+its header. Delete the `SDTEST_00N.CSV` files left from bring-up.
 
 ---
+
+## 13. Doc map — read in this order
+
+New to the tree? `README.md` (what it is and how to build) → this file §0a/§3/§8
+(state, hardware facts, gotchas) → `FIRST_CONTACT.md` (what to do at the bench).
+`QA_GUIDE.md` is the reference you come back to per feature.
 
 *Everything is committed and merged to `main`.*

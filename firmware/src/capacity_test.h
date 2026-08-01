@@ -17,6 +17,7 @@
 #include <functional>
 #include "el15_controller.h"
 #include "el15_protocol.h"
+#include "sample_log.h"
 
 class CapacityTest {
  public:
@@ -29,24 +30,54 @@ class CapacityTest {
     int maxFan = 0;
     float cutoffV = 0, currentA = 0;
     const char *stopReason = "";   // static string
+    // Rated-capacity derived figures. ratedAh == 0 means the user did not enter
+    // a rating, and sohPct/ratedPct are then meaningless and not shown.
+    float ratedAh = 0;
+    float sohPct = 0;      // measured / rated x 100 — state of health
+    float cRate = 0;       // discharge current expressed in C
+    uint32_t pausedS = 0;  // total time spent paused (excluded from durationS)
   };
 
   // Configuration — set before start().
   float cutoffV = 0;                     // automatic minimum-voltage stop point
   float dischargeA = 0;                  // requested discharge current
-  uint32_t maxDurationS = 12u * 3600u;   // safety cap
+  float ratedAh = 0;                     // optional nameplate capacity (0 = unknown)
+  uint32_t maxDurationS = 12u * 3600u;   // safety cap (counts ACTIVE time only)
   float maxAh = 50;                      // safety cap
   uint32_t restS = 60;                   // post-cutoff rebound window (0 = none)
 
-  // Callbacks (fired on the loop task). phase: 1 = discharging, 2 = resting.
+  // Callbacks (fired on the loop task).
+  // phase: 1 = discharging, 2 = resting, 3 = paused.
   std::function<void(float v, float i, float ah, float wh, float temp,
                      uint32_t elapsedS, int phase)> onProgress;
   std::function<void(const Result &)> onComplete;
   std::function<void(const char *)> onError;
+  // Pause/resume transitions, so the UI can explain itself. `reason` is a static
+  // string while paused, nullptr on resume.
+  std::function<void(bool paused, const char *reason)> onPause;
 
   explicit CapacityTest(El15Controller *ctrl) : ble_(ctrl) {}
 
   bool running() const { return state_ != IDLE; }
+  bool paused() const { return state_ == PAUSED; }
+  const char *pauseReason() const { return pauseReason_; }
+
+  // Seconds of ACTIVE discharge so far (paused time excluded).
+  uint32_t elapsedS() const {
+    if (state_ == IDLE || tStart_ == 0) return 0;
+    uint32_t end = (state_ == RESTING || state_ == IDLE) ? endMs_ : millis();
+    uint32_t paused = pausedMs_ + (state_ == PAUSED ? millis() - pauseStartMs_ : 0);
+    return (end - tStart_ - paused) / 1000;
+  }
+
+  // Estimated seconds until the rated capacity is reached at the present
+  // current. 0 = unknown (no rating entered, or not discharging).
+  uint32_t remainingS() const {
+    if (state_ != DISCHARGING || ratedAh <= 0 || effA_ <= 0.001f) return 0;
+    float left = ratedAh - ah_;
+    if (left <= 0) return 0;
+    return (uint32_t)(left / effA_ * 3600.0f);
+  }
 
   void start() {
     if (running()) return;
@@ -59,6 +90,11 @@ class CapacityTest {
     minT_ = 1e9f; maxT_ = -1e9f; fanMax_ = 0;
     below_ = 0; lastMs_ = 0; haveSample_ = false;
     stopReason_ = "";
+    pausedMs_ = 0; pauseStartMs_ = 0; pauseReason_ = "";
+    tStart_ = 0; endMs_ = 0;
+    // Open the flash-backed datapoint log. A failure here is non-fatal: the
+    // test still runs and reports, the CSV just carries no per-sample block.
+    logging_ = samplelog::start();
     state_ = PRIMING;
     ble_->setMode(el15::MODE_CC);
     ble_->setSetpoint(0);
@@ -67,12 +103,19 @@ class CapacityTest {
     timerCb_ = PRIME_DONE;
   }
 
-  // Manual/external stop. Mid-discharge (or rest) the data collected so far is
-  // a valid partial result, so it completes with `reason`; during priming it
-  // cancels via onError. Either way the UI always gets exactly one callback.
+  // Manual/external stop. Mid-discharge (or rest, or paused) the data collected
+  // so far is a valid partial result, so it completes with `reason`; during
+  // priming it cancels via onError. Either way the UI always gets exactly one
+  // callback.
   void stop(const char *reason = "Stopped manually") {
     if (!running()) return;
-    if (state_ == DISCHARGING) {
+    if (state_ == DISCHARGING || state_ == PAUSED) {
+      // Close out the paused span and rejoin the normal path, so elapsedS()
+      // below counts it exactly once.
+      if (state_ == PAUSED) {
+        pausedMs_ += millis() - pauseStartMs_;
+        state_ = DISCHARGING;
+      }
       stopReason_ = reason;
       endV_ = vNow_;
       reboundV_ = vNow_;
@@ -89,18 +132,65 @@ class CapacityTest {
     }
   }
 
+  // Suspend the discharge WITHOUT ending the test: the load goes off and the
+  // clock stops, but every accumulator (Ah, Wh, min/max, the flash log) is kept
+  // so resume() carries straight on. This is what a controller-battery warning
+  // or a dropped BLE link should do — those are reasons to stop drawing current,
+  // not reasons to throw away hours of measurement.
+  //
+  // Only a live discharge can pause; returns false otherwise so the caller can
+  // fall back to stop(). Priming has nothing worth keeping and resting is
+  // already load-off and nearly over.
+  bool pause(const char *reason) {
+    if (state_ != DISCHARGING) return false;
+    pauseStartMs_ = millis();
+    pauseReason_ = reason;
+    state_ = PAUSED;
+    finishSafely();   // LOAD OFF + setpoint 0 — the whole point of pausing
+    samplelog::flush();
+    Serial.printf("[batt] PAUSED: %s (%.3f Ah so far)\n", reason, ah_);
+    if (onPause) onPause(true, reason);
+    if (onProgress) onProgress(vNow_, 0, ah_, wh_, lastTemp_, elapsedS(), 3);
+    return true;
+  }
+
+  // Resume a paused discharge. Returns false if there was nothing to resume.
+  bool resume() {
+    if (state_ != PAUSED) return false;
+    pausedMs_ += millis() - pauseStartMs_;
+    pauseReason_ = "";
+    // Drop the integration anchor: no Ah may be accrued across the paused gap,
+    // and the load needs a moment to re-regulate before its readings count.
+    lastMs_ = 0;
+    below_ = 0;
+    state_ = DISCHARGING;
+    ble_->setSetpoint(effA_);
+    ble_->setLoad(true);
+    Serial.printf("[batt] RESUMED at %.3f A (%.3f Ah so far)\n", effA_, ah_);
+    if (onPause) onPause(false, nullptr);
+    return true;
+  }
+
   // Feed a live reading into the running test.
   void onStatus(const el15::Status &s) {
     if (!running() || !s.valid) return;
     vNow_ = s.voltage;
+    lastTemp_ = s.temperature;
     if (state_ == PRIMING) {
       vOc_ = s.voltage;
+      return;
+    }
+    if (state_ == PAUSED) {
+      // Still worth showing the (now unloaded) voltage recovering, but nothing
+      // is integrated and the elapsed clock is frozen.
+      if (onProgress) onProgress(s.voltage, s.current, ah_, wh_, s.temperature,
+                                 elapsedS(), 3);
       return;
     }
     if (state_ == RESTING) {
       reboundV_ = s.voltage;
       if (onProgress) onProgress(s.voltage, s.current, ah_, wh_, s.temperature,
-                                 (endMs_ - tStart_) / 1000, 2);
+                                 elapsedS(), 2);
       return;
     }
     // DISCHARGING
@@ -120,8 +210,13 @@ class CapacityTest {
     else { minT_ = min(minT_, s.temperature); maxT_ = max(maxT_, s.temperature); }
     fanMax_ = max(fanMax_, s.fanSpeed);
 
+    uint32_t el = elapsedS();
+    // Offer every reading to the flash log; its tier schedule decides which are
+    // actually stored, so this stays cheap at a 20 Hz poll rate.
+    if (logging_) samplelog::add(el, s.voltage, s.current, s.temperature, ah_, wh_);
+
     if (onProgress) onProgress(s.voltage, s.current, ah_, wh_, s.temperature,
-                               (now - tStart_) / 1000, 1);
+                               el, 1);
 
     // Debounced automatic cutoff: three consecutive samples at/below the stop
     // point, or a single sample well below it (fail-safe against noise).
@@ -136,7 +231,9 @@ class CapacityTest {
 
   // Pump timers + duration cap; call from loop().
   void tick() {
-    if (state_ == DISCHARGING && (millis() - tStart_) / 1000 >= maxDurationS) {
+    // The cap counts ACTIVE discharge time, so a long pause can't end the test
+    // by itself — but the total energy budget it guards is unchanged.
+    if (state_ == DISCHARGING && elapsedS() >= maxDurationS) {
       stopReason_ = "Max duration reached";
       enterRest();
       return;
@@ -153,7 +250,7 @@ class CapacityTest {
   }
 
  private:
-  enum State { IDLE, PRIMING, DISCHARGING, RESTING };
+  enum State { IDLE, PRIMING, DISCHARGING, PAUSED, RESTING };
   enum TimerCb { NONE, PRIME_DONE, REST_DONE };
 
   void finishPriming() {
@@ -185,11 +282,18 @@ class CapacityTest {
 
   void complete() {
     finishSafely();
+    uint32_t activeS = elapsedS();
+    uint32_t pausedS = pausedMs_ / 1000;
     state_ = IDLE;
+    samplelog::flush();   // the last partial batch belongs in the report
     Result r;
     r.capacityAh = ah_;
     r.energyWh = wh_;
-    r.durationS = (endMs_ - tStart_) / 1000;
+    r.durationS = activeS;
+    r.pausedS = pausedS;
+    r.ratedAh = ratedAh;
+    r.sohPct = ratedAh > 0 ? ah_ / ratedAh * 100.0f : 0;
+    r.cRate = ratedAh > 0 && effA_ > 0 ? effA_ / ratedAh : 0;
     r.startV = startV_;
     r.endV = endV_;
     r.reboundV = reboundV_;
@@ -220,11 +324,16 @@ class CapacityTest {
   State state_ = IDLE;
   TimerCb timerCb_ = NONE;
   uint32_t timerAt_ = 0, tStart_ = 0, endMs_ = 0, lastMs_ = 0;
+  // Paused-time bookkeeping, so the reported duration and the logged timeline
+  // are both ACTIVE discharge time.
+  uint32_t pausedMs_ = 0, pauseStartMs_ = 0;
+  const char *pauseReason_ = "";
 
   float ah_ = 0, wh_ = 0, sumVdt_ = 0, sumDt_ = 0;
   float vOc_ = 0, vNow_ = 0, startV_ = 0, endV_ = 0, reboundV_ = 0, effA_ = 0;
-  float minT_ = 0, maxT_ = 0;
+  float minT_ = 0, maxT_ = 0, lastTemp_ = 0;
   int fanMax_ = 0, below_ = 0;
   bool haveSample_ = false;
+  bool logging_ = false;
   const char *stopReason_ = "";
 };

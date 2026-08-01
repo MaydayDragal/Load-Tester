@@ -8,7 +8,10 @@ stub, as part of this work).
 
 ---
 
-## 1. What exists today (starting point)
+## 1. What existed when this plan was written (2026-07-21 starting point)
+
+*Historical — everything below is superseded. Jump to §4 for current phase
+status.*
 
 - CAP is selectable; the device integrates Ah/Wh itself and reports them in the
   CAP-mode status tail (no temperature in those packets). The UI shows Ah in
@@ -67,17 +70,32 @@ stub, as part of this work).
   axis) on the Running screen; final curve on the Result screen. Fixed-capacity
   chart series allocated at build (no reallocs — see the 2026-07-21 panic).
 
-### 2.4 SD card (Phase 0 — DONE, also unblocked the R-test stub)
+### 2.4 SD card (Phase 0 — DONE and hardware-verified 2026-07-24)
 - ESP32-C6 has **no SDMMC host** — the slot runs in SPI mode: SCK=11,
   MOSI(CMD)=10, MISO(D0)=18, **CS=6** (confirmed against Waveshare's
   `pin_config.h`, which calls them `SDMMC_*`).
-- The C6 also has only **one general-purpose SPI host**, and the AMOLED owns it.
-  The card is therefore a second device on that host with the clock/data signals
-  re-routed through the GPIO matrix per access — so it is never left mounted,
-  and nothing may draw while it is. Full rationale in `sd_card.cpp`.
-- `sd::saveCsv()` mounts, writes and unmounts as one operation, from the loop
-  task; card-absent and write-failure states surface honestly in the UI (no fake
+- The C6 also has only **one general-purpose SPI host**, and the AMOLED owns it
+  in QSPI mode. The original plan — make the card a second device on that host
+  and re-route the signals through the GPIO matrix per access — **was tried and
+  does not work**: the IDF `sdspi` driver cannot transact on the panel's bus and
+  card init dies at CMD59 (`ESP_ERR_NOT_SUPPORTED`). That scheme is deleted.
+- The card now runs entirely on **bit-banged software SPI** on its dedicated
+  pins, via SdFat with our own `SdSpiBaseClass` driver (`SPI_DRIVER_SELECT=3`).
+  Plain `digitalWrite/digitalRead` gives an inherently slow, reliable ~250 kHz
+  clock; SdFat's own `SoftSpiDriver` used fast register GPIO that corrupted
+  512-byte block writes. `USE_SD_CRC=1` is required (the card rejects SdFat's
+  fixed bogus CRC byte at ACMD41), and the config is `SHARED_SPI`, not
+  `DEDICATED` (a dedicated multi-block write was left un-terminated and broke the
+  next file open). Nothing touches SPI2, so a card access and a screen redraw are
+  now fully independent. Full rationale in `sd_card.cpp` and `HANDOVER.md` §12.
+- `sd::saveCsv()` writes from the loop task and **stays mounted** — re-running
+  card init over software SPI is flaky and there is no bus to give back.
+  Card-absent and write-failure states surface honestly in the UI (no fake
   "Saved"), and a half-written file is deleted rather than left as a "result".
+- Verified end-to-end on hardware: mount → two writes with an incrementing
+  index → byte-correct readback. A **wedged card** (from an aborted write)
+  answers CMD0 with `R1=0x00` and needs a physical reseat — an ESP reset won't
+  clear it. The **UI Save button path is still unexercised**.
 - Naming: `RTEST_NNN.CSV` / `BATT_NNN.CSV`, next index by directory scan.
   Metadata header rows (config, firmware build, RTC timestamp if set — the CSV
   says "(RTC not set) uptime NNN s" when it is not).
@@ -98,17 +116,29 @@ stub, as part of this work).
 - Mode picker: CAP stays (raw device mode) — the picker gains a "BATT" tile
   (amber, like RT) that routes to the new screen instead of sending a mode.
 
-### 2.6 Persistence & clock (Phase 4)
-- NVS: last battery config, sample rate, brightness.
-- Settings gains "set clock" (simple hour/min/date steppers writing PCF85063)
-  so logs get real timestamps; until then filenames use the NNN sequence.
+### 2.6 Persistence & clock (Phase 4 — DONE)
+- NVS (`prefs.cpp`): battery + R-test setup, sample rate, brightness, volume/
+  mute, screen protection, Wi-Fi credentials, last device, auto-connect. Writes
+  are debounced (1.5 s settle) so a slider drag is one flash write; the
+  crash-recovery in-flight flag and the Wi-Fi credentials are written
+  synchronously on purpose.
+- Clock: the manual stepper UI was **replaced by Wi-Fi NTP** (`netclock.cpp`) —
+  Settings ▸ Clock scans for networks, takes a password and a UTC offset, and
+  "Sync clock now" writes the PCF85063 (clearing its oscillator-stop flag).
+  Reports then carry a real timestamp; until the clock is set the CSV says
+  `(RTC not set) uptime NNN s`. A manual set-time UI is still a nice-to-have for
+  benches with no Wi-Fi. Note a successful sync **auto-reboots** — see
+  `HANDOVER.md` §8 for why (the draw buffer cannot be reassembled after the
+  low-memory window).
 
 ## 3. Safety & failure-mode review (design-time)
 
 | Risk | Mitigation |
 |---|---|
-| BLE drops mid-discharge — no supervisor for cutoff | Engine treats disconnect as abort; on reconnect-capable link, retry LOAD_OFF loop + full-width alert. Residual: device keeps sinking until its own UVP — document loudly; recommend setting the EL15's hardware UVP as backstop when testing real packs. |
-| ESP reboot mid-test | NVS "test-in-progress" flag; on boot, alert + offer reconnect-and-stop. (Stretch goal.) |
+| BLE drops mid-discharge — no supervisor for cutoff | **Done** (`link_guard.h`): whenever the device reports the load on, the guard is armed; a drop from a live link starts up to 8 reconnect-and-force-LOAD-OFF attempts with a red banner + repeating alarm, and gives up loudly with a tappable retry. Residual: the guard needs a working radio, so the device keeps sinking until its own UVP if the link never comes back — **set the EL15's hardware UVP as a backstop when testing real packs**. Untested against a real drop. |
+| ESP reboot mid-test | **Done**: NVS in-flight flag written *synchronously* while energised; on boot the amber "restarted with the load ON" banner offers reconnect-and-force-off. Untested for real. |
+| Controller's own battery dies mid-test | **Done** (`main.cpp monitorPower()`): on battery (not USB), ≤ 8 % or ≤ 3.30 V for 3 consecutive 1 Hz reads force-stops the load before the controller can brown out and strand it. Keep the controller on USB for long unattended runs. |
+| Power-off strands an energised load | **Done**: a long PWR press forces LOAD OFF and flushes it over BLE *before* `display::powerOff()` cuts the rails, instead of the PMIC's own OFFLEVEL cutoff. |
 | Wrong cell count / cutoff too low | Auto-suggest + plausibility warning at setup; hard floor 0.1 V. |
 | Noise triggers early cutoff | 3-sample debounce; single-sample only below cutoff − 0.3 V. |
 | SD removed / full mid-test | Stream failures flip the UI save state to "SD error — RAM curve retained"; result save can retry. |
@@ -116,16 +146,52 @@ stub, as part of this work).
 
 ## 4. Phases & order of work
 
-| Phase | Scope | Est. size |
+| Phase | Scope | Status |
 |---|---|---|
-| 0 | ~~SD SPI bring-up, `sd::` module, real R-test CSV save, CS-pin verification~~ **done 2026-07-22** (untested on hardware) | ~1 session |
-| 1 | `capacity_test.h` engine + El15Simulator battery model (emf sags with drawn Ah along a simple SoC curve) so everything is testable on-device without hardware | ~1 session |
-| 2 | SCR_BATT setup/running/result UI + charts + picker/Menu wiring | 1–2 sessions |
-| 3 | CSV streaming during test + result save + file naming | ~0.5 session |
-| 4 | NVS persistence, RTC set UI, QA-guide update, full QA pass | ~1 session |
+| 0 | ~~SD bring-up, `sd::` module, real R-test CSV save, CS-pin verification~~ | ✅ **done** — rewritten onto bit-banged software SPI and **verified on hardware 2026-07-24** (§2.4). UI Save buttons still unexercised |
+| 1 | ~~`capacity_test.h` engine~~ | ✅ **done**. The on-device simulator was *removed* rather than extended — the battery model lives in the Android simulator app (`simulator/`), so the engine is always tested over a real BLE link |
+| 2 | ~~SCR_BATT setup/running/result UI + charts + picker/Menu wiring~~ | ✅ **done**, including the steady discharge curve (fixed time frame, smoothing, stepped auto-zoom Y scale) |
+| 3 | Per-sample datapoints in the CSV | ✅ **done 2026-08-01** — but *buffered in flash*, not streamed to the card. `sample_log.{h,cpp}` writes 24-byte records to LittleFS during the run and `report.h` streams them into `BATT_NNN.CSV` at the end. Streaming straight to the card was rejected: every SD write blocks the loop task over a ~250 kHz bit-banged link, so doing it per sample would stall the UI and the BLE poll for the whole run, and a card pulled mid-test would take the log with it |
+| 4 | ~~NVS persistence, clock, QA-guide update~~ | ✅ **done** (clock via Wi-Fi NTP rather than a stepper UI, §2.6). A full QA pass with **real current** is still outstanding |
 
-Dependencies: 0 → 3; 1 → 2 → 3; 4 last. Phases 0 and 1 are independent and
-could land in either order.
+Remaining: the hardware validation all of the above still needs — **no capacity
+run has yet drawn real current**.
+
+### Beyond the original plan (landed 2026-08-01)
+
+- **Pause / resume.** A critical controller battery or a dropped BLE link now
+  PAUSES the discharge instead of ending it: load off, clock stopped, Ah/Wh and
+  the flash log intact, amber banner + RESUME button. The controller-battery
+  case auto-resumes when power returns. `durationS` counts active time only and
+  the result reports `pausedS` separately. This closes the §3 risk table's worst
+  outcome — losing hours of measurement to a transient.
+- **Auto-save on completion**, with the manual button demoted to a retry.
+- **Rated capacity (optional)** → C-rate, expected runtime, live "% of rated
+  drawn" + ETA, and a **state-of-health** figure on the result and in the CSV.
+  §2.1's "capacity hint / C-rate helper / ETA" item, now done.
+- **Running-test chip** in the status strip so a test can be navigated away from
+  and returned to. Fixes the real defect behind it: the BLE handler used to
+  treat the user's own scan as a link drop and tore the test down.
+
+## 4a. What the engine actually does today (vs. §2.2)
+
+`capacity_test.h` implements §2.2 as designed, with these concrete values:
+
+- States `IDLE → PRIMING (1.5 s open-circuit) → DISCHARGING → RESTING (60 s) → done`.
+- Priming aborts on `Voc < 0.1 V`, `Voc > 60 V`, or `Voc ≤ cutoff + 0.2 V`.
+- Discharge current is clamped to `min(request, 12 A, 150 W ÷ Voc)`; below
+  0.01 A the test refuses to start.
+- Ah/Wh integrate per sample; a gap longer than 36 s (link stall) is discarded
+  rather than integrated across.
+- Cutoff debounce is exactly as specified: 3 consecutive samples ≤ cutoff, or a
+  single sample below `cutoff − 0.3 V`.
+- Safety caps: 12 h max duration, 50 Ah max.
+- Every exit path runs `finishSafely()` (LOAD OFF + setpoint 0), and every
+  `stop()` fires exactly one of `onComplete` / `onError` — a mid-discharge stop
+  yields a valid *partial* result rather than discarding the data.
+- **Not implemented from §2.1:** the capacity hint / C-rate chips / ETA, and the
+  per-chemistry plausibility warning on cell count (the count is capped per
+  chemistry, but no amber mismatch warning is shown).
 
 ## 5. Open questions (answers change the plan)
 

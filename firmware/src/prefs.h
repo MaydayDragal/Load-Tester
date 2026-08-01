@@ -37,6 +37,9 @@ struct Data {
   float battCutoff = 9.0f;
   bool battCutoffCustom = false;
   float battAmps = 1.0f;
+  // Nameplate capacity in mAh, 0 = not specified. Drives the C-rate, the
+  // time-remaining estimate and the state-of-health figure.
+  float battRatedMah = 0;
 
   // Wi-Fi (for NTP time sync only; the radio is otherwise off)
   char ssid[33] = "";

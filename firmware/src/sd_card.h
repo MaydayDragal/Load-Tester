@@ -29,10 +29,21 @@ namespace sd {
 bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
              char *msg, size_t msgLen);
 
-// One-shot card probe for the Settings screen: mounts, reads the type/size and
-// free space, unmounts. `msg` gets "SDHC 29.7 GB (28.9 GB free)" or the same
-// failure reasons as above.
+// One-shot card probe for the Settings screen. `msg` gets "SDHC 29.7 GB" or the
+// same failure reasons as above. Always re-probes the physical card first, so
+// this is also how a user confirms a freshly-inserted card was picked up.
 bool info(char *msg, size_t msgLen);
+
+// Forget the current mount so the next operation runs a full card init.
+//
+// The card is normally mounted once and left mounted (re-running init over the
+// bit-banged link is flaky). That breaks the moment somebody ejects the card:
+// SdFat keeps serving a cached FAT for a card that is no longer there, and a
+// card that is pulled and re-inserted comes back in its native SD mode and
+// ignores SPI commands until CMD0/ACMD41 run again. So every entry point probes
+// the card (CMD10) before trusting the mount and calls this when it does not
+// answer — a reinserted card then just works on the next save.
+void invalidate();
 
 #ifdef EL15_SDTEST
 // Test-only: read a file back and echo its first lines to serial, so a self-test

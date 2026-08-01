@@ -12,17 +12,19 @@ This is the headline: most of the board is idle. Every feature below marked
 
 | Hardware | Status | What it unlocks |
 |---|---|---|
-| **WiFi 6 radio** | completely unused | web UI, REST/MQTT, NTP clock, OTA updates, cloud logging, alerts |
+| **WiFi 6 radio** | **in use** — NTP clock sync only (Settings ▸ Clock), radio powered per-op | web UI, REST/MQTT, OTA updates, cloud logging, alerts |
 | **802.15.4 radio** (Thread/Zigbee/Matter) | completely unused | smart-home integration without WiFi |
 | **QMI8658 6-axis IMU** | completely unused | auto-rotate, tap/shake gestures, wake-on-lift, e-stop shake |
-| **SD card slot** | CSV test reports (shares the panel's SPI host) | live streaming logs, history browser, load-profile replay |
-| **PCF85063 RTC** | now settable (Wi-Fi NTP) | real timestamps on logs — done; manual set-time UI still optional |
-| **WiFi 6 radio** | NTP clock sync (Settings ▸ Clock) | web UI, REST/MQTT, OTA, cloud logging still open |
-| **AXP2101 PMIC** | brownout auto-safe + load-safe power-off (read: %/V/USB) | runtime estimate, charge-current control, rail power-saving |
-| **PWR + BOOT buttons** | completely unused | physical emergency-stop / wake / quick-action keys that work without looking |
-| **Audio out** | completely unused | completion tones, fault alarms, audible probing — see §14 for the hardware caveat |
+| **SD card slot** | **in use** — CSV test reports on its own bit-banged SPI pins, verified on hardware | live streaming logs, history browser, load-profile replay |
+| **PCF85063 RTC** | **in use** — read + settable via Wi-Fi NTP | real timestamps on logs (done); a manual set-time UI for benches with no Wi-Fi is still open |
+| **AXP2101 PMIC** | **in use** — battery %/V/USB read, brownout auto-safe, load-safe power-off | runtime estimate, charge-current control, rail power-saving |
+| **PWR + BOOT buttons** | **in use** — BOOT = hardware e-stop, PWR = sleep/wake + load-safe power-off | start/stop a test, screenshot, safe-mode-at-boot (§15) |
+| **ES8311 audio codec + speaker** | **in use** — tap/button/complete/error/alarm tones, volume + mute | audible probe mode, cutoff warnings, spoken results (§14) |
 | **USB-Serial/JTAG** | flashing + logs only | SCPI-style scripting API for lab automation |
 | **RTC backup-battery pads** | unpopulated | keeps the clock running through a main-battery swap |
+
+*(Table refreshed 2026-08-01 — audio, buttons, SD, RTC, PMIC and Wi-Fi have all
+gone from "unused" to shipped since it was first written.)*
 
 Board facts worth remembering (from Waveshare's spec): **512 KB on-chip HP SRAM
 and NO PSRAM** (hence LVGL's partial draw buffer — a full 322 KB framebuffer
@@ -44,7 +46,7 @@ lifting; several of these are small deltas on existing code.
 | **PSU / charger characterisation** | M | Load-regulation curve, current-limit discovery, OCP/OVP trip point, drop-out behaviour. Same sweep engine, different reporting. |
 | **Battery internal resistance (pulse IR)** | S–M | Distinct from the circuit R-test: short high-current pulse, measure ΔV/ΔI. The industry-standard cell-health number. |
 | **Peukert exponent / capacity vs C-rate** | M | Run capacity tests at 2–3 currents, fit the exponent. Tells you real runtime at any load. |
-| **State-of-health tracking** | M | Compare measured Ah to rated Ah; trend across saved tests per battery ID. Needs SD/NVS history. |
+| **State-of-health tracking** | S | ~~Compare measured Ah to rated Ah~~ **done** (result row + CSV, from the optional rated-capacity input). What is left is *trending* it across saved tests per battery ID, which needs on-device history. |
 | **Parasitic-draw / standby test** | S | Very low current, very long duration, high-resolution Ah. Mostly a UI preset over the capacity engine. |
 | **Step / pulse / profile discharge** | M | Programmable sequence (e.g. 1 A 30 s → 5 A 10 s, repeat). Simulates real loads. Engine hook exists in the capacity plan. |
 | **Runtime-to-cutoff prediction** | S | Extrapolate from a partial discharge instead of running it to empty. |
@@ -94,7 +96,7 @@ lifting; several of these are small deltas on existing code.
 | **User soft limits** | S | Cap max current/power below hardware ratings for a given setup. |
 | **Confirm dialog above a power threshold** | S | Guard rail for high-energy runs. |
 | **Emergency stop gesture** | S | Shake (IMU) or long-press anywhere → LOAD OFF. |
-| **Audible alert** | S | Trip/completion tone — the board has an I²S audio output, so this is free. See §14. |
+| ~~Audible alert~~ | **done** | Trip/completion/e-stop tones via the on-board ES8311 — see §14. |
 | **Screen lock during a test** | S | Stops accidental taps changing a running test. |
 
 ## 5. UI / UX
@@ -167,14 +169,14 @@ Small screen, so every pixel should carry information.
 | **Min / max / avg capture with hold** | S | Live statistics on the Monitor, resettable. Standard DMM behaviour that's missing here. |
 | **Delta (relative) mode** | S | Zero the reading, show change from that point. Invaluable for finding a bad connection by wiggling it. |
 | **Trend arrows on slow-moving values** | S | Temperature and voltage drift direction at a glance. |
-| **Time-remaining estimate during capacity tests** | S | Currently only elapsed is shown; ETA is what you actually want when a test runs for hours. |
+| ~~Time-remaining estimate during capacity tests~~ | **done** | Enter the pack's rated mAh and the run screen shows "% of rated drawn" plus an ETA to the rating at the present current; the result adds state of health and C-rate. |
 | **Tappable telemetry bar** | S | Cycle the bar's contents (W/fan/temp/runtime → Wh/Ah/mΩ/cell-V) instead of it being fixed. |
 
 ## 10. Screen structure
 
 | Idea | Effort | Why |
 |---|---|---|
-| **Persistent running-test chip on every screen** | **S–M** | Today a running R-test yanks you back to its screen on every progress callback. A small chip ("R-Test 4/8 ▸") in the chrome would let you browse freely while a test runs and tap to return. Fixes a real annoyance. |
+| ~~Persistent running-test chip on every screen~~ | **done** | Status-strip chip ("R-TEST 4/8", "BATT 01:23", "BATT PAUSED", "… result") on every screen but the test's own; tapping returns to the test. The old yank-you-back-on-every-progress behaviour is gone with it. |
 | **Fold Adjust into Monitor** | M | With drag-to-set and an inline stepper, the Adjust screen could disappear entirely — one less place to navigate to. |
 | **Split view: heroes + mini graph** | M | Alternative Monitor layout for people who want the trend permanently visible. |
 | **Selectable home screen** | S | Let Monitor, Graph, or a test screen be the boot/home destination per workflow. |
@@ -218,61 +220,74 @@ Small screen, so every pixel should carry information.
 | **Multi-language** | M | LVGL handles it; needs font coverage for non-Latin scripts. |
 | **"Repeat last test" one-tap** | S | Most tests get run several times in a row. |
 
-## 14. Audio *(currently unused)*
+## 14. Audio *(hardware confirmed and in use)*
 
-**Hardware check needed first.** Waveshare's published spec for this board does
-not list an audio codec, amplifier, or speaker — so confirm which of these you
-have before building on it:
+**Resolved:** the board *does* carry an onboard codec — an **ES8311** at I²C
+`0x18` on the shared bus, with the speaker amp's power-enable on **TCA9554
+expander bit 7**. I²S MCLK=19 BCLK=20 DIN=21 WS=22 DOUT=23, all pinned in
+`board_config.h` and driven by `audio.cpp` + the vendored `es8311.c`. So this is
+true I²S audio: arbitrary tones today, samples if ever wanted.
 
-- an **onboard codec/amp** (some Waveshare AMOLED variants ship one) — then
-  it's true I²S audio, arbitrary tones and even samples;
-- an **external I²S DAC/amp** on the exposed pads — same capability, one module;
-- **a piezo or small speaker on a spare GPIO**, driven by the C6's LEDC/PWM —
-  no extra chip, plenty for tones and beeps, which covers everything below
-  except spoken output.
+**Already shipped:** startup chime, key-click on taps, firmer confirm on the
+physical buttons, rising two-tone on test completion, falling two-tone on error,
+urgent repeating alarm on a protection trip / emergency stop / link-guard event,
+plus **volume + mute in Settings** (applied by scaling the synthesised PCV, so no
+codec I²C traffic at runtime). Init failure is non-fatal — the calls no-op.
 
-Either way, nothing in `firmware/src` touches audio today and `board_config.h`
-has no audio pins yet — pin them down against Waveshare's `pin_config.h` first
-(same verification caveat as the SD card's CS pin).
+**One hard-won rule:** the I²S stream must run **continuously**. Stopping and
+restarting it per tone made short tones "cut in and out"; a single continuous
+stream is clean. Keep the one streaming task in `audio.cpp` (priority 8, above
+the loop task).
 
 Bench instruments live or die on their audio feedback: you are usually looking
-at your probes and your hands, not at the screen.
+at your probes and your hands, not at the screen. The rows below marked done are
+shipped; the rest are still open.
 
 | Idea | Effort | Why |
 |---|---|---|
-| **Test-complete tone** | **S** | The original ask. A capacity test runs for hours — you want to be told, from the next room, that it finished. |
-| **Distinct pass / fail tones** | S | Rising two-tone for pass, falling buzz for fail. Pairs with go/no-go limits (§2); makes production-style testing eyes-free. |
-| **Protection-trip alarm** | **S** | Urgent, loud, repeating until acknowledged. This is the most safety-relevant use: something driving real current tripped, and a silent red banner is easy to miss. |
+| ~~Test-complete tone~~ | **done** | Rising two-tone on completion of either engine (`audio::success()`). |
+| ~~Distinct pass / fail tones~~ | **done** | Rising for complete, falling for error/abort. Still to pair with go/no-go limits (§2) for a real pass/fail verdict. |
+| ~~Protection-trip alarm~~ | **done** | `audio::fault()` — urgent alarm on a protection trip, emergency stop, brownout auto-off, and every link-guard recovery attempt. |
 | **Audible probe mode** | **M** | *The standout idea.* Map the live measurement to pitch — like a multimeter's continuity beep, but continuous and proportional. Probe a connection and **hear** the resistance/current change while watching your hands. Nothing else on this list improves hands-on work as much. |
 | **"Load is ON" reminder chirp** | S | A soft periodic chirp whenever current is flowing, like a reversing beeper. Cheap insurance against walking away from an energised setup. |
 | **Cutoff-approaching warning** | S | Escalating beeps as a discharge nears its cutoff voltage — signals the interesting part is about to happen. |
 | **Countdown before high-power start** | S | Three beeps before the load engages above a threshold, with time to abort. |
-| **Key-click / touch feedback** | S | Audible confirmation that a tap registered — genuinely useful given the touch-responsiveness history on this panel. |
+| ~~Key-click / touch feedback~~ | **done** | `audio::click()` on taps, `audio::press()` on the physical buttons. |
 | **Per-fault alarm patterns** | S | Different rhythms for REV vs UVP vs over-temp, so the fault is identifiable without looking. |
-| **Startup chime** | S | Confirms boot and that audio works. |
-| **Volume + mute in Settings** | **S** | Mandatory companion to all of the above — a bench tool that can't be silenced becomes a bench tool people unplug. Include a "silent after 22:00" or "alerts only" mode if you like. |
+| ~~Startup chime~~ | **done** | Played in `setup()` — doubles as proof the codec came up. |
+| ~~Volume + mute in Settings~~ | **done** | Settings ▸ System, persisted in NVS. A "silent after 22:00" / "alerts only" mode is still open. |
 | **Spoken results** | L | Pre-recorded samples on SD ("test complete, two point one amp hours"). Genuinely useful when your hands are full — but the heaviest item here, and the only one that needs a real DAC/amp rather than a piezo. |
 
-## 15. Physical buttons *(PWR + BOOT, currently unused)*
+## 15. Physical buttons *(PWR + BOOT, both now wired up)*
 
-Two programmable buttons you can hit **without looking at the screen** — which
-is exactly what you want when something is wrong.
+Two buttons you can hit **without looking at the screen** — which is exactly
+what you want when something is wrong. BOOT is GPIO9 (active-low strapping pin,
+safe to read at runtime); PWR is not a GPIO at all — its presses arrive as
+**AXP2101 IRQ status bits** (INTSTS2 `0x49`, bits 3 = short / 2 = long).
 
 | Idea | Effort | Why |
 |---|---|---|
-| **Hardware emergency stop** | **S** | One button = LOAD OFF from any screen, any state, no aiming at a touch target. The most defensible use of a physical key on a device driving real current. |
-| **Wake / sleep toggle** | S | Pairs with auto-dim and the true-black idle mode. |
-| **Start / stop the current test** | S | Eyes-free control while your hands are on the probes. |
-| **Long-press for a screenshot** | S | Documentation without touching the UI you want to capture. |
-| **Hold at boot for safe mode** | S | Skip auto-connect / reset settings if a config ever wedges startup. |
+| ~~Hardware emergency stop~~ | **done** | **BOOT** kills the load from any screen or state: stops both engines, pushes LOAD OFF + setpoint 0, alarm, red ack banner — and says so honestly if it could not reach the load. |
+| ~~Wake / sleep toggle~~ | **done** | **PWR short** toggles true-black display sleep (touch inert while asleep); a blind press while asleep only wakes. |
+| ~~Load-safe power-off~~ | **done** | **PWR long** stops the load and flushes the write *before* cutting the rails — intercepting the PMIC's own OFFLEVEL cutoff, which would strand an energised load. |
+| **Start / stop the current test** | S | Eyes-free control while your hands are on the probes. Needs a third gesture (double-press?) — both button actions are taken. |
+| **Long-press for a screenshot** | S | Documentation without touching the UI you want to capture. Now that SD works, this has somewhere to write to. |
+| **Hold at boot for safe mode** | S | Skip auto-connect / reset settings if a config ever wedges startup. More useful now that auto-connect exists. |
 
 ---
 
 ## Suggested next moves
 
-*Landed since this list was written: SD CSV reports, NVS persistence, the
-link-loss supervisor + crash recovery, NTP clock sync, AMOLED burn-in
-mitigation, and 4-wire/tare R-test support. What's left, highest value first:*
+*Landed since this list was written: SD CSV reports (now on their own
+bit-banged SPI pins and hardware-verified), NVS persistence, the link-loss
+supervisor + crash recovery, controller-brownout auto-safe and load-safe
+power-off, NTP clock sync, AMOLED burn-in mitigation, 4-wire/tare R-test
+support, ES8311 audio feedback, both physical buttons, and startup
+auto-connect. What's left, highest value first:*
+
+0. **Validate what's already built with real current** — every safety layer
+   above (link guard, crash recovery, brownout auto-off) is compile-clean and
+   never once fired for real. This outranks every new feature below.
 
 1. **Solar I-V / max-power-point mode** — the sweep engine already collects
    everything needed; this is mostly a second results view. (S)
@@ -281,8 +296,9 @@ mitigation, and 4-wire/tare R-test support. What's left, highest value first:*
    the next step. (M)
 3. **OTA over WiFi** — the radio is already used for NTP; OTA removes the USB
    cable for updates. (S–M)
-4. **Capacity per-sample CSV streaming** (CAPACITY_PLAN Phase 3) — today's
-   `BATT_NNN.CSV` has the summary but not the discharge curve. (S)
+4. ~~Capacity per-sample CSV~~ **done** — `sample_log.{h,cpp}` buffers
+   datapoints in flash during the run and `BATT_NNN.CSV` now carries the full
+   curve (V/I/P/mAh/Wh/temp per sample).
 
 If the goal is **turning this into a product-grade instrument**: calibration,
 pass/fail limits, named history, and the web UI are the differentiators.

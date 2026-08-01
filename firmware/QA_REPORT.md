@@ -1,5 +1,12 @@
 # EL15 Controller Firmware — QA Report (code-level audit)
 
+> **This is a dated snapshot, not a live defect list.** The audit below was run
+> on 2026-07-21 against `d65d430`; most of it has since been fixed. Jump to
+> **[§ Resolution status](#resolution-status-as-of-2026-08-01)** at the end for
+> what is still open as of `6adea41`. Sections above that point are preserved
+> verbatim as the historical record — several of them describe code (the demo
+> simulator, the SD stub, the R²-based reliability rule) that no longer exists.
+
 Date: 2026-07-21 · Branch `claude/android-apk-load-tester-k82q4g` (HEAD `d65d430`)
 Scope: full static audit of `firmware/src/*` + build verification, driven section-by-section
 by `firmware/QA_GUIDE.md`. On-device items (touch feel, live BLE data, real EL15) are out of
@@ -208,3 +215,52 @@ Android app locks its UI.
 
 Top recommended fixes, in order: **H1, H2, M4** (small, high-impact), then **H3** after
 an on-device screenshot confirms the overflow, then M1 semantics decision, M2/M3 BLE UX.
+
+---
+
+## Resolution status (as of 2026-08-01)
+
+Re-checked against `6adea41` by reading the current `firmware/src/*`. "Fixed" =
+the specific code path named in the finding now behaves as the finding asked.
+Nothing here was re-tested on hardware — this is a static re-read, same as the
+original audit.
+
+Build re-verified at this commit: **PASS**, clean under `-Wall -Wextra`,
+flash 2,113,255 B of the 3 MB `huge_app` slot, RAM 17.8 % static.
+
+| # | Finding | Status |
+|---|---|---|
+| **H1** | CR mode gets the wrong unit config (Ω vs "ohm") | ✅ **Fixed** — `modeUnit()` maps MODE_CR to `"ohm"`, with a comment recording why |
+| **H2** | STOP leaves the R-Test UI stuck on "RUNNING" | ✅ **Fixed** — the STOP handler sets `rtPhase = RT_IDLE`; e-stop, link-guard, error and disconnect paths do the same |
+| **H3** | Menu row 3 / keypad bottom row clipped | ✅ **Fixed** — Menu is now 8 tiles at 164×84 in a **scrollable** grid; sized in a comment to fit 4 rows |
+| **M1** | Fault banner does not latch | ⚖️ **Decided, not changed** — the banner deliberately mirrors the device. The load-ON gate tracks the live warning; load-**OFF** is never gated. QA_GUIDE §6 now documents this as the intended semantics |
+| **M2** | Synchronous connect freezes the UI for ~30 s | ✅ **Fixed** — `connectTimeoutMs_` defaults to 4000 with a bounded retry count; the guard drops it to a single 4 s attempt during recovery |
+| **M3** | Scan end never reported; status stays "Scanning…" | ❌ **Still open** — there is no `onScanEnd` override; an expired scan window leaves `state_ == SCANNING` |
+| **M4** | No feedback for ~3.7 s after starting a sweep | ✅ **Fixed** — `enterRtRun()` sets `RT_RUN` and shows `SCR_RTEST` at start; errors navigate and surface in `rtStatusLbl` |
+| **M5** | "Save to SD" shows no confirmation | ✅ **Fixed** — SD is real (`sd_card.cpp` + `report.h`); the button arms, then goes green with the file name or red with the reason |
+| **M6** | Keypad SET bypasses clamp/rounding | ✅ **Fixed** — every keypad target clamps (wire length, battery cutoff/current), and edits are refused outright while an engine runs |
+| **M7** | Tapping a device row while connected desyncs state | ✅ **Fixed in effect** — the client is kept and reused on failure rather than deleted, and the connect action stands the guard down first; the old "silent live link + UI says disconnected" split no longer occurs |
+| **M8** | Manual controls not locked out during a sweep | ✅ **Fixed** — `engineBusy()` gates the load bar, Adjust, the keypad and the mode picker |
+| **L1** | Fuse keypad path is dead code | ❌ **Still open** — `openKeypad(2)` is never called; the fuse is cycle-only |
+| **L2** | Demo simulator state persists across sessions | ➖ **Moot** — the on-device simulator was removed |
+| **L3** | No demo-circuit editor | ➖ **Moot** — same removal; bench-testing uses the phone simulator |
+| **L4** | DCR hero shows `dcrI1`, guide says zero current | ❌ **Still open** — `shownI` is `dcrI1` in DCR mode. Decide which is intended |
+| **L5** | Unset fuse renders faint gray "--", guide said red | ✅ **Guide aligned** — the code is unchanged; QA_GUIDE no longer claims red |
+| **L6** | `onTestProgress` force-navigates on every callback | ✅ **Fixed 2026-08-01** — the force-navigate is gone and a running-test chip in the status strip is the way back, exactly as FEATURE_IDEAS §10 proposed |
+| **L7** | R-Test error text never hidden once shown | 🟡 **Partly fixed** — `enterRtRun()` clears the stale label at the start of a run; it still persists after an error until the next run |
+| **L8** | Informative connect-failure states overwritten | ❌ **Likely still open** — the "no FFF0" / "characteristics missing" paths call `disconnect()` before `setState()`, so the async disconnect event's "Disconnected" can land afterwards |
+| **L9** | Stale chart trace after disconnect | ❓ **Not re-verified** |
+| **L10** | `startDemo()` doesn't stop a scan | ➖ **Moot** — demo removed |
+| **L11** | Fan decoded 0–7 but printed "n/5" | ✅ **Fixed** — clamped to `FAN_SPEED_MAX` and shown as a percentage |
+| **L12** | "SINKING" chip static, guide said pulsing | ✅ **Guide aligned** — still static by design; FEATURE_IDEAS §11 tracks the animation as a nice-to-have |
+
+### New findings from this re-read
+
+| # | Finding | Severity |
+|---|---|---|
+| **N1** | **The Android app (`app/`) never got the command-checksum fix.** `El15Protocol.kt` still builds `LOAD_ON/LOAD_OFF/LOCK/modeCommand/setpointCommand` with no trailing sum-to-zero byte — exactly the defect that made load control silently do nothing on the real EL15 until it was fixed in the firmware on 2026-07-24. Only POLL (whose checksum was captured whole) works. | **H** — app-side |
+| **N2** | `display.cpp` constructs the panel bus with `is_shared_interface = true`, whose only reason was sharing the SPI host with the SD card. The card moved to bit-banged software SPI on 2026-07-24, so this now costs one bus-lock round-trip per flush chunk for nothing. Comment updated; behavior deliberately left alone pending a panel re-verify on hardware. | **L** — perf |
+| **N3** | `sd::unmount()` was unused outside `EL15_SDTEST`, producing the build's only warning. Marked `[[maybe_unused]]` so the tree is warning-free again. | **L** — fixed |
+| **N4** | **Any non-CONNECTED BLE state was treated as a link drop** (`main.cpp` `onState`), so the user's own SCANNING/CONNECTING transitions tore down a running test — opening Connect and tapping Scan mid-discharge ended it, and mid-priming it died as "Cancelled" leaving nothing to save. Now latches `g_wasConnected` and acts only on a real drop from a live link. | **H** — fixed 2026-08-01 |
+| **N5** | **SdFat was never given a clock**, so every file it created carried the card's default date and a PC's file listing showed the wrong date even though the CSV body and Settings clock were correct. `FsDateTime::setCallback` now reads the PCF85063. | **M** — fixed 2026-08-01 |
+| **N6** | **The card was mounted once and never re-probed**, so an eject left SdFat serving a cached FAT and a re-inserted card was ignored until reboot. Entry points now probe with CMD10 and re-init on failure. | **M** — fixed 2026-08-01 |

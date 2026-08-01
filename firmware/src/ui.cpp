@@ -159,6 +159,9 @@ static UnitCfg unitCfg(const char *u) {
   if (strcmp(u, "ohm") == 0)  return {0.05f, 9999, 1, {0.1f, 1, 10}, 1, {1, 5, 10, 50}};
   if (strcmp(u, "W") == 0)    return {0, 400, 0, {1, 10, 50}, 1, {10, 25, 50, 100}};
   if (strcmp(u, "m") == 0)    return {0, 100, 1, {0.1f, 1, 5}, 1, {1, 2, 5, 10}};  // wire length
+  // Nameplate capacity. Presets are the common cells/packs this gets used on:
+  // an 18650, a 3 Ah pack, a 5 Ah pack, a 10 Ah pack.
+  if (strcmp(u, "mAh") == 0)  return {0, 999000, 0, {100, 500, 1000}, 1, {2500, 3000, 5000, 10000}};
   return {0, 40, 2, {0.01f, 0.1f, 1}, 1, {0.5f, 1, 2, 5}};  // A (default)
 }
 static bool isRT() { return curMode == MODE_RT; }
@@ -187,6 +190,8 @@ static lv_obj_t *monScreen, *adjScreen, *graphScreen, *rtestScreen, *connectScre
 static lv_obj_t *menuOverlay, *kpOverlay, *pickerOverlay;
 
 static lv_obj_t *stDot, *stConnLabel, *stConnGroup, *stBack, *stBackLabel, *stMenuBtn;
+// "R-TEST 4/8" / "BATT 01:23" chip: the way back to a test you navigated away from.
+static lv_obj_t *stTestChip, *stTestChipLbl;
 static lv_obj_t *infoBar, *ibPower, *ibFan, *ibTemp, *ibRuntime, *ibExtra;
 static lv_obj_t *faultBanner, *faultTitle, *faultMsg;
 // The fault banner doubles as the emergency-stop acknowledgement. When shown
@@ -229,7 +234,7 @@ enum { RR_VOC, RR_PROBE, RR_RAW, RR_TOL, RR_R2, RR_PSC, RR_SAG, RR_PKW, RR_TEMP,
 static lv_obj_t *rrRow[RR_N], *rrKey[RR_N], *rrVal[RR_N];
 static const int RT_CHART_PTS = 20;  // fixed capacity = UI max steps; no reallocs
 static lv_obj_t *setBriVal, *setBattVal, *setBattState, *setRtcVal, *setSdVal, *setHeapVal, *setMinHeapVal, *setUptimeVal;
-static lv_obj_t *setPxShiftBtn, *setPxShiftLbl, *dimChip[4], *dimChipLbl[4];
+static lv_obj_t *setPxShiftBtn, *setPxShiftLbl, *dimChip[6], *dimChipLbl[6], *setDimSummary;
 static lv_obj_t *setAutoConnBtn, *setAutoConnLbl;
 static lv_obj_t *setSsidVal, *setPassVal, *setTzVal, *setSyncBtn, *setSyncLbl, *setNetStatus;
 // Text-entry overlay (password + manual/hidden SSID entry).
@@ -259,6 +264,15 @@ static float battAmps = 1.0f;
 enum BattPhase { BT_IDLE, BT_RUN, BT_REST, BT_RESULT };
 static BattPhase btPhase = BT_IDLE;
 static CapacityTest::Result lastBatt;
+// Nameplate capacity in Ah (0 = not entered). Drives the C-rate hint, the
+// time-remaining estimate while discharging and the state-of-health result row.
+static float battRatedAh = 0;
+// Mirrors the engine's paused state so the chrome and the run card can show it
+// without asking the engine on every redraw.
+static bool battPausedFlag = false;
+static char battPauseWhy[64] = "";
+// Latest "Step n/total" text, for the running-test chip.
+static char rtStepText[12] = "";
 
 // True while either test engine is actively driving the load. Manual controls
 // (load toggle, setpoint) and the other engine's start are blocked while busy,
@@ -282,12 +296,17 @@ static uint32_t btLastElapsed = 0;
 
 static lv_obj_t *btIdleBox, *btRunBox, *btResultBox, *btChartCard;
 static lv_obj_t *btChemVal, *btCellsVal, *btVocLbl, *btCutoffVal, *btAmpsVal, *btStartBtn, *btStartLbl, *btStatusLbl;
+static lv_obj_t *btRatedVal, *btRateHint;
 static lv_obj_t *btPhaseLbl, *btElapsedLbl, *btVLbl, *btCutSub, *btILbl, *btAhLbl, *btWhLbl, *btTempLbl;
+static lv_obj_t *btEtaLbl, *btPauseCard, *btPauseWhyLbl, *btResumeBtn;
 static lv_obj_t *btChart, *btChartYLbl, *btChartXLbl;
 static lv_chart_series_t *btSer;
 static lv_obj_t *btAhBig, *btWhSub, *btSaveBtn, *btSaveLbl;
-static const int BR_N = 10;
-static lv_obj_t *brVal[BR_N];
+// Result rows. The last three only appear when a rated capacity was entered.
+static const int BR_N = 14;
+enum { BR_DUR, BR_REASON, BR_STARTV, BR_ENDV, BR_REBOUND, BR_AVGV, BR_AVGI,
+       BR_TEMP, BR_CUTOFF, BR_CURRENT, BR_PAUSED, BR_RATED, BR_SOH, BR_CRATE };
+static lv_obj_t *brVal[BR_N], *brRow[BR_N];
 
 static int pollMs = 50;  // status sampling interval, mirrored to BLE + R-test
 // 50 ms (20 Hz) is the device's practical max: a poll-rate sweep showed the EL15
@@ -314,6 +333,8 @@ static void refreshPicker();
 static void enterRtRun();
 static void settingsTick();
 static void hhmmss(int t, char *out, int n);
+static void refreshTestChip();
+static void showActiveTest();
 static void refreshBatt();
 static void battChartRefresh();
 static void enterBattRun();
@@ -378,9 +399,10 @@ static void setTextIf(lv_obj_t *l, const char *t) {
 }
 
 // ---- SD card saves ---------------------------------------------------------
-// A save blocks for up to ~2 s and NOTHING may draw while it runs (the card
-// shares the panel's SPI bus), so the button has to be repainted to its
-// in-progress state and flushed to the panel before the call is made.
+// A save blocks the loop task for up to ~2 s (card init, then a slow bit-banged
+// write), so the button has to be repainted to its in-progress state and flushed
+// to the panel before the call is made — otherwise the UI just freezes with no
+// explanation.
 static void armSaveButton(lv_obj_t *btn, lv_obj_t *lblObj) {
   lv_label_set_text(lblObj, LV_SYMBOL_SAVE "  Writing to card...");
   lv_obj_set_style_bg_color(btn, COL_AMBER, 0);
@@ -401,6 +423,25 @@ static void showSaveOutcome(lv_obj_t *btn, lv_obj_t *lblObj, bool ok, const char
 static void resetSaveButton(lv_obj_t *btn, lv_obj_t *lblObj) {
   lv_label_set_text(lblObj, LV_SYMBOL_SAVE "  Save to SD card");
   lv_obj_set_style_bg_color(btn, COL_ACCENT, 0);
+}
+
+// Write the report the moment a test finishes, without waiting to be asked. A
+// completed run is data you do not want to lose to a stray tap on "New test",
+// and a long unattended discharge may finish with nobody watching.
+//
+// This runs from the completion callback, i.e. inside lv_timer_handler, so it
+// paints the in-progress state and forces a flush first (armSaveButton). On
+// failure the button is left showing why and stays tappable, so the user can
+// insert a card and retry — the result and its flash datapoint log both survive
+// until the next test starts.
+static void autoSave(lv_obj_t *btn, lv_obj_t *lblObj, bool &savedFlag,
+                     const std::function<bool(char *, size_t)> &fn) {
+  if (!fn) return;
+  armSaveButton(btn, lblObj);
+  char msg[48] = "";
+  savedFlag = fn(msg, sizeof(msg));
+  showSaveOutcome(btn, lblObj, savedFlag, msg);
+  Serial.printf("[save] auto-save %s: %s\n", savedFlag ? "OK" : "FAILED", msg);
 }
 
 // ---- Navigation ------------------------------------------------------------
@@ -448,6 +489,50 @@ static void showScreen(Screen s) {
   if (s == SCR_ADJ) refreshAdjust();
   if (s == SCR_GRAPH) refreshChart();
   if (s == SCR_SET) settingsTick();
+  // Landing on a test screen must always show the phase the engine is ACTUALLY
+  // in. Without this, navigating away mid-test and back left whichever box was
+  // last unhidden on screen — so a running test could look idle and its result
+  // could look unreachable.
+  if (s == SCR_RTEST) refreshRtest();
+  if (s == SCR_BATT) { refreshBatt(); battChartRefresh(); }
+  refreshTestChip();
+}
+
+// Jump to whichever test is live (or showing an unsaved result), so the
+// running-test chip and the load bar always have somewhere sensible to go.
+static void showActiveTest() {
+  if (btPhase != BT_IDLE) showScreen(SCR_BATT);
+  else if (rtPhase != RT_IDLE) showScreen(SCR_RTEST);
+}
+
+// Show/label the running-test chip. Called from every place a test phase can
+// change, plus the 1 Hz tick so the battery elapsed time stays live.
+static void refreshTestChip() {
+  if (!stTestChip) return;
+  const bool show = btPhase != BT_IDLE || rtPhase != RT_IDLE;
+  // Hidden on the test's own screen: you are already there, and the chip would
+  // just crowd the strip.
+  const bool here = (btPhase != BT_IDLE && curScreen == SCR_BATT) ||
+                    (rtPhase != RT_IDLE && curScreen == SCR_RTEST);
+  if (!show || here) { lv_obj_add_flag(stTestChip, LV_OBJ_FLAG_HIDDEN); return; }
+  char b[24];
+  lv_color_t col = COL_ACCENT2, border = COL_ACCENT;
+  if (btPhase == BT_RUN || btPhase == BT_REST) {
+    if (battPausedFlag) { snprintf(b, sizeof(b), "BATT PAUSED"); col = COL_AMBER; border = COL_AMBER; }
+    else { char el[16]; hhmmss((int)btLastElapsed, el, sizeof(el)); snprintf(b, sizeof(b), "BATT %s", el); }
+  } else if (btPhase == BT_RESULT) {
+    snprintf(b, sizeof(b), "BATT result");
+    col = COL_GREEN; border = COL_GREEN;
+  } else if (rtPhase == RT_RUN) {
+    snprintf(b, sizeof(b), "R-TEST %s", rtStepText);
+  } else {
+    snprintf(b, sizeof(b), "R-TEST result");
+    col = COL_GREEN; border = COL_GREEN;
+  }
+  setTextIf(stTestChipLbl, b);   // called at the poll rate; don't churn the label
+  lv_obj_set_style_text_color(stTestChipLbl, col, 0);
+  lv_obj_set_style_border_color(stTestChip, border, 0);
+  lv_obj_clear_flag(stTestChip, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ---- Status strip ----------------------------------------------------------
@@ -496,6 +581,20 @@ static void buildStatusStrip() {
   lv_obj_add_flag(stBack, LV_OBJ_FLAG_HIDDEN);
 
   lv_obj_t *sp = cont(strip); lv_obj_set_flex_grow(sp, 1); lv_obj_set_height(sp, 1);
+
+  // Running-test chip. Visible on EVERY screen whenever an engine owns the load
+  // or is holding an unsaved result, and tapping it goes straight back to that
+  // test. Without it, walking away from a running test (the Menu button is right
+  // next to it) left no obvious way back and the test looked lost.
+  stTestChip = flatBtn(strip);
+  lv_obj_set_size(stTestChip, LV_SIZE_CONTENT, 30);
+  lv_obj_set_ext_click_area(stTestChip, 10);
+  styleCard(stTestChip, lv_color_hex(0x2a2140), COL_ACCENT, 9, 0);
+  lv_obj_set_style_pad_hor(stTestChip, 9, 0);
+  stTestChipLbl = lbl(stTestChip, "TEST", COL_ACCENT2, F14);
+  lv_obj_center(stTestChipLbl);
+  lv_obj_add_event_cb(stTestChip, [](lv_event_t *) { showActiveTest(); }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_flag(stTestChip, LV_OBJ_FLAG_HIDDEN);
 
   stMenuBtn = flatBtn(strip);
   // Modest drawn size (a 38 px-tall button rode 2 px under the glass curve);
@@ -689,7 +788,7 @@ static void buildLoadBar() {
     if (isBatt()) {
       if (battCutoff <= 0.05f || battAmps <= 0.005f) return;
       if (!connected) { showScreen(SCR_CONNECT); return; }
-      if (A.startBatt) { A.startBatt(battCutoff, battAmps); enterBattRun(); }
+      if (A.startBatt) { A.startBatt(battCutoff, battAmps, battRatedAh); enterBattRun(); }
       return;
     }
     // The warning gate blocks only turning the load ON: with a protection
@@ -1236,6 +1335,7 @@ static void persistSetup() {
     d.battCutoff = battCutoff;
     d.battCutoffCustom = battCutoffCustom;
     d.battAmps = battAmps;
+    d.battRatedMah = battRatedAh * 1000.0f;
   });
 }
 
@@ -1309,8 +1409,10 @@ static void enterRtRun() {
   lv_label_set_text(runVLbl, "-- V");
   lv_label_set_text(runILbl, "-- A");
   lv_obj_add_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);  // clear a stale error
+  resetSaveButton(saveBtn, saveBtnLbl);   // drop the previous run's save outcome
   refreshRtest();
   showScreen(SCR_RTEST);
+  refreshTestChip();
 }
 
 // ---- Connect ---------------------------------------------------------------
@@ -1416,9 +1518,14 @@ static lv_obj_t *settingsCard(const char *caption) {
 }
 
 // Idle-dim choices, in seconds (0 = never).
-static const int DIM_N = 4;
-static const uint16_t DIM_SECS[DIM_N] = {0, 60, 120, 300};
-static const char *DIM_NAMES[DIM_N] = {"Never", "1 min", "2 min", "5 min"};
+// Screen-timeout choices. The panel dims after this long without a touch or a
+// button press and blanks at 5x that, so "30s" is a genuinely useful bench
+// setting (short dim, blank at 2.5 min) and "30 min" suits watching a long
+// discharge. Laid out as two rows of three.
+static const int DIM_N = 6;
+static const uint16_t DIM_SECS[DIM_N] = {0, 30, 60, 300, 600, 1800};
+static const char *DIM_NAMES[DIM_N] = {"Never", "30 s", "1 min", "5 min", "10 min", "30 min"};
+static const int DIM_PER_ROW = 3;
 
 static void refreshAutoConn() {
   bool on = prefs::get().autoConnect;
@@ -1438,11 +1545,31 @@ static void refreshScreenProt() {
   lv_label_set_text(setPxShiftLbl, on ? "Pixel shift on" : "Pixel shift off");
   lv_obj_set_style_border_color(setPxShiftBtn, on ? COL_GREEN : COL_FAINT, 0);
   lv_obj_set_style_text_color(setPxShiftLbl, on ? COL_GREEN : COL_FAINT, 0);
+  uint16_t cur = display::idleDim();
   for (int i = 0; i < DIM_N; i++) {
-    bool sel = DIM_SECS[i] == display::idleDim();
+    bool sel = DIM_SECS[i] == cur;
     lv_obj_set_style_bg_color(dimChip[i], sel ? lv_color_hex(0x1d1b33) : COL_INSET, 0);
     lv_obj_set_style_border_color(dimChip[i], sel ? COL_ACCENT : COL_BORDER, 0);
     lv_obj_set_style_text_color(dimChipLbl[i], sel ? COL_ACCENT2 : COL_MUTED, 0);
+  }
+  if (setDimSummary) {
+    char b[224];
+    if (cur == 0) {
+      snprintf(b, sizeof(b), "The screen stays at full brightness indefinitely.");
+    } else {
+      char dimTxt[16], blankTxt[16];
+      auto fmtDur = [](uint32_t s, char *out, int n) {
+        if (s < 60) snprintf(out, n, "%lu s", (unsigned long)s);
+        else if (s % 60 == 0) snprintf(out, n, "%lu min", (unsigned long)(s / 60));
+        else snprintf(out, n, "%lu min %lu s", (unsigned long)(s / 60), (unsigned long)(s % 60));
+      };
+      fmtDur(cur, dimTxt, sizeof(dimTxt));
+      fmtDur((uint32_t)cur * 5u, blankTxt, sizeof(blankTxt));
+      snprintf(b, sizeof(b),
+               "Dims after %s idle, goes black at %s. Any touch or button wakes it; "
+               "blanking is suppressed while a test is running.", dimTxt, blankTxt);
+    }
+    lv_label_set_text(setDimSummary, b);
   }
 }
 
@@ -1703,24 +1830,35 @@ static void buildSettings() {
     prefs::change([](prefs::Data &d) { d.pixelShift = display::pixelShift(); });
     refreshScreenProt();
   }, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t *dimRow = cont(pc2);
-  lv_obj_set_size(dimRow, LV_PCT(100), LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(dimRow, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(dimRow, 7, 0);
-  for (int i = 0; i < DIM_N; i++) {
-    dimChip[i] = flatBtn(dimRow);
-    lv_obj_set_flex_grow(dimChip[i], 1);
-    lv_obj_set_height(dimChip[i], 42);
-    styleCard(dimChip[i], COL_INSET, COL_BORDER, 11, 0);
-    dimChipLbl[i] = lbl(dimChip[i], DIM_NAMES[i], COL_MUTED, F14);
-    lv_obj_center(dimChipLbl[i]);
-    lv_obj_add_event_cb(dimChip[i], [](lv_event_t *e) {
-      int i = (int)(intptr_t)lv_event_get_user_data(e);
-      display::setIdleDim(DIM_SECS[i]);
-      prefs::change([](prefs::Data &d) { d.idleDimS = display::idleDim(); });
-      refreshScreenProt();
-    }, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+  lbl(pc2, "SCREEN TIMEOUT", COL_MUTED, F12);
+  // Two rows of three: six chips will not fit legibly across 368 px.
+  for (int row = 0; row < (DIM_N + DIM_PER_ROW - 1) / DIM_PER_ROW; row++) {
+    lv_obj_t *dimRow = cont(pc2);
+    lv_obj_set_size(dimRow, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(dimRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(dimRow, 7, 0);
+    for (int c = 0; c < DIM_PER_ROW; c++) {
+      int i = row * DIM_PER_ROW + c;
+      if (i >= DIM_N) break;
+      dimChip[i] = flatBtn(dimRow);
+      lv_obj_set_flex_grow(dimChip[i], 1);
+      lv_obj_set_height(dimChip[i], 42);
+      styleCard(dimChip[i], COL_INSET, COL_BORDER, 11, 0);
+      dimChipLbl[i] = lbl(dimChip[i], DIM_NAMES[i], COL_MUTED, F14);
+      lv_obj_center(dimChipLbl[i]);
+      lv_obj_add_event_cb(dimChip[i], [](lv_event_t *e) {
+        int k = (int)(intptr_t)lv_event_get_user_data(e);
+        display::setIdleDim(DIM_SECS[k]);
+        prefs::change([](prefs::Data &d) { d.idleDimS = display::idleDim(); });
+        refreshScreenProt();
+      }, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    }
   }
+  // Spell out what the selected value actually does — "dim then blank at 5x" is
+  // not guessable from a bare duration.
+  setDimSummary = lbl(pc2, "", COL_FAINT, F12);
+  lv_label_set_long_mode(setDimSummary, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(setDimSummary, LV_PCT(100));
   refreshScreenProt();
 
   // SD card. Probed on demand only: mounting takes ~1 s and stops the panel
@@ -1878,12 +2016,30 @@ static void refreshBatt() {
   if (btPhase == BT_IDLE) {
     lv_obj_clear_flag(btIdleBox, LV_OBJ_FLAG_HIDDEN);
     const BattChem &c = BATT_CHEMS[battChem];
-    char b[40];
+    char b[96];
     lv_label_set_text(btChemVal, c.name);
     if (c.maxCells) { snprintf(b, sizeof(b), "%dS", battCells); lv_label_set_text(btCellsVal, b); }
     else lv_label_set_text(btCellsVal, "-");
     snprintf(b, sizeof(b), "%.2f V", battCutoff); lv_label_set_text(btCutoffVal, b);
     snprintf(b, sizeof(b), "%.2f A", battAmps); lv_label_set_text(btAmpsVal, b);
+    if (battRatedAh > 0) snprintf(b, sizeof(b), "%.0f mAh", battRatedAh * 1000.0f);
+    else snprintf(b, sizeof(b), "not set");
+    lv_label_set_text(btRatedVal, b);
+    lv_obj_set_style_text_color(btRatedVal, battRatedAh > 0 ? COL_ACCENT2 : COL_FAINT, 0);
+    // With a rating we can state the plan in the terms a battery datasheet uses
+    // (C-rate + expected runtime); without one, say exactly what is lost.
+    char hint[192];
+    if (battRatedAh > 0 && battAmps > 0.005f) {
+      float cRate = battAmps / battRatedAh;
+      float hrs = battRatedAh / battAmps;
+      snprintf(hint, sizeof(hint), "%.2fC - a healthy pack should last about %dh %02dm. "
+               "Enables time-remaining and state-of-health.",
+               cRate, (int)hrs, (int)((hrs - (int)hrs) * 60));
+    } else {
+      snprintf(hint, sizeof(hint), "Optional. Enter the pack's rated mAh to get C-rate, "
+               "time remaining and a state-of-health figure.");
+    }
+    lv_label_set_text(btRateHint, hint);
     bool valid = battCutoff > 0.05f && battAmps > 0.005f;
     lv_obj_set_style_bg_color(btStartBtn, valid ? COL_ACCENT : lv_color_hex(0x161d26), 0);
     lv_obj_set_style_bg_opa(btStartBtn, LV_OPA_COVER, 0);
@@ -1894,6 +2050,16 @@ static void refreshBatt() {
   } else if (btPhase == BT_RUN || btPhase == BT_REST) {
     lv_obj_clear_flag(btRunBox, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(btChartCard, LV_OBJ_FLAG_HIDDEN);
+    if (battPausedFlag) {
+      char b[256];
+      snprintf(b, sizeof(b), LV_SYMBOL_WARNING "  PAUSED - %s\nThe load is off and the clock is "
+               "stopped; every reading so far is kept. Resume to carry on.",
+               battPauseWhy[0] ? battPauseWhy : "suspended");
+      lv_label_set_text(btPauseWhyLbl, b);
+      lv_obj_clear_flag(btPauseCard, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(btPauseCard, LV_OBJ_FLAG_HIDDEN);
+    }
   } else {
     lv_obj_clear_flag(btResultBox, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(btChartCard, LV_OBJ_FLAG_HIDDEN);
@@ -1903,6 +2069,8 @@ static void refreshBatt() {
 // Immediate feedback on start (the engine primes for ~1.5 s before discharging).
 static void enterBattRun() {
   btPhase = BT_RUN;
+  battPausedFlag = false;
+  battPauseWhy[0] = '\0';
   battHistReset();
   lv_label_set_text(btPhaseLbl, "PRIMING");
   lv_label_set_text(btElapsedLbl, "00:00");
@@ -1915,8 +2083,11 @@ static void enterBattRun() {
   snprintf(b, sizeof(b), "auto-stop at %.2f V", battCutoff);
   lv_label_set_text(btCutSub, b);
   lv_obj_add_flag(btStatusLbl, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(btEtaLbl, LV_OBJ_FLAG_HIDDEN);
+  resetSaveButton(btSaveBtn, btSaveLbl);   // drop the previous run's save outcome
   refreshBatt();
   showScreen(SCR_BATT);
+  refreshTestChip();
 }
 
 static void buildBatt() {
@@ -2007,6 +2178,13 @@ static void buildBatt() {
   lv_obj_set_width(btVocLbl, LV_PCT(100));
   bRow(setupCard, "Cutoff voltage - tap to type", &btCutoffVal, [](lv_event_t *) { openKeypad(4); });
   bRow(setupCard, "Discharge current - tap to type", &btAmpsVal, [](lv_event_t *) { openKeypad(5); });
+  // Optional nameplate capacity. Everything derived from it (C-rate, ETA,
+  // state of health) is simply hidden when it is left at 0, so the test never
+  // pretends to know a pack's rating.
+  bRow(setupCard, "Rated capacity (mAh) - optional", &btRatedVal, [](lv_event_t *) { openKeypad(6); });
+  btRateHint = lbl(setupCard, "", COL_FAINT, F12);
+  lv_label_set_long_mode(btRateHint, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(btRateHint, LV_PCT(100));
 
   btStartBtn = flatBtn(btIdleBox);
   lv_obj_set_size(btStartBtn, LV_PCT(100), 62);
@@ -2017,7 +2195,7 @@ static void buildBatt() {
     if (engineBusy()) return;
     if (battCutoff <= 0.05f || battAmps <= 0.005f) return;
     if (!connected) { showScreen(SCR_CONNECT); return; }
-    if (A.startBatt) { A.startBatt(battCutoff, battAmps); enterBattRun(); }
+    if (A.startBatt) { A.startBatt(battCutoff, battAmps, battRatedAh); enterBattRun(); }
   }, LV_EVENT_CLICKED, nullptr);
 
   // ---- discharge curve (shared by running + result) ----
@@ -2085,6 +2263,37 @@ static void buildBatt() {
   lv_obj_set_flex_align(werow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   btWhLbl = lbl(werow, "0.0 Wh", COL_MUTED, F14);
   btTempLbl = lbl(werow, "--", COL_MUTED, F14);
+  // Progress against the nameplate capacity + estimated time to reach it.
+  // Hidden entirely when no rating was entered.
+  btEtaLbl = lbl(runCard, "", COL_ACCENT2, F14);
+  lv_label_set_long_mode(btEtaLbl, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(btEtaLbl, LV_PCT(100));
+  lv_obj_add_flag(btEtaLbl, LV_OBJ_FLAG_HIDDEN);
+
+  // Paused banner + RESUME. A paused test is load-off but still owns the run,
+  // so the user needs both an explanation and a one-tap way back into it.
+  btPauseCard = cont(btRunBox);
+  lv_obj_set_size(btPauseCard, LV_PCT(100), LV_SIZE_CONTENT);
+  styleCard(btPauseCard, lv_color_hex(0x2a2210), COL_AMBER, 13, 11);
+  lv_obj_set_flex_flow(btPauseCard, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(btPauseCard, 8, 0);
+  btPauseWhyLbl = lbl(btPauseCard, "", COL_AMBER, F12);
+  lv_label_set_long_mode(btPauseWhyLbl, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(btPauseWhyLbl, LV_PCT(100));
+  btResumeBtn = flatBtn(btPauseCard);
+  lv_obj_set_size(btResumeBtn, LV_PCT(100), 54);
+  lv_obj_set_style_bg_color(btResumeBtn, COL_ACCENT, 0);
+  lv_obj_set_style_bg_opa(btResumeBtn, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(btResumeBtn, 13, 0);
+  lv_obj_t *rsl = lbl(btResumeBtn, LV_SYMBOL_PLAY "  RESUME", COL_DARKINK, F16);
+  lv_obj_center(rsl);
+  lv_obj_add_event_cb(btResumeBtn, [](lv_event_t *) {
+    if (!A.resumeBatt) return;
+    if (!connected) { showScreen(SCR_CONNECT); return; }   // nothing to resume onto
+    if (A.resumeBatt()) { battPausedFlag = false; refreshBatt(); refreshTestChip(); }
+  }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_flag(btPauseCard, LV_OBJ_FLAG_HIDDEN);
+
   lv_obj_t *stopBtn = flatBtn(btRunBox);
   lv_obj_set_size(stopBtn, LV_PCT(100), 66);
   styleCard(stopBtn, lv_color_hex(0x2a1416), COL_RED, 14, 0);
@@ -2119,8 +2328,12 @@ static void buildBatt() {
   static const char *BR_KEYS[BR_N] = {
       "Duration", "Stop reason", "Start voltage", "End voltage (loaded)",
       "Rebound (rested)", "Average voltage", "Average current", "Temp range",
-      "Cutoff", "Discharge current"};
-  for (int i = 0; i < BR_N; i++) brVal[i] = kvRow(rowsCard, BR_KEYS[i]);
+      "Cutoff", "Discharge current", "Paused for",
+      "Rated capacity", "State of health", "Discharge rate"};
+  for (int i = 0; i < BR_N; i++) {
+    brVal[i] = kvRow(rowsCard, BR_KEYS[i]);
+    brRow[i] = lv_obj_get_parent(brVal[i]);
+  }
   btSaveBtn = flatBtn(btResultBox);
   lv_obj_set_size(btSaveBtn, LV_PCT(100), 56);
   lv_obj_set_style_bg_color(btSaveBtn, COL_ACCENT, 0);
@@ -2140,7 +2353,9 @@ static void buildBatt() {
   styleCard(newBtn2, COL_BLACK, COL_BORDER, 13, 0);
   lv_obj_set_style_bg_opa(newBtn2, LV_OPA_TRANSP, 0);
   lv_obj_t *nbl2 = lbl(newBtn2, "New test", COL_ACCENT2, F16); lv_obj_center(nbl2);
-  lv_obj_add_event_cb(newBtn2, [](lv_event_t *) { btPhase = BT_IDLE; battSaved = false; refreshBatt(); }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(newBtn2, [](lv_event_t *) {
+    btPhase = BT_IDLE; battSaved = false; refreshBatt(); refreshTestChip();
+  }, LV_EVENT_CLICKED, nullptr);
 
   btStatusLbl = lbl(battScreen, "", COL_AMBER, F12);
   lv_label_set_long_mode(btStatusLbl, LV_LABEL_LONG_WRAP);
@@ -2220,11 +2435,11 @@ static void buildMenu() {
 static void kpRefresh() {
   lv_label_set_text(kpValue, kpBuf.empty() ? "0" : kpBuf.c_str());
   const char *unit = kpTarget == 2 ? "A" : kpTarget == 3 ? "m" : kpTarget == 4 ? "V"
-                   : kpTarget == 5 ? "A" : modeUnit();
+                   : kpTarget == 5 ? "A" : kpTarget == 6 ? "mAh" : modeUnit();
   lv_label_set_text(kpUnit, unit);
   lv_label_set_text(kpTitle, kpTarget == 2 ? "Fuse rating" : kpTarget == 3 ? "Wire length"
                              : kpTarget == 4 ? "Cutoff voltage" : kpTarget == 5 ? "Discharge current"
-                             : modeName());
+                             : kpTarget == 6 ? "Rated capacity" : modeName());
   UnitCfg c = unitCfg(unit);
   for (int i = 0; i < 4; i++) {
     char b[20]; snprintf(b, sizeof(b), "%g", c.preset[i]);
@@ -2239,6 +2454,7 @@ static void openKeypad(int target) {
   else if (target == 3) { if (estWireLen > 0) { snprintf(b, sizeof(b), "%g", estWireLen); kpBuf = b; } else kpBuf = ""; }
   else if (target == 4) { snprintf(b, sizeof(b), "%g", battCutoff); kpBuf = b; }
   else if (target == 5) { snprintf(b, sizeof(b), "%g", battAmps); kpBuf = b; }
+  else if (target == 6) { if (battRatedAh > 0) { snprintf(b, sizeof(b), "%g", battRatedAh * 1000.0f); kpBuf = b; } else kpBuf = ""; }
   else kpBuf = fuseRating ? std::to_string((int)fuseRating) : "";
   kpRefresh();
   showOverlay(OV_KEYPAD);
@@ -2262,6 +2478,9 @@ static void kpSet() {
   else if (kpTarget == 3) { estWireLen = v < 0 ? 0 : v > 100 ? 100 : v; refreshRtest(); }
   else if (kpTarget == 4) { if (!engineBusy()) { battCutoff = v < 0.1f ? 0.1f : v > 60 ? 60 : v; battCutoffCustom = true; } refreshBatt(); refreshMonitor(); }
   else if (kpTarget == 5) { if (!engineBusy()) { battAmps = v < 0.01f ? 0.01f : v > 12 ? 12 : v; } refreshBatt(); }
+  // Rated capacity in mAh, stored in Ah. 0 clears it (metrics go back to hidden);
+  // capped at 999 Ah, well past anything a 12 A load will ever finish.
+  else if (kpTarget == 6) { if (!engineBusy()) { battRatedAh = v <= 0 ? 0 : (v > 999000 ? 999.0f : v / 1000.0f); } refreshBatt(); }
   else { fuseRating = v; refreshRtest(); refreshMonitor(); }
   showOverlay(OV_NONE);
 }
@@ -3012,9 +3231,10 @@ void clearDevices() {
 
 void onTestProgress(int step, int total, float target, float v, float i) {
   rtPhase = RT_RUN; refreshRtest();
-  if (curScreen != SCR_RTEST) showScreen(SCR_RTEST);
   char b[40];
   snprintf(b, sizeof(b), "Step %d/%d", step, total); lv_label_set_text(runStepLbl, b);
+  snprintf(rtStepText, sizeof(rtStepText), "%d/%d", step, total);
+  refreshTestChip();
   lv_bar_set_value(runBar, total > 0 ? step * 100 / total : 0, LV_ANIM_OFF);
   snprintf(b, sizeof(b), "%.2f V", v); lv_label_set_text(runVLbl, b);
   snprintf(b, sizeof(b), "%.3f A", i); lv_label_set_text(runILbl, b);
@@ -3169,22 +3389,26 @@ void onTestComplete(const ResistanceTest::Result &r) {
   lv_chart_refresh(rtChart);
   snprintf(v1, sizeof(v1), "%.2f-%.2f V", vLoPlot, vHiPlot); lv_label_set_text(rcYRange, v1);
   snprintf(v1, sizeof(v1), "0-%.2f A", xHi); lv_label_set_text(rcXRange, v1);
-  resetSaveButton(saveBtn, saveBtnLbl);
   refreshRtest();
   showScreen(SCR_RTEST);
+  refreshTestChip();
+  autoSave(saveBtn, saveBtnLbl, rtSaved, A.saveRTest);
 }
 void onTestError(const char *msg) {
   rtTareRunning = false;   // a failed tare sweep leaves the old tare in place
   rtPhase = RT_IDLE; refreshRtest();
   lv_label_set_text(rtStatusLbl, msg);
   lv_obj_clear_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);
+  refreshTestChip();
 }
 
 void onBattProgress(float v, float i, float ah, float wh, float temp, uint32_t elapsedS, int phase) {
   if (btPhase != BT_RUN && btPhase != BT_REST) { btPhase = BT_RUN; refreshBatt(); }
   if (phase == 2 && btPhase == BT_RUN) { btPhase = BT_REST; refreshBatt(); }
-  setTextIf(btPhaseLbl, phase == 2 ? "RESTING - load off" : "DISCHARGING");
-  char b[32];
+  setTextIf(btPhaseLbl, phase == 3 ? "PAUSED - load off"
+                        : phase == 2 ? "RESTING - load off" : "DISCHARGING");
+  lv_obj_set_style_text_color(btPhaseLbl, phase == 3 ? COL_AMBER : COL_ACCENT, 0);
+  char b[96];
   char el[16];
   hhmmss((int)elapsedS, el, sizeof(el));
   setTextIf(btElapsedLbl, el);
@@ -3193,44 +3417,105 @@ void onBattProgress(float v, float i, float ah, float wh, float temp, uint32_t e
   snprintf(b, sizeof(b), "%.3f Ah", ah); setTextIf(btAhLbl, b);
   snprintf(b, sizeof(b), "%.1f Wh", wh); setTextIf(btWhLbl, b);
   snprintf(b, sizeof(b), "%.1f\xC2\xB0" "C", temp); setTextIf(btTempLbl, b);
+
+  // Progress against the nameplate rating: how much of it has come out, and how
+  // long the rest should take at the present current. Suppressed without a
+  // rating — an ETA with no reference to measure against would be invented.
+  if (battRatedAh > 0) {
+    float pct = ah / battRatedAh * 100.0f;
+    uint32_t left = (phase == 1 && A.battRemainingS) ? A.battRemainingS() : 0;
+    if (left > 0) {
+      char rem[16];
+      hhmmss((int)left, rem, sizeof(rem));
+      snprintf(b, sizeof(b), "%.0f%% of %.0f mAh drawn  -  approx %s left",
+               pct, battRatedAh * 1000.0f, rem);
+    } else {
+      snprintf(b, sizeof(b), "%.0f%% of %.0f mAh drawn", pct, battRatedAh * 1000.0f);
+    }
+    setTextIf(btEtaLbl, b);
+    lv_obj_clear_flag(btEtaLbl, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(btEtaLbl, LV_OBJ_FLAG_HIDDEN);
+  }
+
   if (phase == 1) {
     btLastElapsed = elapsedS;
     battHistPush(v);
     if (curScreen == SCR_BATT) battChartRefresh();
   }
+  refreshTestChip();
+}
+
+void onBattPaused(bool paused, const char *reason) {
+  battPausedFlag = paused;
+  snprintf(battPauseWhy, sizeof(battPauseWhy), "%s", reason ? reason : "");
+  // A pause is a state the user must not miss — it means their test is sitting
+  // there not progressing — so wake the screen for it.
+  if (paused) display::noteActivity();
+  refreshBatt();
+  refreshTestChip();
 }
 
 void onBattComplete(const CapacityTest::Result &r) {
   lastBatt = r;
   btPhase = BT_RESULT;
   battSaved = false;
+  battPausedFlag = false;
   char b[48];
   snprintf(b, sizeof(b), "%.3f Ah", r.capacityAh); lv_label_set_text(btAhBig, b);
-  snprintf(b, sizeof(b), "%.1f Wh  -  avg %.2f V", r.energyWh, r.avgV); lv_label_set_text(btWhSub, b);
+  snprintf(b, sizeof(b), "%.0f mAh  -  %.1f Wh  -  avg %.2f V",
+           r.capacityAh * 1000.0f, r.energyWh, r.avgV);
+  lv_label_set_text(btWhSub, b);
   char el[16];
   hhmmss((int)r.durationS, el, sizeof(el));
-  lv_label_set_text(brVal[0], el);
-  lv_label_set_text(brVal[1], r.stopReason);
-  snprintf(b, sizeof(b), "%.2f V", r.startV); lv_label_set_text(brVal[2], b);
-  snprintf(b, sizeof(b), "%.2f V", r.endV); lv_label_set_text(brVal[3], b);
-  snprintf(b, sizeof(b), "%.2f V", r.reboundV); lv_label_set_text(brVal[4], b);
-  snprintf(b, sizeof(b), "%.2f V", r.avgV); lv_label_set_text(brVal[5], b);
-  snprintf(b, sizeof(b), "%.3f A", r.avgI); lv_label_set_text(brVal[6], b);
-  snprintf(b, sizeof(b), "%.1f - %.1f\xC2\xB0" "C", r.minTemp, r.maxTemp); lv_label_set_text(brVal[7], b);
-  snprintf(b, sizeof(b), "%.2f V", r.cutoffV); lv_label_set_text(brVal[8], b);
-  snprintf(b, sizeof(b), "%.2f A", r.currentA); lv_label_set_text(brVal[9], b);
-  resetSaveButton(btSaveBtn, btSaveLbl);
+  lv_label_set_text(brVal[BR_DUR], el);
+  lv_label_set_text(brVal[BR_REASON], r.stopReason);
+  snprintf(b, sizeof(b), "%.2f V", r.startV); lv_label_set_text(brVal[BR_STARTV], b);
+  snprintf(b, sizeof(b), "%.2f V", r.endV); lv_label_set_text(brVal[BR_ENDV], b);
+  snprintf(b, sizeof(b), "%.2f V", r.reboundV); lv_label_set_text(brVal[BR_REBOUND], b);
+  snprintf(b, sizeof(b), "%.2f V", r.avgV); lv_label_set_text(brVal[BR_AVGV], b);
+  snprintf(b, sizeof(b), "%.3f A", r.avgI); lv_label_set_text(brVal[BR_AVGI], b);
+  snprintf(b, sizeof(b), "%.1f - %.1f\xC2\xB0" "C", r.minTemp, r.maxTemp); lv_label_set_text(brVal[BR_TEMP], b);
+  snprintf(b, sizeof(b), "%.2f V", r.cutoffV); lv_label_set_text(brVal[BR_CUTOFF], b);
+  snprintf(b, sizeof(b), "%.2f A", r.currentA); lv_label_set_text(brVal[BR_CURRENT], b);
+  // "Paused for" only earns a row when it actually happened.
+  if (r.pausedS > 0) {
+    char pel[16];
+    hhmmss((int)r.pausedS, pel, sizeof(pel));
+    lv_label_set_text(brVal[BR_PAUSED], pel);
+    lv_obj_clear_flag(brRow[BR_PAUSED], LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(brRow[BR_PAUSED], LV_OBJ_FLAG_HIDDEN);
+  }
+  // Rating-derived rows. State of health is coloured against the usual
+  // end-of-life convention: >=80 % healthy, 60-80 % worn, below that failed.
+  bool rated = r.ratedAh > 0;
+  for (int i = BR_RATED; i <= BR_CRATE; i++) {
+    if (rated) lv_obj_clear_flag(brRow[i], LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(brRow[i], LV_OBJ_FLAG_HIDDEN);
+  }
+  if (rated) {
+    snprintf(b, sizeof(b), "%.0f mAh", r.ratedAh * 1000.0f); lv_label_set_text(brVal[BR_RATED], b);
+    snprintf(b, sizeof(b), "%.0f%%", r.sohPct); lv_label_set_text(brVal[BR_SOH], b);
+    lv_obj_set_style_text_color(brVal[BR_SOH],
+        r.sohPct >= 80 ? COL_GREEN : r.sohPct >= 60 ? COL_AMBER : COL_RED, 0);
+    snprintf(b, sizeof(b), "%.2fC", r.cRate); lv_label_set_text(brVal[BR_CRATE], b);
+  }
   battChartRefresh();
   refreshBatt();
   showScreen(SCR_BATT);
+  refreshTestChip();
+  autoSave(btSaveBtn, btSaveLbl, battSaved, A.saveBatt);
 }
 
 void onBattError(const char *msg) {
   btPhase = BT_IDLE;
+  battPausedFlag = false;
   refreshBatt();
   lv_label_set_text(btStatusLbl, msg);
   lv_obj_clear_flag(btStatusLbl, LV_OBJ_FLAG_HIDDEN);
   showScreen(SCR_BATT);
+  refreshTestChip();
 }
 
 // ---- Entry -----------------------------------------------------------------
@@ -3250,6 +3535,7 @@ void begin(const UiActions &actions) {
   battCutoff = p.battCutoff;
   battCutoffCustom = p.battCutoffCustom;
   battAmps = p.battAmps;
+  battRatedAh = p.battRatedMah / 1000.0f;
   if (A.setPollRate) A.setPollRate(pollMs);
 
   scrRoot = lv_scr_act();

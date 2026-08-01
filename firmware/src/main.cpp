@@ -32,6 +32,7 @@
 #include "prefs.h"
 #include "report.h"
 #include "resistance_test.h"
+#include "sample_log.h"
 #include "sd_card.h"
 #include "ui.h"
 
@@ -54,6 +55,16 @@ static CapacityTest::Result g_lastBatt;
 // One-shot: a clean boot with auto-connect enabled asks loop() to reconnect to
 // the stored device once NimBLE has settled.
 static bool g_autoConnectPending = false;
+
+// Latched by a CONNECTED state, cleared by anything else. A test may only be
+// torn down when the link actually DROPS — the raw "state != CONNECTED" test
+// this replaced also fired on the user's own SCANNING/CONNECTING transitions,
+// so opening Connect and tapping Scan mid-discharge silently killed the test.
+static bool g_wasConnected = false;
+
+// True while the capacity test is paused because OUR battery got critical, so
+// loop() knows it may resume the test once power comes back.
+static bool g_powerPaused = false;
 
 // ---- Status routing --------------------------------------------------------
 static void handleStatus(const el15::Status &s) {
@@ -123,15 +134,36 @@ static void monitorPower() {
 
   bool crit = present && !usb &&
               (pct <= CRIT_PCT || (mV > 2500 && mV <= CRIT_MV));  // mV range guards a garbled read
-  if (!crit) { critCount = 0; latched = false; return; }
+  if (!crit) {
+    critCount = 0;
+    latched = false;
+    // Power is back (USB plugged in, or the pack recovered). A capacity test we
+    // paused for this reason can pick up exactly where it left off — hours of
+    // discharge data were never thrown away, so finishing the run is just a
+    // matter of re-energising the load.
+    if (g_powerPaused) {
+      g_powerPaused = false;
+      if (g_batt.paused() && g_batt.resume()) {
+        Serial.println("[pmic] controller power restored - capacity test resumed");
+        audio::success();
+      }
+    }
+    return;
+  }
   if (++critCount < DEBOUNCE || latched) return;
   latched = true;   // act once per sustained low-battery episode
 
   bool wasHot = loadHot();
   Serial.printf("[pmic] controller battery CRITICAL (%d%%, %d mV) - forcing LOAD OFF (wasHot=%d)\n",
                 pct, mV, (int)wasHot);
+  // A sweep cannot survive an interruption (its V-I ladder would have a hole in
+  // it), so it stops. A capacity discharge CAN: pause it, keep the accumulated
+  // Ah/Wh and the flash datapoint log, and resume when power returns.
   if (g_test.running()) g_test.stop();
-  if (g_batt.running()) g_batt.stop("Controller battery critical");
+  if (g_batt.running()) {
+    if (g_batt.pause("Controller battery critical")) g_powerPaused = true;
+    else g_batt.stop("Controller battery critical");
+  }
   g_ble.setSetpoint(0);
   g_ble.setLoad(false);   // the guard's in-flight NVS flag (set while armed) covers a hard brownout
   audio::fault();
@@ -240,14 +272,24 @@ void setup() {
     ok ? audio::success() : audio::failure();
     return ok;
   };
-  actions.startBatt  = [](float cutoffV, float amps) {
+  actions.startBatt  = [](float cutoffV, float amps, float ratedAh) {
     if (g_test.running()) return;   // never let two engines drive the load
     g_guard.arm(prefs::Data::CAPACITY);
     g_batt.cutoffV = cutoffV;
     g_batt.dischargeA = amps;
+    g_batt.ratedAh = ratedAh;   // 0 = not given; SoH/ETA are then suppressed
     g_batt.start();
   };
   actions.stopBatt   = []() { g_batt.stop(); };
+  actions.resumeBatt = []() {
+    // Re-arm before the load goes back on, same ordering rule as the manual
+    // load button: the link can drop in the window between the two.
+    if (!g_batt.paused()) return false;
+    g_guard.arm(prefs::Data::CAPACITY);
+    g_powerPaused = false;   // a manual resume takes the auto-resume off the table
+    return g_batt.resume();
+  };
+  actions.battRemainingS = []() { return g_batt.remainingS(); };
   actions.saveBatt   = [](char *msg, size_t len) {
     bool ok = report::saveBatt(g_lastBatt, msg, len);
     ok ? audio::success() : audio::failure();
@@ -285,6 +327,7 @@ void setup() {
 
   g_ble.onState = [](El15Client::State st, const char *info) {
     if (st == El15Client::CONNECTED) {
+      g_wasConnected = true;
       // Remember the peer so a link loss (or a crash) can get back to it
       // without a scan. Committed immediately: its whole value is surviving an
       // event we can't predict.
@@ -293,9 +336,21 @@ void setup() {
         d.lastAddrType = (uint8_t)g_ble.lastAddressType();
       });
       prefs::flush();
-    } else {  // safe-off on drop
-      if (g_test.running()) g_test.stop();
-      if (g_batt.running()) g_batt.stop("Connection lost");
+    } else {
+      // Safe-off, but ONLY on a genuine drop from a live link. SCANNING and
+      // CONNECTING are also "not CONNECTED", and treating them as a drop meant
+      // that opening Connect and tapping Scan during a discharge tore the test
+      // down — mid-priming it even died with "Cancelled" and left nothing to
+      // save. The guard keeps its own copy of this latch for its own recovery.
+      bool dropped = g_wasConnected;
+      g_wasConnected = false;
+      if (dropped) {
+        if (g_test.running()) g_test.stop();
+        // A discharge survives a link loss as a PAUSE: the load is off either
+        // way, but the hours of Ah/Wh and the flash datapoint log are kept and
+        // the user can resume once the link is back.
+        if (g_batt.running() && !g_batt.pause("BLE link lost")) g_batt.stop("Connection lost");
+      }
     }
     g_guard.onConnState(st);   // may start reconnect-and-force-off
     ui::onConnState((int)st, info);
@@ -320,8 +375,13 @@ void setup() {
     Serial.printf("[batt] done: %.3f Ah, %.1f Wh in %lus (%s)\n",
                   r.capacityAh, r.energyWh, (unsigned long)r.durationS, r.stopReason);
     audio::success();
+    // ui::onBattComplete paints the result and then drives the automatic save
+    // itself, so the "Saving..." state is on screen before the card blocks the
+    // loop task. The flash datapoint log stays intact until the next start(),
+    // so a failed auto-save can still be retried from the button.
     ui::onBattComplete(r);
   };
+  g_batt.onPause = [](bool paused, const char *reason) { ui::onBattPaused(paused, reason); };
   g_batt.onError = [](const char *m) {
     Serial.printf("[batt] error: %s\n", m);
     audio::failure();
@@ -363,11 +423,18 @@ void setup() {
 
 #ifdef EL15_SDTEST
   // On-device SD card exercise. Runs the SAME sd::info()/sd::saveCsv() paths the
-  // UI buttons use, on the loop task (so the shared-bus reroute never races a
-  // panel draw). Reports card presence/size, writes two real reports (checks the
-  // NNN auto-increment), and reads one back to prove the bytes actually landed.
-  delay(300);   // let the panel settle before we borrow its SPI bus
+  // UI buttons use, on the loop task. Reports card presence/size, writes two real
+  // reports (checks the NNN auto-increment), and reads one back to prove the
+  // bytes actually landed.
+  delay(300);   // let the panel finish its bring-up before the blocking card init
   Serial.println("[sdtest] ===== SD CARD TEST =====");
+  {
+    int Y, M, D, h, mi, s;
+    if (display::rtcTime(Y, M, D, h, mi, s))
+      Serial.printf("[sdtest] RTC reads %04d-%02d-%02d %02d:%02d:%02d\n", Y, M, D, h, mi, s);
+    else
+      Serial.println("[sdtest] RTC NOT SET - reports will stamp uptime, files get a zero date");
+  }
   char sdmsg[80];
   bool okInfo = sd::info(sdmsg, sizeof(sdmsg));
   Serial.printf("[sdtest] info : %-4s -> %s\n", okInfo ? "OK" : "FAIL", sdmsg);
@@ -381,7 +448,7 @@ void setup() {
     };
     bool w1 = sd::saveCsv("SDTEST", body, sdmsg, sizeof(sdmsg));
     Serial.printf("[sdtest] write1: %-4s -> %s\n", w1 ? "OK" : "FAIL", sdmsg);
-    char name1[24]; snprintf(name1, sizeof(name1), "%s", sdmsg);
+    char name1[sizeof(sdmsg)]; snprintf(name1, sizeof(name1), "%s", sdmsg);
     bool w2 = sd::saveCsv("SDTEST", body, sdmsg, sizeof(sdmsg));
     Serial.printf("[sdtest] write2: %-4s -> %s (expect the index to increment)\n",
                   w2 ? "OK" : "FAIL", sdmsg);
@@ -391,8 +458,38 @@ void setup() {
       Serial.printf("[sdtest] readback: %-4s -> %s\n", rb ? "OK" : "FAIL", sdmsg);
     }
     bool okInfo2 = sd::info(sdmsg, sizeof(sdmsg));
-    Serial.printf("[sdtest] info2: %-4s -> %s (free space should have dropped)\n",
+    Serial.printf("[sdtest] info2: %-4s -> %s (card still healthy after the writes)\n",
                   okInfo2 ? "OK" : "FAIL", sdmsg);
+  }
+
+  // ---- Flash datapoint log (sample_log.h) ---------------------------------
+  // Exercises the whole path the capacity test uses — mount, tiered append,
+  // batch flush, replay — without energising anything.
+  Serial.printf("[sdtest] free heap before LittleFS: %u B\n", (unsigned)ESP.getFreeHeap());
+  if (samplelog::start()) {
+    Serial.printf("[sdtest] free heap after  LittleFS: %u B\n", (unsigned)ESP.getFreeHeap());
+    // 600 offered samples one simulated second apart. At a 2 s base interval
+    // that must store ~300 of them, proving the tier schedule rate-limits.
+    for (uint32_t t = 0; t < 600; t++)
+      samplelog::add(t, 12.0f - t * 0.001f, 1.5f, 30.0f + t * 0.01f,
+                     1.5f * t / 3600.0f, 18.0f * t / 3600.0f);
+    samplelog::flush();
+    Serial.printf("[sdtest] log stored %lu records at %lu s interval (expect ~300 @ 2 s)\n",
+                  (unsigned long)samplelog::count(), (unsigned long)samplelog::intervalS());
+    uint32_t seen = 0, firstT = 0, lastT = 0;
+    float firstV = 0, lastV = 0;
+    samplelog::replay([&](const samplelog::Rec &r) {
+      if (seen == 0) { firstT = r.tS; firstV = r.v; }
+      lastT = r.tS; lastV = r.v; seen++;
+      return true;
+    });
+    Serial.printf("[sdtest] replay read %lu records, t %lu..%lu s, V %.3f..%.3f\n",
+                  (unsigned long)seen, (unsigned long)firstT, (unsigned long)lastT,
+                  firstV, lastV);
+    Serial.printf("[sdtest] log %s\n",
+                  (seen == samplelog::count() && seen > 0) ? "OK" : "FAIL (count mismatch)");
+  } else {
+    Serial.println("[sdtest] log FAIL - LittleFS unavailable");
   }
   Serial.println("[sdtest] ===== END =====");
 #endif

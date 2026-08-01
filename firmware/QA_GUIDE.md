@@ -5,16 +5,13 @@ Advanced-QA reference for the **standalone ESP32-C6 firmware** in `firmware/`
 status, how to build/flash/drive it, the code layout, a per-feature test matrix,
 the wire protocol, safety-critical behavior, and known gaps/risks.
 
-> Scope: this document is about the **`firmware/` ESP32-C6 target** running the
-> **v2 "Focus"** touchscreen UI. The repo also contains the Android app
-> (`app/`) and a phone-based BLE load simulator (added in commit `e22c845`);
-> those are referenced only as test tools here.
+> Scope: the **`firmware/` ESP32-C6 target** running the v2 "Focus" touchscreen
+> UI. The repo also contains the Android app (`app/`) and a phone-based BLE load
+> simulator (`simulator/`); those are referenced here only as test tools.
 
-Reference commits (branch `claude/android-apk-load-tester-k82q4g`):
-- `d65d430` connect using the scanned BLE address type
-- `c52e337` v2 "Focus" touchscreen UI + FT3168 touch bring-up
-- `e22c845` EL15 Load Simulator phone app (BLE peripheral) — test tool
-- `47277d9` first build/flash bring-up on real hardware
+**Last updated:** 2026-08-01, against `6adea41`. Companion docs:
+[`HANDOVER.md`](HANDOVER.md) (state + gotchas), [`FIRST_CONTACT.md`](FIRST_CONTACT.md)
+(real-EL15 bench order), [`QA_REPORT.md`](QA_REPORT.md) (audit + resolutions).
 
 ---
 
@@ -22,43 +19,50 @@ Reference commits (branch `claude/android-apk-load-tester-k82q4g`):
 
 | Area | State |
 |---|---|
-| Build (PlatformIO, pioarduino platform, ESP32-C6) | ✅ compiles clean; image ~1.4 MB in a 3 MB `huge_app` partition |
-| Boot on hardware | ✅ boots clean, no panic/bootloop |
-| Display (SH8601 AMOLED, QSPI) | ✅ renders v2 UI, correct colors |
-| Touch (FT3168) | ✅ works after power-mode init; 10 ms sampling |
-| Demo simulator (on-device) | ✅ connects; drives full UI without hardware |
-| BLE connect to **phone** simulator (random address) | ✅ reaches **Connected** |
-| BLE **live data** end-to-end (phone/real → Monitor heroes update) | ⚠️ **NOT yet confirmed** — connect works; verify readouts stream/update |
-| Real ALIENTEK EL15 hardware | ⚠️ **NOT tested** in-house (no unit on hand) |
-| SD-card save (R-Test result) | ⚠️ **STUBBED** — UI confirms "Saved — RTEST_NNN.csv"; no file is written |
-| Resistance-test engine math (R, Voc, R²) | ✅ byte-level port of the Kotlin, audited (see §7) |
+| Build (PlatformIO, pioarduino, ESP32-C6) | ✅ clean under `-Wall -Wextra`; ~2.11 MB of the 3 MB `huge_app` slot, RAM 17.8 % static |
+| Boot on hardware | ✅ clean, no panic/bootloop; `[boot] reset reason:` printed every boot |
+| Display (CO5300/SH8601 AMOLED, QSPI 80 MHz) | ✅ renders the v2 UI, correct colors |
+| Touch (CST820 answering as FocalTech) | ✅ works; 10 ms sampling + touch-snap engine |
+| Audio (ES8311) | ✅ `[audio] ready (ES8311)`; tones clean since the continuous-stream fix |
+| BLE connect to **phone simulator** (random address) | ✅ connects and streams |
+| BLE connect to **real ALIENTEK EL15** | ✅ verified 2026-07-24 |
+| Live telemetry from a real EL15 | ✅ verified — poll-driven, ~17–19 fresh samples/s |
+| Mode / setpoint / LOAD ON-OFF on a real EL15 | ✅ verified — **after** the command-checksum fix (§7) |
+| SD card read + write, FAT timestamps, re-init after eject | ✅ verified on hardware via `EL15_SDTEST` (2026-08-01) |
+| Flash datapoint log (LittleFS mount, tier schedule, replay) | ✅ verified on hardware (2026-08-01) |
+| SD **UI Save buttons** / auto-save on completion | ⚠️ **not yet exercised** |
+| R-Test / capacity run with **real current** | ⚠️ **not yet done** — no load has been drawn on the real unit |
+| Pause/resume, rated-capacity metrics, running-test chip | ⚠️ compile-clean, needs a real run |
+| Link-guard hot drop, crash recovery, brownout auto-off | ⚠️ compile-clean, never triggered for real |
+| NVS persistence / burn-in / NTP / Kelvin+tare | ⚠️ compile-clean, not confirmed end-to-end |
 
-**Top things QA should confirm first:** (1) live V/I/mode data actually streams
-into the Monitor hero blocks from the phone sim and, if available, a real EL15;
-(2) load ON/OFF and the fault path behave safely; (3) touch stays responsive
-across all screens during live updates.
+**Top things QA should confirm first:** (1) the SD **Save** path from the UI;
+(2) a short R-test and a short capacity run with real current on a bench PSU or
+a small protected cell; (3) the link-guard hot-drop drill. `FIRST_CONTACT.md`
+sequences all of this safely.
 
 ---
 
-## 2. Hardware & the three test surfaces
+## 2. Hardware & the two test surfaces
 
 **Board:** Waveshare **ESP32-C6-Touch-AMOLED-1.8** — 1.8″ AMOLED **368 × 448 px
-portrait**, SH8601 controller (QSPI), FT3168 capacitive touch (I²C), TCA9554 I/O
-expander (panel enable), AXP2101 PMIC. RISC-V, BLE 5, 16 MB flash.
-Enumerates as **COM4** (native USB-Serial/JTAG) on the test PC.
+portrait**, CO5300 controller driven as SH8601 (QSPI), CST820 touch answering on
+the FocalTech register map (I²C), TCA9554 I/O expander (panel + speaker-amp
+enable), AXP2101 PMIC, PCF85063 RTC, ES8311 audio codec, microSD slot. RISC-V,
+Wi-Fi 6 / BLE 5, 16 MB flash, **no PSRAM**.
 
-You can drive the firmware three ways — exercise all three:
+The COM port **hops between resets** (COM4 and COM7 both seen) — discover it,
+don't hard-code it.
 
-1. **On-device Demo Simulator** (no BLE, no hardware). Connect → *Demo
-   Simulator*. Models an ideal source (~12.6 V) behind ~0.35 Ω; honors
-   mode/setpoint/load and streams synthetic readings. Fastest way to test UI
-   logic and the resistance sweep end-to-end.
-2. **Phone BLE simulator** (real BLE path, no load hardware). The app from commit
-   `e22c845` advertises the EL15 GATT service as a BLE peripheral. Exercises the
-   real scan/connect/notify/write path. **Random address** — this is what the
-   `d65d430` fix enables.
-3. **Real ALIENTEK EL15** (the actual target). Untested in-house — highest-value
-   QA. Drives real current; observe all safety behavior.
+There are **two** test surfaces (the on-device demo simulator was removed —
+bench-testing always goes over a real BLE link now):
+
+1. **Phone BLE simulator** (`simulator/`, real BLE path, no load hardware).
+   Advertises the EL15 GATT service as a peripheral and models either a fixed
+   circuit or a full battery with a chemistry-accurate discharge curve. **Random
+   address** — exercises the scan/connect path that RPA peers need.
+2. **Real ALIENTEK EL15.** Connect/telemetry/control verified; **real current
+   still pending**. See `FIRST_CONTACT.md`.
 
 ---
 
@@ -69,23 +73,35 @@ PlatformIO Core is installed **off-PATH** at
 
 ```bash
 PIO=~/.platformio/penv/Scripts/pio.exe
-"$PIO" run   -d firmware                                   # build
-"$PIO" run   -d firmware -t upload --upload-port COM4      # flash
-"$PIO" device monitor -p COM4 -b 115200                    # serial log
+PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
+"$PIO" run   -d firmware                                  # build
+"$PIO" run   -d firmware -t upload --upload-port "$PORT"  # flash
+"$PIO" device monitor -p "$PORT" -b 115200                # serial log
 ```
 
 - First build downloads ~1 GB (platform + RISC-V toolchain + arduino-esp32 3.1.3
-  + libs); later builds are incremental (~20 s). Changing `include/lv_conf.h`
-  forces a full LVGL recompile (~75–125 s).
-- Serial is 115200. A boot line `esp_core_dump_flash: Incorrect size of core
-  dump image` is **harmless** (no coredump partition). Occasional
-  `Wire.cpp requestFrom Error -1` are benign transient touch-I²C hiccups.
-- Connect attempts log `[ble] connecting to <addr> (addr type N)` where
-  `type 0`=public, `type 1`=random.
+  + libs); later builds are incremental (~15 s for `src/`). Changing
+  `include/lv_conf.h` forces a full LVGL recompile (~75–125 s).
+- Serial is 115200. Useful lines: `[boot] reset reason: …` (power-on / PANIC /
+  BROWNOUT / WDT / USB), `[audio] ready (ES8311)`, a per-connect **GATT
+  characteristics dump**, `[ble] write OK/FAIL …` per control write, a 1 Hz
+  `[ble] status rx: …`, `[ble] status frame DROPPED (checksum)`, `[guard] …`,
+  `[pmic] …`, `[btn] EMERGENCY STOP`, `[sd] wrote …`, `[batt] done:/error:`.
+- `esp_core_dump_flash: Incorrect size of core dump image` at boot is
+  **harmless** (no coredump partition). Occasional `Wire.cpp requestFrom Error -1`
+  are benign transient touch-I²C hiccups.
+- **If the board vanishes from USB entirely** (no COM port at all — seen once
+  under a very fast poll flood), physically unplug/replug the cable.
 
 Library versions resolve **newer** than the `^` pins in `platformio.ini`:
-GFX **1.6.7**, NimBLE **2.5.0**, LVGL **8.4.0**. Code is adapted to these; watch
-for drift on `pio update`.
+GFX **1.6.7**, NimBLE **2.5.0**, LVGL **8.4.0**, SdFat 2.x. Code is adapted to
+these; watch for drift on `pio update`.
+
+**Test scaffolding** (compiled out of normal builds):
+`-D EL15_SDTEST` (boot-time SD write/readback), `-D EL15_POLLTEST` (poll-rate
+sweep), `-D EL15_SELFTEST` (safe mode-cycle sweep, load stays OFF),
+`-D EL15_NO_POLL` (disable polling — proves telemetry is poll-driven). E.g.
+`PLATFORMIO_BUILD_FLAGS="-D EL15_SDTEST" "$PIO" run -d firmware -t upload …`.
 
 ---
 
@@ -93,16 +109,24 @@ for drift on `pio update`.
 
 ```
 firmware/src/
-  main.cpp            owns objects, routes events, demo pump   (≈ Android DeviceCore)
-  el15_protocol.h     wire protocol: packet parse + command frames (header-only, pure)
-  el15_client.{h,cpp} BLE central: scan/connect/subscribe/poll/reassemble
-  el15_controller.h   controller interface + El15Simulator (demo load)
-  resistance_test.h   fuse-aware current-sweep engine (least-squares R, R²)
-  display.{h,cpp}     SH8601 + TCA9554 panel enable + FT3168 touch + LVGL glue
-  ui.cpp / ui.h       v2 "Focus" LVGL UI (1309 lines — the bulk of the app)
+  main.cpp            owns objects, routes events, buttons, e-stop, power monitor
+  el15_protocol.h     wire protocol: parse + command frames (header-only, pure)
+  el15_client.{h,cpp} BLE central: scan/connect/subscribe/poll/reassemble/pace
+  el15_controller.h   El15Controller interface ONLY (no on-device simulator)
+  resistance_test.h   fuse-aware bidirectional sweep engine + slope uncertainty
+  capacity_test.h     battery discharge / capacity engine
+  display.{h,cpp}     panel + touch + LVGL + PMIC/RTC + buttons + sleep + burn-in
+  audio.{h,cpp}       ES8311 tone feedback (continuous-stream I2S task, prio 8)
+  es8311.{c,h}        vendored codec driver
+  sd_card.{h,cpp}     microSD on bit-banged software SPI (SdFat, custom driver)
+  report.h            RTEST_/BATT_ CSV bodies
+  prefs.{h,cpp}       NVS persistence (debounced) + synchronous safety flags
+  link_guard.h        link-loss auto-stop supervisor + crash recovery
+  netclock.{h,cpp}    Wi-Fi scan + NTP → PCF85063
+  ui.{h,cpp}          v2 "Focus" LVGL UI (~3100 lines — the bulk of the app)
   board_config.h      ALL board GPIO/pins (verified vs Waveshare pin_config.h)
-include/lv_conf.h     LVGL config (fonts, chart, system-heap memory, 10 ms indev)
-platformio.ini        pioarduino platform, qio_qspi, huge_app.csv partition
+include/lv_conf.h     LVGL config (fonts, chart, 16 ms refr, 10 ms indev)
+platformio.ini        pioarduino platform, qio_qspi, huge_app.csv, -Wall -Wextra
 ```
 
 **Data flow (single source of truth = the `main.cpp` router):**
@@ -111,273 +135,375 @@ BLE notify / scan / disconnect  (NimBLE host task)
       │  marshalled via FreeRTOS queue (evtQueue_)
       ▼
 El15Client::drainEvents()  (loop task)  ──► onStatus / onDeviceFound / onState
-      │                                          │
-      │  demo path: El15Simulator::tick() ───────┤   (also loop task)
-      ▼                                          ▼
-main.cpp handleStatus() ──► ui::onStatus()  +  g_test.onStatus()
+      ▼
+main.cpp handleStatus() ──► ui::onStatus()  +  g_test.onStatus() / g_batt.onStatus()
+                        └─► LinkGuard arm/disarm, from the DEVICE's loadOn echo
 ```
 
-**Threading model (critical):** NimBLE callbacks run on the **NimBLE host task**,
-not the Arduino loop. They only **enqueue**; `El15Client::loopTick()` drains the
-queue on the **loop task**, so LVGL and the resistance-test engine are only ever
-touched single-threaded. GATT service discovery is done synchronously in
-`connectTo()` on the loop task (never from the host-task `onConnect`). **QA/dev
-rule:** never call LVGL or `g_test` from a NimBLE callback.
+**Threading model (critical):** NimBLE callbacks run on the **NimBLE host task**
+and only **enqueue**; `El15Client::loopTick()` drains on the **loop task**, so
+LVGL and both engines are only ever touched single-threaded. GATT service
+discovery is done synchronously in `connectTo()` on the loop task (never from
+the host-task `onConnect`). Audio runs on its own task at priority 8.
+**QA/dev rule:** never call LVGL or an engine from a NimBLE callback.
 
-**UI structure (`ui.cpp`):** persistent chrome (status strip 42 px + info bar
-26 px + fault banner) around a `contentStack` of five screens
-(`SCR_MON / SCR_ADJ / SCR_GRAPH / SCR_RTEST / SCR_CONNECT`), plus a pinned
-Load/RUN-TEST bar, plus three full-screen overlays on `lv_layer_top()`
-(`OV_MENU / OV_KEYPAD / OV_PICKER`). `showScreen()` toggles screen + chrome
-visibility; `showOverlay()` toggles overlays. Live data enters through
-`ui::onStatus/onConnState/onDeviceFound/onTest*`.
+**UI structure (`ui.cpp`):** persistent chrome (status strip + info bar + fault
+banner on `lv_layer_top()`) around a `contentStack` of **seven** screens —
+`SCR_MON / SCR_ADJ / SCR_GRAPH / SCR_RTEST / SCR_CONNECT / SCR_SET / SCR_BATT` —
+plus a pinned Load/RUN-TEST bar and full-screen overlays
+(`OV_MENU / OV_KEYPAD / OV_PICKER / OV_TEXT / OV_WIFI`). The Menu is an **8-tile
+4×2 grid**. `engineBusy()` gates every manual control while a test runs.
 
 ---
 
 ## 5. Feature inventory & test procedures
 
-Test each on **Demo** first (deterministic), then the **phone sim**, then (if
-available) a **real EL15**. "Expected" = intended behavior; note deviations.
+Test each against the **phone simulator** first (deterministic, no current),
+then a **real EL15**. "Expected" = intended behavior; note deviations.
 
 ### 5.1 Navigation
-- **Menu button** (top-right, list icon) → full-screen 6-tile Menu
-  (Monitor / Adjust / Mode / Graph / R-Test / Connect). Any destination ≤ 2 taps.
-- **Back arrow** (top-left, on every non-Monitor screen) → returns to Monitor in 1 tap.
-- **Overlays** (Menu / keypad / picker) cover the bars; ✕ closes.
+- **Menu** (top-right) → 8 tiles: Monitor / Adjust / Mode / Graph / R-Test /
+  Connect / Settings / Battery. **Back arrow** on every non-Monitor screen.
+- **Running-test chip** in the status strip whenever a test is live or holding
+  an unsaved result ("BATT 01:23", "BATT PAUSED", "R-TEST 4/8", "… result").
+  Hidden on that test's own screen; tapping it returns to the test.
+- *Test:* start a test, navigate away via the Menu (and via Connect ▸ Scan),
+  then use the chip to come back. The test must still be running and its result
+  must still be reachable — a scan in particular must NOT end the test.
+- **Touch-snap:** each press snaps to the nearest real tap target within 40 px
+  (z-order/overlay aware, scrolling preserved) — small targets are forgiving.
 - *Test:* reach every screen via Menu; back-arrow home from each; open/close each
-  overlay. Expected: no dead tiles, no stuck screens, status strip persists.
+  overlay. Expected: no dead tiles, no stuck screens, status strip persists,
+  the Menu grid scrolls if it ever overflows.
 
 ### 5.2 Connect (`SCR_CONNECT`)
-- Status row (dot + label). **Scan for devices** (shown when disconnected);
-  **Disconnect** (red, shown when connected). Device list: **Demo Simulator**
-  pinned on top, then discovered `EL15-XXXX` rows (name + MAC).
-- *Test:* Scan → list populates with **named** devices only; **duplicates are
-  suppressed** (dedup by address). Tap a row → "Connecting…" → "Connected" →
-  auto-returns to Monitor. Serial shows `[ble] connecting … (addr type N)`.
-- *Edge:* unnamed advertisers must NOT appear; a peer with FFF0 missing →
-  "Not an EL15 (no FFF0)"; missing FFF1/FFF3 → "characteristics missing";
-  link failure → "Connect failed".
+- Status row (dot + label). **Scan for devices** / **Disconnect**. Device list
+  shows discovered **named** devices (name + MAC), deduped by address.
+- *Test:* Scan → named devices only, no duplicates. Tap a row → "Connecting…" →
+  "Connected" → auto-returns to Monitor. Serial shows
+  `[ble] connecting … (addr type N)` plus the GATT characteristics dump.
+- *Edge:* unnamed advertisers must NOT appear; a peer without FFF0 →
+  "Not an EL15 (no FFF0)"; missing FFF1/FFF3 → "EL15 characteristics missing";
+  link failure → "Connect failed" (`connect() FAILED rc=` on serial).
+- **Auto-connect:** Settings ▸ Connection toggles reconnecting to the last
+  device ~1.5 s after boot. Off by default. Crash recovery takes precedence.
+- **Known gap:** when an 8 s scan window simply *expires*, the state is never
+  reset — the chip stays "Scanning". Tap Scan again or connect. (QA_REPORT M3.)
 
 ### 5.3 Monitor (`SCR_MON`, home)
 - **Status strip:** connection group (Monitor only, taps → Connect) / back arrow;
-  temp chip (color: white < 42 °C, amber 42–50, red > 50); Menu button.
-- **Info bar** (connected + Monitor/Adjust/Graph only): power W · fan n/5 ·
-  runtime hh:mm:ss · (CAP) Ah · (DCR) mΩ.
-- **Mode | Set bar:** left = mode abbr + name (tap → mode picker); right = **Set**
-  value + unit (tap → Adjust), or **Fuse** value (tap → cycle) in RT mode.
-- **Two hero blocks** (flex-fill): Voltage (green) and Current
-  (amber → **red + pulsing "SINKING"** when the load is on).
-- *Test:* with Demo connected + load ON in CC, confirm V sags, I ≈ setpoint,
-  power/fan/runtime/temp update ~2×/s, current hero turns red. Switch modes and
-  confirm the Set unit/label follow (A/V/Ω/W); CAP shows Ah in info bar, DCR shows
-  mΩ + zero current.
+  temp chip (white < 42 °C, amber 42–50, red > 50); Menu button.
+- **Info bar:** power W · fan % · temp · runtime hh:mm:ss · (CAP) Ah · (DCR) mΩ.
+  Fan is clamped to the 0–5 rating before being shown as a percentage.
+- **Mode | Set bar:** left = mode abbr + name (tap → picker); right = **Set**
+  value + unit (tap → Adjust), or **Fuse** (tap → cycle) in RT mode.
+- **Two hero blocks:** Voltage (green), Current (amber → **red + "SINKING"**
+  when the device reports the load on).
+- *Test:* with the load on in CC, confirm V sags, I ≈ setpoint, power/fan/
+  runtime/temp update at the configured rate, current hero turns red. Switch
+  modes and confirm the Set unit/label follow (A/V/**ohm**/W — CR must render
+  "ohm", never a tofu box); CAP shows Ah, DCR shows mΩ.
 
 ### 5.4 Load / RUN TEST bar (pinned, Monitor/Adjust/Graph)
-- Normal modes: **LOAD OFF** (green outline) ↔ **LOAD ON** (solid red). Reflects
-  the **hardware-reported** load state, not just the tap.
-- RT mode: **RUN TEST** (accent) — runs the sweep.
-- *Test (safety):* toggle load; state must track the device echo. With a fault
-  latched, load must **not** turn on. Disconnecting mid-test must turn the load
-  OFF (see §6).
+- Normal modes: **LOAD OFF** ↔ **LOAD ON**, reflecting the **hardware-reported**
+  load state, not the tap. RT mode: **RUN TEST**. BATT mode routes to `SCR_BATT`.
+- *Test (safety):* toggle load; state must track the device echo. With a warning
+  active, load-**ON** must be refused while load-**OFF** always works. While an
+  engine runs, the bar is inert (`engineBusy()`).
 
-### 5.5 Adjust (`SCR_ADJ`, dial-stepper)
-- Value card (mode name + range caption + big value/unit); unit-aware **±step
-  chips** (A: 0.01/0.1/1 · V: 0.1/1/10 · Ω: 0.1/1/10 · W: 1/10/50); big **−/+
-  pads**; **Type exact value** → keypad.
-- *Test:* pick a step, tap ± → value changes by exactly that step, clamped to the
-  unit range (A 0–40, V 0–150, Ω 0.05–9999, W 0–400) and rounded to the unit's
-  decimals; each change sends a setpoint to the device; live echo doesn't fight
-  your edits while on this screen.
+### 5.5 Adjust (`SCR_ADJ`) and keypad (`OV_KEYPAD`)
+- Value card (mode name + range caption + big value/unit); unit-aware ±step chips
+  (A 0.01/0.1/1 · V 0.1/1/10 · ohm 0.1/1/10 · W 1/10/50); big −/+ pads with
+  hold-to-repeat; the value card itself opens the keypad.
+- Ranges: A 0–40 (2 dp) · V 0–150 (1 dp) · ohm 0.05–9999 (1 dp) · W 0–400 (0 dp).
+- *Test:* pick a step, tap ± → value changes by exactly that step, clamped and
+  rounded; each change sends a setpoint; device echo doesn't fight your edits
+  while on this screen. Keypad: type a value, SET applies it; `.` inserts one
+  decimal; ⌫ works; ✕ discards. **While an engine runs, setpoint edits are
+  refused** (including battery cutoff/current, which the engine copied at start).
+- **Known gap:** the keypad path for the **fuse** value is unreachable —
+  `openKeypad(2)` is never called, so the fuse can only be *cycled*.
+  (QA_REPORT L1.)
 
-### 5.6 Numeric keypad (`OV_KEYPAD`)
-- Title, right-aligned value + unit, 4 unit-aware presets, `7-8-9/4-5-6/1-2-3/.-0-⌫`,
-  **SET**. `.` inserts one decimal; digits cap at 6 significant chars.
-- *Test:* type a value, SET applies it (setpoint or fuse). Backspace/decimal
-  rules hold. Cancel (✕) discards.
+### 5.6 Mode picker (`OV_PICKER`)
+- 8 tiles: CC/CV/CR/CP/CAP/DCR + **RT** + **BATT** (the last two are UI-only
+  pseudo-modes and send no device mode).
+- *Test:* each real mode round-trips (device echoes it back into the badge);
+  RT/BATT flip the Monitor affordances; the active mode is highlighted;
+  **the picker refuses to commit while an engine is running**.
 
-### 5.7 Mode picker (`OV_PICKER`)
-- 7 tiles: CC/CV/CR/CP/CAP/DCR + **RT** (amber). Selecting a normal mode sends
-  `setMode`, updates Set unit + default step, returns to Monitor. Selecting **RT**
-  makes RT the UI mode (no device mode sent) — Set→Fuse, Load→RUN TEST.
-- *Test:* each normal mode round-trips (device echoes the mode back into the
-  hero badge); RT flips the Monitor affordances; the currently-active mode is
-  highlighted.
-
-### 5.8 Resistance Test (`SCR_RTEST`) — two entry paths
-- **From Menu → R-Test:** Idle setup — Fuse tile (tap cycles
-  1/2/3/5/7.5/10/15/20/25/30/40 A, red until set), Steps −/+ (3–20, default 8),
-  **Start sweep** (disabled until a fuse is set).
-- **From RT mode → RUN TEST** on Monitor: uses the current fuse + steps, jumps
+### 5.7 Resistance Test (`SCR_RTEST`) — two entry paths
+- **Menu → R-Test:** setup — Fuse tile (cycles 1/2/3/5/7.5/10/15/20/25/30/40 A),
+  Steps −/+ , **2-wire / 4-wire** toggle, **Measure (short the probes)** tare
+  button (2-wire only), optional circuit estimator inputs (wire mm², length,
+  contacts, fuse type), **Start sweep** (disabled until a fuse is set).
+- **RT mode → RUN TEST on Monitor:** uses the current fuse + steps, jumps
   straight into Running.
-- **Running:** spinner + "RUNNING", Step n/total, progress bar, live V/I, **STOP**.
-- **Result:** big series resistance (Ω; 4 dp < 1 Ω else 3 dp), optional amber
-  low-confidence banner, detail rows (Voc, R², current sweep, steps/samples, fuse
-  limit, load temp), **Save to SD card**, **New test**.
-- *Test (Demo):* run against the demo → expect **R ≈ 0.35 Ω, Voc ≈ 12.6 V,
-  R² ≈ 1.0**. Try a high-voltage demo circuit (tap the status bar to edit) to see
-  the sweep power-limit; try > 60 V to see the over-range abort. Verify STOP
-  turns the load OFF and returns to Idle.
+- **Running:** spinner, Step n/total, progress bar, live V/I, **STOP**.
+- **Result:** big series resistance, V–I line chart (measured amber, fit green),
+  and 18 detail rows: Open-circuit voltage · Probe wiring · Measured (incl.
+  leads) · **Uncertainty (±)** · Fit quality (R²) · Est. short-circuit I · Sag at
+  max current · Peak test power · Load temp · Max fan · Current sweep ·
+  Steps/samples · Fuse limit · (estimator) Wire · Contacts · Fuse (est) ·
+  Est. build R · Residual vs est. Plus **Save to SD card** and **New test**.
+- *Test:* against a known resistance, R should land within the reported ±.
+  Verify **STOP returns to Idle and leaves the load OFF**, that the sweep is
+  bidirectional (the step count is 2n−1 for n levels), and that a tare captured
+  with shorted probes subtracts from the next 2-wire run (the raw figure is
+  still shown as "Measured (incl. leads)").
+
+### 5.8 Battery capacity (`SCR_BATT`)
+- **Setup:** chemistry tiles (Li-ion 3.7/4.2/3.0 · LiFePO4 3.2/3.65/2.5 ·
+  Lead-acid 2.0/2.13/1.75 per 2 V cell · NiMH 1.2/1.4/1.0 · Custom), cell count
+  −/+ with per-chemistry max (14/16/24/40 S), auto-filled cutoff (= cells ×
+  per-cell cutoff, editable), discharge current, **optional rated capacity
+  (mAh)**, **Start**. With a rating entered the hint line states the C-rate and
+  the runtime a healthy pack should manage.
+- **Running:** elapsed, hero V, I, Ah, Wh, temp, live discharge curve (fixed
+  time frame, smoothing, stepped auto-zoom Y scale), **STOP**. With a rating:
+  "% of rated drawn" plus an estimated time remaining.
+- **Paused:** an amber card gives the reason (controller battery critical, BLE
+  link lost) and a **RESUME** button. The load is off and the clock is stopped,
+  but nothing is discarded.
+- **Result:** Ah/mAh, Wh, duration, start/end/rebound V, avg V/I, temp range,
+  stop reason, "Paused for" (only if it happened), and — with a rating —
+  rated capacity, **state of health** (green ≥80 %, amber ≥60 %, red below) and
+  C-rate. **Saved to SD automatically**; the button is the retry.
+- *Test the pause path:* start a discharge, then pull the EL15's power (or walk
+  out of range). Expect PAUSED + a reason, not a finished test; restore the link
+  and tap RESUME; confirm Ah continues from where it was rather than restarting.
+- *Test the datapoint log:* after a run of a few minutes, open `BATT_NNN.CSV`
+  and confirm the `# Datapoints` block has one row per ~2 s with sane
+  voltage/current/power/mAh/temperature columns.
+- *Test:* priming holds the load off ~1.5 s and reads Voc; sanity aborts fire
+  (source < 0.1 V, > 60 V, or already at/below cutoff); discharge starts at the
+  clamped current `min(request, 12 A, 150 W ÷ Voc)`; Ah/Wh integrate; the
+  debounced cutoff ends it (3 consecutive samples ≤ cutoff, or one sample
+  < cutoff − 0.3 V); rest/rebound is captured; STOP mid-discharge still produces
+  a valid partial result.
 
 ### 5.9 Graph (`SCR_GRAPH`)
-- Live V (green) / I (amber) numbers + a two-series auto-scaling `lv_chart`
-  (per-series Y range, ~60-sample rolling window) + range/window labels.
-- *Test:* with the load cycling, both traces auto-scale and scroll; ranges/window
-  labels update; no flat-line degeneracy (flat series expand to ±0.5).
+- Live V (green) / I (amber) numbers + a two-series auto-scaling `lv_chart`.
+- *Test:* both traces auto-scale and scroll; range/window labels update; no
+  flat-line degeneracy.
+
+### 5.10 Settings (`SCR_SET`)
+Seven cards: **SAMPLE RATE** (20/10/4/2 Hz chips — 20 Hz = 50 ms is the
+default) · **CONNECTION** (auto-connect toggle) · **BATTERY** (controller's own
+%, mV, charge state) · **CLOCK** (RTC readout, Wi-Fi network picker, password
+entry, UTC offset, "Sync clock now") · **SCREEN PROTECTION** (pixel shift +
+**screen timeout**: Never / 30 s / 1 / 5 / 10 / 30 min, with a line stating that
+it dims at that interval and blanks at 5×) · **SD CARD** (Check card — always
+re-initialises, so it is also how you confirm a freshly-inserted card) ·
+**SYSTEM** (brightness, volume, mute, firmware/heap info, restart).
+- *Test:* change brightness / volume / sample rate → reboot → they stick.
+  A **successful clock sync deliberately reboots** the board (see §8).
+  Wi-Fi scan and sync are **refused while a test runs**.
+
+### 5.11 Audio & buttons
+- Tones: click on taps, firmer confirm on physical buttons, rising chime on test
+  complete, falling on error, urgent alarm on fault/e-stop. Volume + mute in
+  Settings; init failure is non-fatal (calls become no-ops).
+- **BOOT = hardware emergency stop** from any screen: stops both engines, pushes
+  LOAD OFF + setpoint 0, alarm, red ack banner (and honestly says so if it could
+  not reach the load).
+- **PWR short = display sleep/wake** (true black, touch inert).
+  **PWR long = load-safe power-off**: stops the load, flushes the write, then
+  cuts the rails via the AXP2101.
 
 ---
 
 ## 6. Safety-critical behavior (scrutinize hard)
 
-This firmware drives **real current** on a real EL15. Verify:
+This firmware drives **real current**. Verify every one of these:
 
-- **Load ON reflects hardware state**, not the tap — the button reads the device's
-  reported `loadOn`. A commanded-but-rejected load must not show ON.
-- **Fault gating:** on a protection trip (REV/UVP/other) a full-width red banner
-  latches; while latched the **load cannot be turned on**. Tapping the banner
-  clears it.
-- **Safe teardown on disconnect:** disconnecting while a resistance test is
-  running uses `shutdownAndDisconnect()` which pushes **LOAD_OFF** and flushes
-  (40 ms) before dropping the link. Verify the load actually stops. (Note: a plain
-  manual disconnect with the load on — no test running — issues `disconnect()`
-  without a LOAD_OFF, matching the Android app; confirm this is acceptable.)
-- **Resistance sweep clamps:** never commands more than `min(80 % fuse, 12 A,
-  150 W ÷ Voc, 40 A)`; aborts if the source is outside 0.1–60 V or a protection
-  trips; always LOAD_OFF on finish/abort.
-- **RT mode does not command a device "RT" mode** — the engine puts the load in
-  **CC** and steps current. Confirm the device mode during a test is CC.
+- **Load ON reflects hardware state**, not the tap. A commanded-but-rejected
+  load must not show ON.
+- **Fault gating:** while a status packet carries a protection warning
+  (REV/UVP/other) the red banner shows and **load-ON is refused**; **load-OFF is
+  never blocked**. Note the banner **mirrors the device** rather than latching —
+  it clears when the device stops reporting the warning (see QA_REPORT M1: this
+  is the decided semantics, not an oversight).
+- **Two engines, one load:** R-test and capacity are mutually exclusive, and
+  manual load/setpoint/mode controls are gated while either runs.
+- **Safe teardown on disconnect:** `stopAll()` captures "hot" *before* stopping
+  anything, then uses `shutdownAndDisconnect()` (LOAD_OFF + 40 ms flush) whenever
+  an engine was running **or the device reported the load on**. A plain
+  disconnect can no longer walk away from flowing current.
+- **Link-loss supervisor:** whenever the load reports ON the guard is armed; a
+  drop from a live link starts up to 8 reconnect-and-force-LOAD-OFF attempts
+  with a red banner and repeating alarm, and gives up **loudly** with a tappable
+  retry. Manual scan/connect makes it stand down.
+- **Crash/reboot recovery:** an NVS in-flight flag is written *synchronously*
+  while energised; the next boot offers "reconnect and force LOAD OFF".
+- **Controller-brownout auto-safe:** on battery (not USB), at ≤ 8 % or ≤ 3.30 V
+  for 3 consecutive 1 Hz reads, the load is force-stopped before the controller
+  can brown out and strand it.
+- **Sweep clamps:** never commands more than `min(80 % fuse, 12 A, 150 W ÷ Voc,
+  40 A)`; aborts if the source is outside 0.1–60 V or a protection trips; always
+  LOAD_OFF on finish/abort.
+- **RT/BATT never command a device "RT"/"BATT" mode** — both engines put the
+  load in **CC**. Confirm the device mode during a test is CC.
+- **Corrupt packets are dropped**, not parsed: a status frame failing the
+  checksum never reaches the engines (logged, rate-limited).
 
 ---
 
 ## 7. Wire protocol (for verifying BLE behavior)
 
-GATT service `FFF0`; **notify `FFF1`**, **write `FFF3`**. The firmware is a
-byte-for-byte port of the Android/DM40GUI protocol (audited).
+GATT service `FFF0`; **notify `FFF1`** (`--wN-`), **command `FFF3`**
+(`--w--`, **write-no-response only**). The per-connect serial dump prints this.
 
-**Commands** (written to FFF3, no response):
+**Frame format:** `AF 07 03 <cmd> <len> <data…> <checksum>`, where the checksum
+byte makes the **whole frame sum to 0 (mod 256)** — the same rule the status
+parser enforces on incoming packets. **A real EL15 silently drops any command
+that doesn't sum to zero.**
 
 | Action | Frame (hex) |
 |---|---|
 | Poll status | `AF 07 03 08 00 3F` |
-| Load ON | `AF 07 03 09 01 04` |
-| Load OFF | `AF 07 03 09 01 00` |
-| Lock keypad | `AF 07 03 09 01 01` |
-| Set mode | `AF 07 03 03 01 <mode>` |
-| Set setpoint | `AF 07 03 04 04 <float32 LE>` |
+| Load ON | `AF 07 03 09 01 04 39` |
+| Load OFF | `AF 07 03 09 01 00 3D` |
+| Lock keypad | `AF 07 03 09 01 01 3C` |
+| Set mode | `AF 07 03 03 01 <mode> <cksum>` |
+| Set setpoint | `AF 07 03 04 04 <float32 LE> <cksum>` |
 
-Mode IDs: CC `0x01`, CAP `0x02`, CV `0x09`, DCR `0x0A`, CR `0x11`, CP `0x19`.
+Mode IDs: CC `0x01`, CAP `0x02`, CV `0x09`, DCR `0x0A`, CR `0x11`, CP `0x19` —
+**all six verified against a real unit** (commanded mode == reported `b5`).
 
-**Status notification** (28 bytes, header `DF 07 03 08`, CRC = `sum(bytes) &
-0xFF == 0`): voltage f32 @7, current f32 @11, runtime i32 @15, power = V×I;
-byte 5 = mode(low 5) + fan(bits 6–7), byte 6 = load/lock/fan-MSB/protection nibble;
-mode-specific tail (temp/setpoint, or CAP energy/capacity, or DCR I1/I2/mΩ).
+**Status notification** (28 bytes, header `DF 07 03 08`, checksum
+`sum(bytes) & 0xFF == 0`): voltage f32 @7, current f32 @11, runtime i32 @15,
+power = V×I; byte 5 = mode (low 5 bits) + fan (bits 6–7), byte 6 =
+load/lock/fan-MSB/protection nibble; mode-specific tail (temp/setpoint, or CAP
+energy/capacity, or DCR I1/I2/mΩ).
 
-- **MTU:** firmware requests **247** so a 28-byte frame fits in one notification.
-  Frame **reassembly** across notifications is still implemented and must be
-  tested at the default 23-byte MTU (a peer that doesn't honor the larger MTU
-  splits the frame → verify reassembly + header resync).
-- *QA angle:* sniff FFF3 writes match the table above byte-for-byte; verify the
-  poll cadence (~500 ms) and that setpoint floats are little-endian.
+**Behaviors that only showed up on real hardware — preserve them:**
+- **Telemetry is POLL-driven.** The device sends a status frame only in reply to
+  a POLL write; it does not free-run. So a working POLL is proof FFF3 writes land.
+- **Control writes must be paced.** FFF3 is write-no-response only and the device
+  drops a command landing too close behind another one. `writeRaw` holds every
+  *control* write ≥50 ms from the previous one and defers the next poll. Polls
+  themselves are never paced.
+- **Poll rate:** the EL15 produces ~17–19 fresh samples/s (min ~23 ms between
+  distinct frames), so **50 ms (20 Hz) is the practical max** and is the default.
+  Faster just refetches repeats and floods the link.
+- **MTU:** the firmware requests 247 so a 28-byte frame fits one notification.
+  Reassembly + header resync is still implemented and should be tested against a
+  peer that keeps the 23-byte default.
+
+*QA angle:* sniff FFF3 writes and check the trailing checksum byte; verify the
+poll cadence matches the Settings chip; verify setpoint floats are little-endian.
 
 ---
 
 ## 8. Known gaps, stubs & risk areas
 
-**Stubs / not implemented:**
-- **SD-card save** — now real (`sd_card.cpp`, SPI mode: SCK=11 MOSI=10 MISO=18
-  CS=6) but **not yet exercised against a card**. It writes `RTEST_NNN.CSV` /
-  `BATT_NNN.CSV` at the card root. Test: with a FAT32 card, Save should turn
-  green with the file name; with the slot empty it must turn red with "No card
-  detected" — a confirmation is only ever shown for a file that really landed.
-  Also confirm the panel keeps drawing normally afterwards (the card and the
-  display share one SPI host). Settings ▸ SD CARD ▸ *Check card* probes the slot
-  without writing.
-- **Capacity CSV holds the summary only** — the per-sample discharge curve is
-  Phase 3 of CAPACITY_PLAN.md.
-- **CSV timestamps** fall back to uptime seconds until the RTC is set (Settings
-  ▸ Clock ▸ Wi-Fi NTP sync sets it); the R-Test result *screen* has no
-  Timestamp row.
+**Untested paths (highest value for QA):**
+- **SD Save from the UI** — Settings ▸ SD ▸ Check card, then an R-test/battery
+  Save. Expect a green button with the file name, or an honest red reason
+  ("No card detected (reseat it)" / "Card not formatted (use FAT32)" /
+  "Cannot write (card locked or full)"). A half-written file is deleted rather
+  than left claiming to be a result. Confirm the CSV opens in a spreadsheet.
+- **Real current** through either engine.
+- **Link-guard / crash-recovery / brownout** paths, none of which has fired for
+  real. Drill them per `FIRST_CONTACT.md` §15/16/16b.
+- **NVS persistence, burn-in shift/dim, NTP sync, Kelvin + tare** — all compile
+  and boot, none confirmed end-to-end.
 
-**New this session (compile-clean, hardware-unverified):**
-- **NVS persistence** (`prefs`) — brightness, volume/mute, sample rate, screen
-  protection, R-test + battery setup, Wi-Fi, last device. Verify by changing a
-  setting, rebooting, and confirming it stuck.
-- **Screen protection** (`display`) — pixel shift on by default; idle dim then
-  blank, waking on any touch/button; blank suppressed while a test runs.
-- **Link-loss supervisor + crash recovery** (`link_guard`) — locked red alarm
-  banner + reconnect-and-force-LOAD-OFF on a hot drop; amber recovery offer on
-  the next boot after a crash left the load on.
-- **4-wire / lead tare** (`resistance_test`) — 2-wire/4-wire toggle; a shorted-
-  probe tare sweep that subtracts from later 2-wire results (raw shown too).
-- **NTP clock sync** (`netclock`) — Settings ▸ Clock ▸ tap "Wi-Fi network"
-  scans and lists nearby SSIDs (signal bars, "Hidden/manual" for unlisted ones);
-  pick one, type the password, "Sync clock now". Radio up only for the
-  scan/sync, both refused while a test runs.
-- Android-app features **not ported**: capacity/runtime/step/OCP bench tests,
-  on-device history, settings, alarms, calibration sweep.
+**Known open defects** (see QA_REPORT.md for the full list and status):
+- **M3** — a scan window that simply expires never resets the state; the UI keeps
+  showing "Scanning".
+- **L1** — the fuse keypad path is unreachable (cycle-only).
+- **L4** — DCR mode shows `dcrI1` on the current hero; decide whether that or a
+  zeroed current is intended.
+
+**Deliberate limitations:**
+- **Capacity CSV holds the summary only** — the per-sample discharge curve is
+  Phase 3 of `CAPACITY_PLAN.md`.
+- **CSV timestamps** fall back to `(RTC not set) uptime NNN s` until the clock is
+  set via Settings ▸ Clock.
+- **A successful clock sync auto-reboots.** Wi-Fi needs ~50 KB contiguous, so the
+  draw buffer is temporarily shrunk to 16 lines and **cannot be reassembled**
+  afterwards (heap fragmentation) — the reboot is how the full buffer comes back.
+  RTC + NVS persist, so nothing is lost.
+- Android-app features **not ported**: runtime/step/OCP bench tests, on-device
+  history, PDF export, alarms, calibration sweep.
 
 **Approximations (design fidelity):**
-- **Fonts:** Montserrat (bundled) stands in for Inter/JetBrains-Mono; hero digits
-  are **48 px** (LVGL's largest built-in) vs the 64 px spec.
+- **Fonts:** Montserrat stands in for Inter/JetBrains-Mono; hero digits are
+  **48 px** (LVGL's largest built-in) vs the 64 px spec.
 - **Icons:** nearest LVGL built-in symbols, not exact Phosphor glyphs.
 - **Glyphs:** Ω→`ohm`, °→`C`, en/em-dash→`-`, ellipsis→`...`, `±`→`+/-`
   (Montserrat lacks those glyphs; using them renders empty boxes).
-- **RT tile "dashed amber border"** → solid amber (LVGL borders are solid-only).
 
 **Risk areas worth targeted testing:**
-- **Live-data flow not yet confirmed** end-to-end from a BLE peer (connect works;
-  verify Monitor heroes + info bar actually update from FFF1 notifications).
-- **Setpoint sync races:** the UI suppresses device echoes while on Adjust/keypad
-  and in RT mode — verify no flicker/fighting when adjusting with the load live.
-- **Adjust UI ranges exceed hardware ratings** (e.g. A up to 40, V up to 150) —
-  the device enforces its own 12 A/150 W/60 V limits; verify sane behavior when a
-  setpoint exceeds them.
-- **Touch:** FT3168 needs its power-mode init (reg `0xA5`=Active) or it stops
-  reporting; a transient I²C read now **holds last state**. Verify sustained
-  responsiveness across long sessions and during heavy redraws (screen switches).
-- **Scan dedup / address type:** verify random-address peers connect and the list
-  doesn't grow with duplicate adverts.
+- **RAM is the binding constraint.** 320 KB, no PSRAM, LVGL allocating from the
+  system heap. NimBLE needs ~25–30 KB **contiguous** to *establish* a connection;
+  a too-large draw buffer presents as "connect always fails, HCI 0x3e" while
+  scanning still works. If you grow the UI or `BUF_LINES`, re-verify connects.
+- **Setpoint sync races:** echoes are suppressed while on Adjust/keypad and in
+  RT/BATT mode — verify no flicker when adjusting with the load live.
+- **Adjust ranges exceed hardware ratings** (A to 40, V to 150) — the device
+  enforces its own 12 A / 150 W / 60 V limits; verify sane behavior at the edges.
+- **Touch:** both FocalTech and CST anti-sleep registers are written at init.
+  Verify sustained responsiveness over long sessions and during heavy redraws.
 - **Reassembly resync** on lost/garbled bytes (drop-one-byte header resync).
-- **Real EL15 address type** unknown — if a real unit advertises random, the
-  `d65d430` fix now handles it; if public, also handled. Verify on real hardware.
+- **A wedged SD card** (from an aborted write) reports CMD0 `R1=0x00` and only a
+  **physical reseat / power-cycle** clears it — an ESP reset will not.
 
 ---
 
 ## 9. Suggested QA checklist
 
 Boot & display
-- [ ] Cold boot: UI up in < ~3 s, correct colors, no boxes/tofu, no panic on serial.
-- [ ] Every screen renders within the 368 × 448 bounds (no clipping/overflow).
+- [ ] Cold boot: UI up in < ~3 s, correct colors, no tofu boxes, no panic on serial.
+- [ ] `[boot] reset reason: power-on` and `[audio] ready (ES8311)` both present.
+- [ ] Every screen renders within 368 × 448 (no clipping); Menu is 8 tiles.
 
 Touch
-- [ ] Every button/tile responds with visible press-dim; no missed taps over a 5-min session.
-- [ ] Taps land on the intended targets on all screens/overlays.
+- [ ] Every button/tile responds with visible press-dim; no missed taps over 5 min.
+- [ ] Touch-snap makes small targets forgiving without breaking scrolling.
 
-Connect (Demo, phone sim, real EL15)
-- [ ] Scan lists named devices, no duplicates; Demo pinned on top.
-- [ ] Connect → Connected → auto-home; Disconnect works; states match serial log.
-- [ ] Random-address peer (phone) connects; `addr type 1` in log.
-- [ ] **Live V/I/mode/power/temp/fan/runtime update** from the peer.  ← key gap
+Connect
+- [ ] Scan lists named devices only, no duplicates; GATT dump appears on connect.
+- [ ] Connect → Connected → auto-home; Disconnect works; states match serial.
+- [ ] Random-address peer (phone sim) connects; `addr type 1` in the log.
+- [ ] Auto-connect toggle reconnects on the next boot (and only then).
 
 Control
-- [ ] All 7 modes select; Set unit/label + default step follow the mode.
-- [ ] Adjust ±/step chips/keypad set the setpoint exactly, clamped & rounded.
-- [ ] Load ON/OFF tracks hardware state; blocked while faulted.
+- [ ] All 6 device modes select and echo back; CR renders "ohm", not a box.
+- [ ] Adjust ± / step chips / keypad set the setpoint exactly, clamped & rounded.
+- [ ] Load ON/OFF tracks hardware state; ON refused while a warning is active,
+      OFF never refused.
+- [ ] Every manual control is inert while an engine runs.
 
 Resistance test
-- [ ] Menu path + RT-mode path both run; Demo → R≈0.35 Ω, R²≈1.0.
-- [ ] Progress/STOP work; STOP + finish leave the load OFF.
-- [ ] Result rows correct; low-confidence banner on poor R².
-- [ ] "Save to SD" — **known stub**, confirm no file yet (don't pass as real).
+- [ ] Both entry paths run; result lands within the reported ±.
+- [ ] Progress / STOP work; STOP returns to Idle **and** leaves the load OFF.
+- [ ] 4-wire toggle and 2-wire tare both reflected in the result rows and CSV.
+- [ ] **Save to SD** → green with `RTEST_NNN.CSV`, or an honest red reason.
 
-Graph
+Battery capacity
+- [ ] Setup validation: cutoff above/below Voc, out-of-range source, zero current.
+- [ ] Discharge integrates Ah/Wh; debounced cutoff fires; rebound recorded.
+- [ ] STOP mid-discharge yields a valid partial result, load OFF.
+- [ ] **Save to SD** → green with `BATT_NNN.CSV`.
+
+Graph & settings
 - [ ] Both traces auto-scale/scroll; range + window labels update.
+- [ ] Brightness / volume / sample rate survive a reboot.
+- [ ] Clock sync sets the RTC (and reboots); CSV timestamps become real.
 
-Safety
-- [ ] Fault banner latches, gates load-ON, clears on tap.
-- [ ] Disconnect mid-test stops the load.
-- [ ] Sweep never exceeds clamp limits; aborts out-of-range source.
+Safety (do these last, per FIRST_CONTACT.md)
+- [ ] Fault banner shows, gates load-ON, never gates load-OFF.
+- [ ] Disconnect while hot stops the load first.
+- [ ] BOOT e-stop kills the load from any screen.
+- [ ] Link-guard hot drop → banner, alarm, reconnect, "LOAD FORCED OFF".
+- [ ] Crash recovery: pull power while hot → boot offers reconnect-and-kill.
+- [ ] PWR long-press powers off **after** the load is confirmed off.
+- [ ] Sweep never exceeds clamp limits; aborts an out-of-range source.
 
 ---
 
-*Keep this current as features land (SD save, bench tests, history, real-EL15
-results). File issues against the specific `firmware/src/*` file + screen/state.*
+*Keep this current as features land. File issues against the specific
+`firmware/src/*` file + screen/state.*

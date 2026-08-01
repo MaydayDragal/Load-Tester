@@ -24,14 +24,24 @@ struct UiActions {
   // no lead correction, 2-wire subtracts the measured lead+contact tare.
   std::function<void(float fuse, int steps, bool fourWire, float tareOhm)> startRTest;
   std::function<void()> stopRTest;
-  std::function<void(float cutoffV, float amps)> startBatt;
+  // ratedAh is the pack's nameplate capacity, or 0 when the user did not enter
+  // one — state-of-health and time-remaining are then suppressed rather than
+  // guessed at.
+  std::function<void(float cutoffV, float amps, float ratedAh)> startBatt;
   std::function<void()> stopBatt;
+  // Re-energise a discharge that was paused (controller battery, link loss).
+  // False = there was nothing paused to resume.
+  std::function<bool()> resumeBatt;
+  // Engine's estimate of seconds left to the rated capacity at the present
+  // current; 0 when unknown (no rating entered, or not discharging).
+  std::function<uint32_t()> battRemainingS;
 
-  // SD card. All three block for up to ~2 s (card init) and report honestly:
-  // true = written, and `msg` holds the file name; false = nothing was saved,
-  // and `msg` holds the reason to show the user. Nothing may draw meanwhile —
-  // the card shares the panel's SPI bus (sd_card.cpp) — so the UI must render
-  // any "Saving..." state BEFORE calling.
+  // SD card. All three block for up to ~2 s (card init dominates) and report
+  // honestly: true = written, and `msg` holds the file name; false = nothing was
+  // saved, and `msg` holds the reason to show the user. The card runs on its own
+  // bit-banged SPI pins (sd_card.cpp) so a redraw no longer conflicts with it,
+  // but the call still blocks the loop task — so the UI must render any
+  // "Saving..." state BEFORE calling.
   std::function<bool(char *msg, size_t len)> saveRTest;   // last R-Test result
   std::function<bool(char *msg, size_t len)> saveBatt;    // last capacity result
   std::function<bool(char *msg, size_t len)> sdInfo;      // card present + size
@@ -53,9 +63,14 @@ void onTestProgress(int step, int total, float target, float v, float i);
 void onTestComplete(const ResistanceTest::Result &r);
 void onTestError(const char *msg);
 
+// phase: 1 = discharging, 2 = resting, 3 = paused.
 void onBattProgress(float v, float i, float ah, float wh, float temp, uint32_t elapsedS, int phase);
 void onBattComplete(const CapacityTest::Result &r);
 void onBattError(const char *msg);
+
+// The discharge was suspended (or un-suspended) without ending the test.
+// `reason` is a static string while paused, nullptr on resume.
+void onBattPaused(bool paused, const char *reason);
 
 // Hardware emergency stop (BOOT button): show the acknowledgement banner and
 // unstick any running-test view.
