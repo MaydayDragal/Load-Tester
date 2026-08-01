@@ -5,7 +5,7 @@ a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
 **Last updated:** 2026-08-01.
-**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `d255deb`.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `933fac5`.
 `origin/main` and `origin/claude/…` are kept at the same commit, and pushing the
 branch does NOT move main — push both.
 
