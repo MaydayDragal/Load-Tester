@@ -109,7 +109,12 @@ void flush() {
 void armInFlight(uint8_t what) {
   if (g_data.inFlight == what) return;
   g_data.inFlight = what;
-  g_nvs.putUChar("inFlight", what);
+  size_t n = g_nvs.putUChar("inFlight", what);
+  // Log every transition, and shout if the write did not take. This flag is the
+  // whole crash-recovery mechanism: if it silently fails to clear, every boot
+  // cries wolf and the one that matters gets dismissed with the rest.
+  Serial.printf("[prefs] inFlight -> %u (%s)\n", (unsigned)what,
+                n ? "stored" : "NVS WRITE FAILED");
 }
 
 void clearInFlight() { armInFlight(Data::NONE); }
