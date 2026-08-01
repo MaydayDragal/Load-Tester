@@ -22,7 +22,10 @@ struct UiActions {
   std::function<void(int ms)> setPollRate;   // status sampling interval
   // fourWire/tareOhm describe the probe wiring: 4-wire (Kelvin) sensing needs
   // no lead correction, 2-wire subtracts the measured lead+contact tare.
-  std::function<void(float fuse, int steps, bool fourWire, float tareOhm)> startRTest;
+  // Continuous triangular sweep: startA -> maxA -> startA over sweepS seconds.
+  // maxA == 0 asks the engine to use the whole headroom the fuse allows.
+  std::function<void(float fuse, float startA, float maxA, uint32_t sweepS,
+                     bool fourWire, float tareOhm)> startRTest;
   std::function<void()> stopRTest;
   // ratedAh is the pack's nameplate capacity, or 0 when the user did not enter
   // one — state-of-health and time-remaining are then suppressed rather than
@@ -59,7 +62,11 @@ void onConnState(int state, const char *info);   // El15Client::State
 void onDeviceFound(const char *address, const char *name);
 void clearDevices();
 
-void onTestProgress(int step, int total, float target, float v, float i);
+// Live sweep progress. `r` is the running resistance estimate and is only
+// meaningful once `rValid` is true (the ramp has to cover some current span
+// before a slope means anything).
+void onTestProgress(float elapsedS, float totalS, float target,
+                    float v, float i, float r, bool rValid);
 void onTestComplete(const ResistanceTest::Result &r);
 void onTestError(const char *msg);
 

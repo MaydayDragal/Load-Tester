@@ -256,10 +256,13 @@ void setup() {
     g_ble.pollIntervalMs = (uint32_t)ms;   // BLE status poll cadence
     g_test.pollIntervalMs = (uint32_t)ms;  // R-test settle/collect floors adapt
   };
-  actions.startRTest = [](float fuse, int steps, bool fourWire, float tareOhm) {
+  actions.startRTest = [](float fuse, float startA, float maxA, uint32_t sweepS,
+                          bool fourWire, float tareOhm) {
     if (g_batt.running()) return;   // never let two engines drive the load
     g_guard.arm(prefs::Data::RTEST);
-    g_test.steps = steps;
+    g_test.startCurrent = startA;
+    g_test.maxCurrent = maxA;       // 0 = use the fuse's full safe headroom
+    g_test.sweepSeconds = sweepS;
     g_test.fourWire = fourWire;
     g_test.tareOhm = tareOhm;
     g_test.start(fuse);
@@ -359,7 +362,9 @@ void setup() {
   g_ble.onDeviceFound = [](const char *addr, const char *name) { ui::onDeviceFound(addr, name); };
   g_ble.begin();
 
-  g_test.onProgress = [](int s, int t, float tgt, float v, float i) { ui::onTestProgress(s, t, tgt, v, i); };
+  g_test.onProgress = [](float el, float total, float tgt, float v, float i, float r, bool rOk) {
+    ui::onTestProgress(el, total, tgt, v, i, r, rOk);
+  };
   g_test.onComplete = [](const ResistanceTest::Result &r) {
     g_lastRTest = r;   // keep it for a later Save to SD
     audio::success();

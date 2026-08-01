@@ -84,7 +84,11 @@ static int     kpTarget = 0;               // 1 setpoint, 2 fuse
 static std::string kpBuf;
 
 static float   fuseRating = 0;
-static int     rtSteps = 8;
+// Sweep shape: startA -> maxA -> startA over sweepS seconds. maxA == 0 means
+// "whatever the fuse safely allows", which the engine works out from the live Voc.
+static float   rtStartA = 0, rtMaxA = 0;
+static int     rtSweepS = 30;
+static const uint32_t TARE_SWEEP_S = 8;   // shorted probes need no dwell time
 // Probe wiring. 4-wire (Kelvin) senses voltage at the DUT through separate
 // leads, so the lead and contact resistance carried by the force leads never
 // appears in the reading; 2-wire measures it in series with the DUT, which is
@@ -162,6 +166,9 @@ static UnitCfg unitCfg(const char *u) {
   // Nameplate capacity. Presets are the common cells/packs this gets used on:
   // an 18650, a 3 Ah pack, a 5 Ah pack, a 10 Ah pack.
   if (strcmp(u, "mAh") == 0)  return {0, 999000, 0, {100, 500, 1000}, 1, {2500, 3000, 5000, 10000}};
+  // Sweep duration. Long enough to be steady, short enough not to cook the
+  // wiring under test — 30 s is the default for a reason.
+  if (strcmp(u, "s") == 0)    return {5, 900, 0, {1, 5, 30}, 1, {10, 30, 60, 120}};
   return {0, 40, 2, {0.01f, 0.1f, 1}, 1, {0.5f, 1, 2, 5}};  // A (default)
 }
 static bool isRT() { return curMode == MODE_RT; }
@@ -216,9 +223,23 @@ static lv_obj_t *graphVNum, *graphINum, *chart, *gVRange, *gIRange, *gWin;
 static lv_chart_series_t *serV, *serI;
 
 static lv_obj_t *rtIdleBox, *rtRunBox, *rtResultBox;
-static lv_obj_t *fuseVal, *stepsVal, *startBtn, *startBtnLbl;
+static lv_obj_t *fuseVal, *startBtn, *startBtnLbl;
+static lv_obj_t *rtStartVal, *rtMaxVal, *rtSweepVal, *rtSweepHint;
 static lv_obj_t *estWireVal, *estLenVal, *estConnVal, *estTypeVal, *estTotalVal;
-static lv_obj_t *runStepLbl, *runBar, *runVLbl, *runILbl;
+static lv_obj_t *runStepLbl, *runBar, *runVLbl, *runILbl, *runRLbl, *runTargetLbl, *rtRunClock;
+// Live sweep charts, laid out like the capacity test's: one time-series for the
+// measured V and I, a second for the running resistance estimate.
+static lv_obj_t *rtLiveCard, *rtLiveChart, *rtLiveYLbl, *rtLiveXLbl;
+static lv_obj_t *rtRCard, *rtRChart, *rtRYLbl;
+static lv_chart_series_t *rtLiveSerV, *rtLiveSerI, *rtRSer;
+// Reservoirs for the live curves. Same bounded scheme as the battery graph:
+// dense capture, halved when full so the whole sweep always fits.
+static const int RT_RES_N = 240;    // raw reservoir per series
+static const int RT_LIVE_PTS = 120; // points actually drawn
+static float rtResV[RT_RES_N], rtResI[RT_RES_N], rtResR[RT_RES_N];
+static int rtResN = 0, rtResStride = 1, rtResAcc = 0;
+static float rtLastElapsed = 0, rtTotalS = 0;
+static bool rtHaveR = false;
 static lv_obj_t *resistVal, *lowConfBox, *resultList, *saveBtn, *saveBtnLbl, *rtStatusLbl;
 static lv_obj_t *rtProbeVal, *rtProbeHint, *rtTareCard, *rtTareVal;
 static lv_obj_t *rtChart, *rcXRange, *rcYRange;
@@ -232,7 +253,8 @@ enum { RR_VOC, RR_PROBE, RR_RAW, RR_TOL, RR_R2, RR_PSC, RR_SAG, RR_PKW, RR_TEMP,
        RR_FAN, RR_SWEEP, RR_STEPS, RR_FUSELIM,
        RR_WIRE, RR_CONN, RR_FUSEEST, RR_ESTTOT, RR_RESID };
 static lv_obj_t *rrRow[RR_N], *rrKey[RR_N], *rrVal[RR_N];
-static const int RT_CHART_PTS = 20;  // fixed capacity = UI max steps; no reallocs
+// Result V-I chart capacity = the engine's current-band count; fixed, no reallocs.
+static const int RT_CHART_PTS = 32;
 static lv_obj_t *setBriVal, *setBattVal, *setBattState, *setRtcVal, *setSdVal, *setHeapVal, *setMinHeapVal, *setUptimeVal;
 static lv_obj_t *setPxShiftBtn, *setPxShiftLbl, *dimChip[6], *dimChipLbl[6], *setDimSummary;
 static lv_obj_t *setAutoConnBtn, *setAutoConnLbl;
@@ -782,7 +804,7 @@ static void buildLoadBar() {
     if (isRT()) {
       if (!fuseRating) return;
       if (!connected) { showScreen(SCR_CONNECT); return; }
-      if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtSteps, rtFourWire, rtTareOhm); enterRtRun(); }
+      if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtStartA, rtMaxA, (uint32_t)rtSweepS, rtFourWire, rtTareOhm); enterRtRun(); }
       return;
     }
     if (isBatt()) {
@@ -999,7 +1021,7 @@ static void buildRtest() {
   lv_obj_set_size(rtIdleBox, LV_PCT(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(rtIdleBox, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(rtIdleBox, 12, 0);
-  lv_obj_t *expl = lbl(rtIdleBox, "Sweeps current in steps and fits a line to measure series resistance.", COL_MUTED, F12);
+  lv_obj_t *expl = lbl(rtIdleBox, "Ramps current smoothly up and back down, fitting a line through every reading to measure series resistance.", COL_MUTED, F12);
   lv_label_set_long_mode(expl, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(expl, LV_PCT(100));
   // Setup controls live in one group so they can be reparented onto the
@@ -1025,24 +1047,29 @@ static void buildRtest() {
     int idx = -1; for (int i = 0; i < FUSE_N; i++) if (FUSE_RATINGS[i] == fuseRating) idx = i;
     fuseRating = FUSE_RATINGS[(idx + 1) % FUSE_N]; refreshRtest();
   }, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t *stepsRow = cont(rtSetupGroup);
-  lv_obj_set_size(stepsRow, LV_PCT(100), LV_SIZE_CONTENT);
-  styleCard(stepsRow, COL_CARD, COL_BORDER, 12, 12);
-  lv_obj_set_flex_flow(stepsRow, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(stepsRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_column(stepsRow, 10, 0);
-  lv_obj_t *scol = cont(stepsRow); lv_obj_set_flex_grow(scol, 1); lv_obj_set_height(scol, LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(scol, LV_FLEX_FLOW_COLUMN);
-  lbl(scol, "STEPS", COL_MUTED, F12);
-  stepsVal = lbl(scol, "8", COL_INK, F28);
-  lv_obj_t *sm = flatBtn(stepsRow); lv_obj_set_size(sm, 58, 58);
-  styleCard(sm, COL_INSET, COL_BORDER, 12, 0);
-  lv_obj_t *sml = lbl(sm, LV_SYMBOL_MINUS, COL_INK, F20); lv_obj_center(sml);
-  lv_obj_add_event_cb(sm, [](lv_event_t *) { rtSteps = rtSteps > 3 ? rtSteps - 1 : 3; refreshRtest(); }, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t *sp2 = flatBtn(stepsRow); lv_obj_set_size(sp2, 58, 58);
-  styleCard(sp2, COL_INSET, COL_BORDER, 12, 0);
-  lv_obj_t *spl = lbl(sp2, LV_SYMBOL_PLUS, COL_INK, F20); lv_obj_center(spl);
-  lv_obj_add_event_cb(sp2, [](lv_event_t *) { rtSteps = rtSteps < 20 ? rtSteps + 1 : 20; refreshRtest(); }, LV_EVENT_CLICKED, nullptr);
+  // Sweep shape. The ramp is continuous, so what defines it is where it starts,
+  // where it turns around, and how long it takes — not a step count.
+  lv_obj_t *sweepCard = cont(rtSetupGroup);
+  lv_obj_set_size(sweepCard, LV_PCT(100), LV_SIZE_CONTENT);
+  styleCard(sweepCard, COL_CARD, COL_BORDER, 12, 12);
+  lv_obj_set_flex_flow(sweepCard, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(sweepCard, 2, 0);
+  lbl(sweepCard, "SWEEP", COL_MUTED, F12);
+  auto swRow = [](lv_obj_t *parent, const char *k, lv_obj_t **valOut, lv_event_cb_t cb) {
+    lv_obj_t *row = flatBtn(parent);
+    lv_obj_set_size(row, LV_PCT(100), 40);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lbl(row, k, COL_MUTED, F14);
+    *valOut = lbl(row, "--", COL_ACCENT2, F16);
+    lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, nullptr);
+  };
+  swRow(sweepCard, "Start current - tap to type", &rtStartVal, [](lv_event_t *) { openKeypad(7); });
+  swRow(sweepCard, "Max current - tap to type", &rtMaxVal, [](lv_event_t *) { openKeypad(8); });
+  swRow(sweepCard, "Duration - tap to type", &rtSweepVal, [](lv_event_t *) { openKeypad(9); });
+  rtSweepHint = lbl(sweepCard, "", COL_FAINT, F12);
+  lv_label_set_long_mode(rtSweepHint, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(rtSweepHint, LV_PCT(100));
 
   // Probe wiring. At the milliohm scale the leads are usually a bigger
   // resistance than the thing being measured, so how they are connected is not
@@ -1087,7 +1114,7 @@ static void buildRtest() {
   lv_obj_t *tMeasLbl = lbl(tMeas, "Measure (short the probes)", COL_ACCENT2, F14);
   lv_obj_center(tMeasLbl);
   lv_obj_add_event_cb(tMeas, [](lv_event_t *) {
-    if (!fuseRating) {   // the sweep ladder is derived from it
+    if (!fuseRating) {   // the sweep's safe ceiling is derived from it
       lv_label_set_text(rtStatusLbl, "Set the fuse rating first - the tare sweep uses it.");
       lv_obj_clear_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);
       return;
@@ -1095,7 +1122,10 @@ static void buildRtest() {
     if (!connected || engineBusy() || !A.startRTest) return;
     rtTareRunning = true;
     enterRtRun();
-    A.startRTest(fuseRating, rtSteps, false /* tare is a 2-wire measurement */, 0);
+    // A tare is a 2-wire measurement of the leads themselves, with no tare of
+    // its own to subtract. Shorted probes settle instantly, so it uses a short
+    // sweep regardless of what the user picked for real runs.
+    A.startRTest(fuseRating, rtStartA, rtMaxA, TARE_SWEEP_S, false, 0);
   }, LV_EVENT_CLICKED, nullptr);
   lv_obj_t *tClear = flatBtn(tBtnRow);
   lv_obj_set_flex_grow(tClear, 1);
@@ -1174,7 +1204,7 @@ static void buildRtest() {
     if (engineBusy()) return;
     if (!fuseRating) return;
     if (!connected) { showScreen(SCR_CONNECT); return; }
-    if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtSteps, rtFourWire, rtTareOhm); enterRtRun(); }
+    if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtStartA, rtMaxA, (uint32_t)rtSweepS, rtFourWire, rtTareOhm); enterRtRun(); }
   }, LV_EVENT_CLICKED, nullptr);
 
   // running
@@ -1191,8 +1221,8 @@ static void buildRtest() {
   lv_obj_t *rr = cont(runCard); lv_obj_set_size(rr, LV_PCT(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(rr, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(rr, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lbl(rr, LV_SYMBOL_REFRESH " RUNNING", COL_ACCENT, F14);
-  runStepLbl = lbl(rr, "Step 0/0", COL_INK, F16);
+  runStepLbl = lbl(rr, "PRIMING", COL_ACCENT, F14);
+  rtRunClock = lbl(rr, "0.0 / 30 s", COL_INK, F16);
   runBar = lv_bar_create(runCard);
   lv_obj_set_size(runBar, LV_PCT(100), 12);
   lv_obj_set_style_bg_color(runBar, lv_color_hex(0x161d26), LV_PART_MAIN);
@@ -1200,11 +1230,70 @@ static void buildRtest() {
   lv_obj_set_style_radius(runBar, 6, LV_PART_MAIN);
   lv_obj_set_style_radius(runBar, 6, LV_PART_INDICATOR);
   lv_bar_set_range(runBar, 0, 100);
+  // Hero readouts, laid out like the capacity test's: the two measured values
+  // big, the derived one under them.
   lv_obj_t *rv = cont(runCard); lv_obj_set_size(rv, LV_PCT(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(rv, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(rv, 20, 0);
-  runVLbl = lbl(rv, "-- V", COL_GREEN, F28);
-  runILbl = lbl(rv, "-- A", COL_AMBER, F28);
+  runVLbl = lbl(rv, "--", COL_GREEN, F34);
+  runILbl = lbl(rv, "-- A", COL_AMBER, F34);
+  lv_obj_t *rr2 = cont(runCard); lv_obj_set_size(rr2, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(rr2, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(rr2, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  runRLbl = lbl(rr2, "R --", COL_ACCENT2, F24);
+  runTargetLbl = lbl(rr2, "target -- A", COL_MUTED, F12);
+
+  // ---- live V + I vs time ----
+  rtLiveCard = cont(rtRunBox);
+  lv_obj_set_size(rtLiveCard, LV_PCT(100), LV_SIZE_CONTENT);
+  styleCard(rtLiveCard, COL_READOUT, COL_BORDER2, 12, 8);
+  lv_obj_set_flex_flow(rtLiveCard, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(rtLiveCard, 4, 0);
+  lbl(rtLiveCard, "VOLTAGE + CURRENT vs time", COL_MUTED, F12);
+  rtLiveChart = lv_chart_create(rtLiveCard);
+  lv_obj_set_width(rtLiveChart, LV_PCT(100));
+  lv_obj_set_height(rtLiveChart, 110);
+  lv_obj_set_style_bg_opa(rtLiveChart, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(rtLiveChart, 0, 0);
+  lv_obj_set_style_pad_all(rtLiveChart, 2, 0);
+  lv_obj_set_style_line_color(rtLiveChart, COL_BORDER2, LV_PART_MAIN);
+  lv_obj_set_style_width(rtLiveChart, 0, LV_PART_INDICATOR);
+  lv_obj_set_style_height(rtLiveChart, 0, LV_PART_INDICATOR);
+  lv_chart_set_type(rtLiveChart, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(rtLiveChart, RT_LIVE_PTS);   // fixed capacity, no reallocs
+  lv_chart_set_div_line_count(rtLiveChart, 3, 4);
+  rtLiveSerV = lv_chart_add_series(rtLiveChart, COL_GREEN, LV_CHART_AXIS_PRIMARY_Y);
+  rtLiveSerI = lv_chart_add_series(rtLiveChart, COL_AMBER, LV_CHART_AXIS_SECONDARY_Y);
+  lv_obj_t *lrng = cont(rtLiveCard);
+  lv_obj_set_size(lrng, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(lrng, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(lrng, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  rtLiveYLbl = lbl(lrng, "", COL_GREEN, F12);
+  rtLiveXLbl = lbl(lrng, "", COL_AMBER, F12);
+
+  // ---- live resistance vs time ----
+  rtRCard = cont(rtRunBox);
+  lv_obj_set_size(rtRCard, LV_PCT(100), LV_SIZE_CONTENT);
+  styleCard(rtRCard, COL_READOUT, COL_BORDER2, 12, 8);
+  lv_obj_set_flex_flow(rtRCard, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(rtRCard, 4, 0);
+  lbl(rtRCard, "RESISTANCE estimate vs time", COL_MUTED, F12);
+  rtRChart = lv_chart_create(rtRCard);
+  lv_obj_set_width(rtRChart, LV_PCT(100));
+  lv_obj_set_height(rtRChart, 90);
+  lv_obj_set_style_bg_opa(rtRChart, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(rtRChart, 0, 0);
+  lv_obj_set_style_pad_all(rtRChart, 2, 0);
+  lv_obj_set_style_line_color(rtRChart, COL_BORDER2, LV_PART_MAIN);
+  lv_obj_set_style_width(rtRChart, 0, LV_PART_INDICATOR);
+  lv_obj_set_style_height(rtRChart, 0, LV_PART_INDICATOR);
+  lv_chart_set_type(rtRChart, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(rtRChart, RT_LIVE_PTS);
+  lv_chart_set_div_line_count(rtRChart, 3, 4);
+  rtRSer = lv_chart_add_series(rtRChart, COL_ACCENT2, LV_CHART_AXIS_PRIMARY_Y);
+  rtRYLbl = lbl(rtRCard, "", COL_ACCENT2, F12);
+  lv_obj_add_flag(rtRCard, LV_OBJ_FLAG_HIDDEN);
+
   lv_obj_t *stopBtn = flatBtn(rtRunBox);
   lv_obj_set_size(stopBtn, LV_PCT(100), 66);
   styleCard(stopBtn, lv_color_hex(0x2a1416), COL_RED, 14, 0);
@@ -1277,7 +1366,7 @@ static void buildRtest() {
       "Open-circuit voltage", "Probe wiring", "Measured (incl. leads)",
       "Uncertainty (+/-)", "Fit quality (R2)", "Est. short-circuit I",
       "Sag at max current", "Peak test power", "Load temp", "Max fan",
-      "Current sweep", "Steps / samples", "Fuse limit",
+      "Current sweep", "Samples / bands", "Fuse limit",
       "Wire", "Contacts", "Fuse (est)", "Est. build R", "Residual vs est."};
   for (int i = 0; i < RR_N; i++) {
     lv_obj_t *row = cont(resultList);
@@ -1327,7 +1416,9 @@ static void buildRtest() {
 static void persistSetup() {
   prefs::change([](prefs::Data &d) {
     d.fuseRating = fuseRating;
-    d.rtSteps = (uint8_t)rtSteps;
+    d.rtStartA = rtStartA;
+    d.rtMaxA = rtMaxA;
+    d.rtSweepS = (uint16_t)rtSweepS;
     d.fourWire = rtFourWire;
     d.tareOhm = rtTareOhm;
     d.battChem = (uint8_t)battChem;
@@ -1358,7 +1449,39 @@ static void refreshRtest() {
     char b[24];
     if (fuseRating) { snprintf(b, sizeof(b), "%g", fuseRating); lv_label_set_text(fuseVal, b); lv_obj_set_style_text_color(fuseVal, COL_INK, 0); }
     else { lv_label_set_text(fuseVal, "--"); lv_obj_set_style_text_color(fuseVal, COL_FAINT, 0); }
-    snprintf(b, sizeof(b), "%d", rtSteps); lv_label_set_text(stepsVal, b);
+    // Sweep shape. The safe ceiling depends on the source voltage, which is only
+    // known once connected — show the live figure when we have it so the user
+    // can see what their fuse actually permits before committing.
+    snprintf(b, sizeof(b), "%.2f A", rtStartA); lv_label_set_text(rtStartVal, b);
+    float voc = lastStatus.valid ? lastStatus.voltage : 0;
+    float cap = fuseRating > 0 ? ResistanceTest::safeMaxCurrent(fuseRating, voc) : 0;
+    if (rtMaxA > 0) snprintf(b, sizeof(b), "%.2f A", rtMaxA);
+    else if (cap > 0) snprintf(b, sizeof(b), "auto (%.2f A)", cap);
+    else strcpy(b, "auto");
+    lv_label_set_text(rtMaxVal, b);
+    lv_obj_set_style_text_color(rtMaxVal, (rtMaxA > 0 && cap > 0 && rtMaxA > cap + 1e-3f) ? COL_AMBER : COL_ACCENT2, 0);
+    snprintf(b, sizeof(b), "%d s", rtSweepS); lv_label_set_text(rtSweepVal, b);
+    {
+      char hint[224];
+      float peak = rtMaxA > 0 ? rtMaxA : cap;
+      if (cap > 0 && rtMaxA > cap + 1e-3f) {
+        snprintf(hint, sizeof(hint),
+                 "Capped at %.2f A: %g A fuse x 80%%, the EL15's 12 A / 150 W, and the "
+                 "source voltage. The sweep will use the cap, not %.2f A.", cap, fuseRating, rtMaxA);
+      } else if (peak > 0) {
+        // Each setpoint update defers the next poll, so the achievable sample
+        // rate is one per setpoint step, not one per poll interval. Quote the
+        // number the sweep will really collect.
+        int stepMs = LV_MAX(100, (pollMs > 0 ? pollMs : 50) + 50);
+        snprintf(hint, sizeof(hint),
+                 "%.2f A up and back down over %d s, about %d readings. "
+                 "Longer is steadier; shorter heats the wiring less.",
+                 peak, rtSweepS, rtSweepS * 1000 / stepMs);
+      } else {
+        snprintf(hint, sizeof(hint), "Set a fuse rating - it sets the safe peak current.");
+      }
+      lv_label_set_text(rtSweepHint, hint);
+    }
     // Probe wiring + tare. The hint is deliberately a hook-up instruction
     // rather than a definition: 4-wire only works if the sense leads land on
     // the DUT itself, past the force-lead contacts.
@@ -1397,17 +1520,120 @@ static void refreshRtest() {
   }
 }
 
-// Immediate feedback when a sweep starts: the engine's first progress callback
-// only fires after prime + settle + collect (~3-4 s), which used to leave the
-// UI sitting on the previous screen looking dead after RUN TEST / Start sweep.
+// ---- Live sweep curves -----------------------------------------------------
+// Same bounded-reservoir scheme as the battery discharge curve: capture densely,
+// halve the resolution when full so the whole sweep always fits, and resample
+// across the chart width on every refresh so the time axis grows smoothly.
+static void rtLiveReset() {
+  rtResN = 0; rtResStride = 1; rtResAcc = 0;
+  rtLastElapsed = 0; rtHaveR = false;
+}
+
+static void rtLivePush(float v, float i, float r) {
+  if (++rtResAcc < rtResStride) return;
+  rtResAcc = 0;
+  if (rtResN == RT_RES_N) {
+    for (int k = 0; k < RT_RES_N / 2; k++) {
+      rtResV[k] = rtResV[k * 2]; rtResI[k] = rtResI[k * 2]; rtResR[k] = rtResR[k * 2];
+    }
+    rtResN = RT_RES_N / 2;
+    rtResStride *= 2;
+  }
+  rtResV[rtResN] = v; rtResI[rtResN] = i; rtResR[rtResN] = r;
+  rtResN++;
+}
+
+// Resample `src` across the full chart width into `ser`. `scale` converts the
+// float to the chart's integer coordinate space; lv_coord_t is int16_t, so
+// callers pick a scale that keeps the range inside +/-32767.
+static void rtResampleInto(lv_obj_t *chart, lv_chart_series_t *ser,
+                           const float *src, float scale) {
+  for (int j = 0; j < RT_LIVE_PTS; j++) {
+    float val;
+    if (rtResN == 1) val = src[0];
+    else {
+      float sf = (float)j * (rtResN - 1) / (RT_LIVE_PTS - 1);
+      int i0 = (int)sf;
+      if (i0 >= rtResN - 1) val = src[rtResN - 1];
+      else { float f = sf - i0; val = src[i0] * (1 - f) + src[i0 + 1] * f; }
+    }
+    lv_chart_set_value_by_id(chart, ser, j, (lv_coord_t)(val * scale));
+  }
+}
+
+// Largest power-of-ten scale that keeps `hi` inside the int16 chart coordinate
+// space. Milliohms for a normal low-R circuit, coarser for a big resistance.
+static float rtChartScale(float hi) {
+  float s = 1000.0f;
+  while (s > 1.0f && fabsf(hi) * s > 30000.0f) s /= 10.0f;
+  return s;
+}
+
+static void rtLiveRefresh() {
+  if (!rtLiveChart || rtResN == 0) return;
+  // Throttle to ~6 Hz. Three 120-point series resampled at the 20 Hz poll rate
+  // would be ~7000 chart writes a second for a curve the eye cannot follow
+  // anyway; the numeric readouts still update on every packet.
+  static uint32_t lastDraw = 0;
+  uint32_t now = millis();
+  if (now - lastDraw < 160) return;
+  lastDraw = now;
+  // V and I share one chart on two independent Y axes — the only way two series
+  // whose units differ by orders of magnitude can be read together.
+  float vLo = rtResV[0], vHi = rtResV[0], iLo = rtResI[0], iHi = rtResI[0];
+  float rLo = rtResR[0], rHi = rtResR[0];
+  for (int k = 1; k < rtResN; k++) {
+    vLo = LV_MIN(vLo, rtResV[k]); vHi = LV_MAX(vHi, rtResV[k]);
+    iLo = LV_MIN(iLo, rtResI[k]); iHi = LV_MAX(iHi, rtResI[k]);
+    rLo = LV_MIN(rLo, rtResR[k]); rHi = LV_MAX(rHi, rtResR[k]);
+  }
+  if (vHi - vLo < 0.05f) { vHi = vLo + 0.05f; }
+  if (iHi - iLo < 0.05f) { iHi = iLo + 0.05f; }
+  float vPad = (vHi - vLo) * 0.08f, iPad = (iHi - iLo) * 0.08f;
+  lv_chart_set_range(rtLiveChart, LV_CHART_AXIS_PRIMARY_Y,
+                     (lv_coord_t)((vLo - vPad) * 100), (lv_coord_t)((vHi + vPad) * 100));
+  lv_chart_set_range(rtLiveChart, LV_CHART_AXIS_SECONDARY_Y,
+                     (lv_coord_t)((iLo - iPad) * 100), (lv_coord_t)((iHi + iPad) * 100));
+  rtResampleInto(rtLiveChart, rtLiveSerV, rtResV, 100.0f);
+  rtResampleInto(rtLiveChart, rtLiveSerI, rtResI, 100.0f);
+  lv_chart_refresh(rtLiveChart);
+  char b[40];
+  snprintf(b, sizeof(b), "%.2f-%.2f V", vLo, vHi); lv_label_set_text(rtLiveYLbl, b);
+  snprintf(b, sizeof(b), "%.2f-%.2f A  -  0-%.0f s", iLo, iHi, rtLastElapsed);
+  lv_label_set_text(rtLiveXLbl, b);
+
+  // Resistance chart. Only meaningful once the fit has something to work with,
+  // so the whole card stays hidden until then rather than drawing a flat zero.
+  if (!rtHaveR) { lv_obj_add_flag(rtRCard, LV_OBJ_FLAG_HIDDEN); return; }
+  lv_obj_clear_flag(rtRCard, LV_OBJ_FLAG_HIDDEN);
+  if (rHi - rLo < 1e-4f) { rHi = rLo + 1e-4f; }
+  float rPad = (rHi - rLo) * 0.1f;
+  // Scale chosen from the actual magnitude: milliohms give a low-R circuit real
+  // resolution, but a multi-ohm result at that scale would overflow int16.
+  float rScale = rtChartScale(rHi + rPad);
+  lv_chart_set_range(rtRChart, LV_CHART_AXIS_PRIMARY_Y,
+                     (lv_coord_t)((rLo - rPad) * rScale), (lv_coord_t)((rHi + rPad) * rScale));
+  rtResampleInto(rtRChart, rtRSer, rtResR, rScale);
+  lv_chart_refresh(rtRChart);
+  char lo[20], hi[20], rr[48];
+  fmtOhm(lo, sizeof(lo), rLo); fmtOhm(hi, sizeof(hi), rHi);
+  snprintf(rr, sizeof(rr), "%s - %s", lo, hi); lv_label_set_text(rtRYLbl, rr);
+}
+
+// Immediate feedback when a sweep starts: the engine primes for ~1 s before the
+// ramp begins, which would otherwise leave the UI on the previous screen looking
+// dead after RUN TEST / Start sweep.
 static void enterRtRun() {
   rtPhase = RT_RUN;
-  char b[24];
-  snprintf(b, sizeof(b), "Step 0/%d", rtSteps);
-  lv_label_set_text(runStepLbl, b);
+  rtLiveReset();
+  rtTotalS = (float)(rtTareRunning ? TARE_SWEEP_S : (uint32_t)rtSweepS);
+  lv_label_set_text(runStepLbl, rtTareRunning ? "TARE SWEEP" : "PRIMING");
   lv_bar_set_value(runBar, 0, LV_ANIM_OFF);
-  lv_label_set_text(runVLbl, "-- V");
+  lv_label_set_text(runVLbl, "--");
   lv_label_set_text(runILbl, "-- A");
+  lv_label_set_text(runRLbl, "R --");
+  lv_label_set_text(runTargetLbl, "target -- A");
+  lv_obj_add_flag(rtRCard, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);  // clear a stale error
   resetSaveButton(saveBtn, saveBtnLbl);   // drop the previous run's save outcome
   refreshRtest();
@@ -2435,11 +2661,16 @@ static void buildMenu() {
 static void kpRefresh() {
   lv_label_set_text(kpValue, kpBuf.empty() ? "0" : kpBuf.c_str());
   const char *unit = kpTarget == 2 ? "A" : kpTarget == 3 ? "m" : kpTarget == 4 ? "V"
-                   : kpTarget == 5 ? "A" : kpTarget == 6 ? "mAh" : modeUnit();
+                   : kpTarget == 5 ? "A" : kpTarget == 6 ? "mAh"
+                   : kpTarget == 7 ? "A" : kpTarget == 8 ? "A" : kpTarget == 9 ? "s"
+                   : modeUnit();
   lv_label_set_text(kpUnit, unit);
   lv_label_set_text(kpTitle, kpTarget == 2 ? "Fuse rating" : kpTarget == 3 ? "Wire length"
                              : kpTarget == 4 ? "Cutoff voltage" : kpTarget == 5 ? "Discharge current"
-                             : kpTarget == 6 ? "Rated capacity" : modeName());
+                             : kpTarget == 6 ? "Rated capacity"
+                             : kpTarget == 7 ? "Sweep start current"
+                             : kpTarget == 8 ? "Sweep max current (0 = auto)"
+                             : kpTarget == 9 ? "Sweep duration" : modeName());
   UnitCfg c = unitCfg(unit);
   for (int i = 0; i < 4; i++) {
     char b[20]; snprintf(b, sizeof(b), "%g", c.preset[i]);
@@ -2455,6 +2686,9 @@ static void openKeypad(int target) {
   else if (target == 4) { snprintf(b, sizeof(b), "%g", battCutoff); kpBuf = b; }
   else if (target == 5) { snprintf(b, sizeof(b), "%g", battAmps); kpBuf = b; }
   else if (target == 6) { if (battRatedAh > 0) { snprintf(b, sizeof(b), "%g", battRatedAh * 1000.0f); kpBuf = b; } else kpBuf = ""; }
+  else if (target == 7) { snprintf(b, sizeof(b), "%g", rtStartA); kpBuf = b; }
+  else if (target == 8) { if (rtMaxA > 0) { snprintf(b, sizeof(b), "%g", rtMaxA); kpBuf = b; } else kpBuf = ""; }
+  else if (target == 9) { snprintf(b, sizeof(b), "%d", rtSweepS); kpBuf = b; }
   else kpBuf = fuseRating ? std::to_string((int)fuseRating) : "";
   kpRefresh();
   showOverlay(OV_KEYPAD);
@@ -2481,6 +2715,18 @@ static void kpSet() {
   // Rated capacity in mAh, stored in Ah. 0 clears it (metrics go back to hidden);
   // capped at 999 Ah, well past anything a 12 A load will ever finish.
   else if (kpTarget == 6) { if (!engineBusy()) { battRatedAh = v <= 0 ? 0 : (v > 999000 ? 999.0f : v / 1000.0f); } refreshBatt(); }
+  // Sweep shape. Clamped to the EL15's own 12 A ceiling here; the engine applies
+  // the fuse/power caps too, once it knows the source voltage.
+  else if (kpTarget == 7) { if (!engineBusy()) rtStartA = v < 0 ? 0 : (v > 12 ? 12 : v); refreshRtest(); }
+  else if (kpTarget == 8) { if (!engineBusy()) rtMaxA = v <= 0 ? 0 : (v > 12 ? 12 : v); refreshRtest(); }
+  else if (kpTarget == 9) {
+    if (!engineBusy()) {
+      int s = (int)(v + 0.5f);
+      rtSweepS = s < (int)ResistanceTest::MIN_SWEEP_S ? (int)ResistanceTest::MIN_SWEEP_S
+               : s > (int)ResistanceTest::MAX_SWEEP_S ? (int)ResistanceTest::MAX_SWEEP_S : s;
+    }
+    refreshRtest();
+  }
   else { fuseRating = v; refreshRtest(); refreshMonitor(); }
   showOverlay(OV_NONE);
 }
@@ -3229,15 +3475,38 @@ void clearDevices() {
   g_addrPool.clear();
 }
 
-void onTestProgress(int step, int total, float target, float v, float i) {
-  rtPhase = RT_RUN; refreshRtest();
+void onTestProgress(float elapsedS, float totalS, float target,
+                    float v, float i, float r, bool rValid) {
+  if (rtPhase != RT_RUN) { rtPhase = RT_RUN; refreshRtest(); }
   char b[40];
-  snprintf(b, sizeof(b), "Step %d/%d", step, total); lv_label_set_text(runStepLbl, b);
-  snprintf(rtStepText, sizeof(rtStepText), "%d/%d", step, total);
+  rtLastElapsed = elapsedS;
+  rtTotalS = totalS > 0 ? totalS : rtTotalS;
+  // Which half of the triangle we are on is worth showing: it tells the user
+  // whether the peak has passed and roughly how long is left.
+  bool rising = totalS <= 0 || elapsedS < totalS / 2;
+  setTextIf(runStepLbl, rtTareRunning ? "TARE SWEEP"
+                        : rising ? LV_SYMBOL_UP " RAMPING UP" : LV_SYMBOL_DOWN " RAMPING DOWN");
+  snprintf(b, sizeof(b), "%.1f / %.0f s", elapsedS, rtTotalS);
+  setTextIf(rtRunClock, b);
+  snprintf(rtStepText, sizeof(rtStepText), "%.0fs", rtTotalS - elapsedS);
   refreshTestChip();
-  lv_bar_set_value(runBar, total > 0 ? step * 100 / total : 0, LV_ANIM_OFF);
-  snprintf(b, sizeof(b), "%.2f V", v); lv_label_set_text(runVLbl, b);
-  snprintf(b, sizeof(b), "%.3f A", i); lv_label_set_text(runILbl, b);
+  lv_bar_set_value(runBar, rtTotalS > 0 ? (int)(elapsedS * 100 / rtTotalS) : 0, LV_ANIM_OFF);
+  snprintf(b, sizeof(b), "%.2f", v); setTextIf(runVLbl, b);
+  snprintf(b, sizeof(b), "%.3f A", i); setTextIf(runILbl, b);
+  snprintf(b, sizeof(b), "target %.2f A", target); setTextIf(runTargetLbl, b);
+  if (rValid) {
+    char ob[20];
+    fmtOhm(ob, sizeof(ob), r);
+    snprintf(b, sizeof(b), "R %s", ob);
+    setTextIf(runRLbl, b);
+    lv_obj_set_style_text_color(runRLbl, COL_ACCENT2, 0);
+    rtHaveR = true;
+  } else {
+    setTextIf(runRLbl, "R --");
+    lv_obj_set_style_text_color(runRLbl, COL_FAINT, 0);
+  }
+  rtLivePush(v, i, rValid ? r : 0);
+  if (curScreen == SCR_RTEST) rtLiveRefresh();
 }
 void onTestComplete(const ResistanceTest::Result &r) {
   // A tare run isn't a result — it is a calibration of the leads. Store the
@@ -3262,15 +3531,10 @@ void onTestComplete(const ResistanceTest::Result &r) {
   lv_label_set_text(resistVal, b);
   if (r.reliable) lv_obj_add_flag(lowConfBox, LV_OBJ_FLAG_HIDDEN);
   else lv_obj_clear_flag(lowConfBox, LV_OBJ_FLAG_HIDDEN);
-  char v1[28];
+  char v1[32];
   int n = (int)r.samples.size();
-  if (n > RT_CHART_PTS) n = RT_CHART_PTS;  // UI caps steps at 20; belt & braces
+  if (n > RT_CHART_PTS) n = RT_CHART_PTS;  // engine bins to RT_CHART_PTS; belt & braces
   float iHi = n ? r.samples.back().current : 0;
-  float vEnd = n ? r.samples.back().voltage : 0;
-  float sag = r.openCircuitVoltage - vEnd;
-  float pkW = 0;
-  int fanMax = 0;
-  for (auto &sm : r.samples) { pkW = LV_MAX(pkW, sm.voltage * sm.current); fanMax = LV_MAX(fanMax, sm.fanSpeed); }
 
   snprintf(v1, sizeof(v1), "%.2f V", r.openCircuitVoltage); lv_label_set_text(rrVal[RR_VOC], v1);
   // Probe wiring, and — when a tare was subtracted — what was actually measured
@@ -3297,19 +3561,24 @@ void onTestComplete(const ResistanceTest::Result &r) {
   else strcpy(v1, "--");
   lv_label_set_text(rrVal[RR_PSC], v1);
   lv_obj_set_style_text_color(rrVal[RR_PSC], COL_AMBER, 0);
-  snprintf(v1, sizeof(v1), "%.2f V (%.1f%%)", sag,
-           r.openCircuitVoltage > 0.01f ? sag * 100.0f / r.openCircuitVoltage : 0.0f);
+  // Run statistics now come straight from the Result: the engine tracked them
+  // over every raw sample, which is strictly better than re-deriving them from
+  // the binned curve.
+  snprintf(v1, sizeof(v1), "%.2f V (%.1f%%)", r.sagV,
+           r.openCircuitVoltage > 0.01f ? r.sagV * 100.0f / r.openCircuitVoltage : 0.0f);
   lv_label_set_text(rrVal[RR_SAG], v1);
-  snprintf(v1, sizeof(v1), "%.1f W", pkW); lv_label_set_text(rrVal[RR_PKW], v1);
-  if (n) snprintf(v1, sizeof(v1), "%.1f -> %.1f\xC2\xB0" "C", r.samples.front().temperature, r.samples.back().temperature);
-  else strcpy(v1, "--");
+  snprintf(v1, sizeof(v1), "%.1f W", r.peakPowerW); lv_label_set_text(rrVal[RR_PKW], v1);
+  snprintf(v1, sizeof(v1), "%.1f -> %.1f\xC2\xB0" "C", r.tempMin, r.tempMax);
   lv_label_set_text(rrVal[RR_TEMP], v1);
-  int fanPct = (fanMax > el15::FAN_SPEED_MAX ? el15::FAN_SPEED_MAX : fanMax) * 100 / el15::FAN_SPEED_MAX;
+  int fanPct = (r.maxFan > el15::FAN_SPEED_MAX ? el15::FAN_SPEED_MAX : r.maxFan) * 100 / el15::FAN_SPEED_MAX;
   snprintf(v1, sizeof(v1), "%d%%", fanPct); lv_label_set_text(rrVal[RR_FAN], v1);
-  // Sweep as measured (first/last step averages), not derived from the clamp.
-  float swLo = n ? r.samples.front().current : 0;
-  snprintf(v1, sizeof(v1), "%.2f-%.2f A", swLo, iHi); lv_label_set_text(rrVal[RR_SWEEP], v1);
-  snprintf(v1, sizeof(v1), "%d", n); lv_label_set_text(rrVal[RR_STEPS], v1);
+  // Sweep as MEASURED, not as commanded — the load's regulation means the two
+  // differ slightly, and what was actually drawn is the honest figure.
+  snprintf(v1, sizeof(v1), "%.2f-%.2f A in %lus", r.minCurrent, r.maxCurrentSeen,
+           (unsigned long)r.sweepSeconds);
+  lv_label_set_text(rrVal[RR_SWEEP], v1);
+  snprintf(v1, sizeof(v1), "%d pts / %d bands", r.rawSamples, n);
+  lv_label_set_text(rrVal[RR_STEPS], v1);
   snprintf(v1, sizeof(v1), "%.1f A", r.fuseRating); lv_label_set_text(rrVal[RR_FUSELIM], v1);
 
   // Component estimate vs measurement: a large positive residual usually means
@@ -3346,7 +3615,7 @@ void onTestComplete(const ResistanceTest::Result &r) {
     fmtOhm(v1, sizeof(v1), estR); lv_label_set_text(rrVal[RR_ESTTOT], v1);
     lv_obj_set_style_text_color(rrVal[RR_ESTTOT], COL_ACCENT2, 0);
     float resid = r.resistanceOhm - estR;
-    char rv[30];
+    char rv[40];
     fmtOhm(v1, sizeof(v1), resid);
     snprintf(rv, sizeof(rv), "%s%s", resid >= 0 ? "+" : "", v1);
     lv_label_set_text(rrVal[RR_RESID], rv);
@@ -3527,7 +3796,9 @@ void begin(const UiActions &actions) {
   const prefs::Data &p = prefs::get();
   pollMs = p.pollMs;
   fuseRating = p.fuseRating;
-  rtSteps = p.rtSteps;
+  rtStartA = p.rtStartA;
+  rtMaxA = p.rtMaxA;
+  rtSweepS = p.rtSweepS;
   rtFourWire = p.fourWire;
   rtTareOhm = p.tareOhm;
   battChem = p.battChem;

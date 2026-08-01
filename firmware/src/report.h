@@ -63,15 +63,22 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     fpf(f, "# EL15 circuit resistance test\n");
     writeStamp(f);
     fpf(f, "# Fuse rating (A),%.2f\n", r.fuseRating);
-    fpf(f, "# Max test current (A),%.3f\n", r.maxTestCurrent);
+    fpf(f, "# Sweep start current (A),%.3f\n", r.startCurrent);
+    fpf(f, "# Sweep peak current (A),%.3f\n", r.maxTestCurrent);
+    fpf(f, "# Sweep duration (s),%lu\n", (unsigned long)r.sweepSeconds);
+    fpf(f, "# Sweep shape,continuous triangular ramp (up then down)\n");
     fpf(f, "# Probe wiring,%s\n", r.fourWire ? "4-wire (Kelvin)" : "2-wire");
     fpf(f, "# Lead tare (ohm),%.6f\n", r.tareOhm);
-    fpf(f, "\n# Averaged sample per current level (bidirectional sweep)\n");
-    fpf(f, "level,current_a,voltage_v,temperature_c,fan\n");
+    // The fit runs on every raw sample; these rows are those samples averaged
+    // into current bands, which is what makes a readable V-I curve. Each band
+    // holds both the up-ramp and down-ramp visit to that current, so the average
+    // is where the time-drift cancellation lands.
+    fpf(f, "\n# Averaged sample per current band (both ramp directions)\n");
+    fpf(f, "band,current_a,voltage_v,power_w,temperature_c,fan\n");
     int i = 1;
     for (const ResistanceTest::Sample &s : r.samples)
-      fpf(f, "%d,%.4f,%.4f,%.1f,%d\n", i++, s.current, s.voltage,
-          s.temperature, s.fanSpeed);
+      fpf(f, "%d,%.4f,%.4f,%.3f,%.1f,%d\n", i++, s.current, s.voltage,
+          s.voltage * s.current, s.temperature, s.fanSpeed);
     fpf(f, "\n# Result\n");
     fpf(f, "quantity,value,unit\n");
     fpf(f, "resistance,%.6f,ohm\n", r.resistanceOhm);
@@ -79,7 +86,15 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     fpf(f, "resistance_std_err,%.6f,ohm\n", r.resistanceStdErr);
     fpf(f, "open_circuit_voltage,%.4f,V\n", r.openCircuitVoltage);
     fpf(f, "r_squared,%.5f,\n", r.rSquared);
-    fpf(f, "samples,%d,\n", (int)r.samples.size());
+    fpf(f, "raw_samples,%d,\n", r.rawSamples);
+    fpf(f, "current_bands,%d,\n", (int)r.samples.size());
+    fpf(f, "current_min,%.4f,A\n", r.minCurrent);
+    fpf(f, "current_max,%.4f,A\n", r.maxCurrentSeen);
+    fpf(f, "voltage_sag,%.4f,V\n", r.sagV);
+    fpf(f, "peak_power,%.3f,W\n", r.peakPowerW);
+    fpf(f, "temperature_min,%.1f,C\n", r.tempMin);
+    fpf(f, "temperature_max,%.1f,C\n", r.tempMax);
+    fpf(f, "max_fan,%d,\n", r.maxFan);
     fpf(f, "reliable,%s,\n", r.reliable ? "yes" : "no");
     return f.getWriteError() == 0;
   }, msg, msgLen);

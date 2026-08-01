@@ -233,13 +233,27 @@ then a **real EL15**. "Expected" = intended behavior; note deviations.
   **the picker refuses to commit while an engine is running**.
 
 ### 5.7 Resistance Test (`SCR_RTEST`) — two entry paths
+The sweep is a **continuous triangular current ramp**: start → max → start over
+a set duration, fitting every status packet. There is no step count, no settle
+window and no collect window.
 - **Menu → R-Test:** setup — Fuse tile (cycles 1/2/3/5/7.5/10/15/20/25/30/40 A),
-  Steps −/+ , **2-wire / 4-wire** toggle, **Measure (short the probes)** tare
-  button (2-wire only), optional circuit estimator inputs (wire mm², length,
-  contacts, fuse type), **Start sweep** (disabled until a fuse is set).
-- **RT mode → RUN TEST on Monitor:** uses the current fuse + steps, jumps
-  straight into Running.
-- **Running:** spinner, Step n/total, progress bar, live V/I, **STOP**.
+  **Start current**, **Max current** (0 = auto, i.e. whatever the fuse safely
+  allows), **Duration** (5–900 s, default 30), **2-wire / 4-wire** toggle,
+  **Measure (short the probes)** tare button (2-wire only), optional circuit
+  estimator inputs, **Start sweep** (disabled until a fuse is set). The hint
+  line states the peak current, the duration and roughly how many readings that
+  will collect; asking for more than the fuse allows turns the max amber and
+  says what it will be capped to.
+- **RT mode → RUN TEST on Monitor:** uses the same sweep settings.
+- **Running:** RAMPING UP / RAMPING DOWN, elapsed / total, progress bar, big
+  live V and I, the **live resistance estimate**, the commanded target, a
+  **V + I vs time** chart (dual Y axis) and a **resistance vs time** chart that
+  appears once the fit has enough current span to mean anything. **STOP**.
+- *Test:* watch that the current rises smoothly rather than in visible steps,
+  that it turns around at the halfway mark, and that the live R settles to a
+  steady value well before the sweep ends. Verify the reported "Current sweep"
+  range is what was actually drawn (it is measured, not commanded, so it will
+  fall slightly short of the target at the peak).
 - **Result:** big series resistance, V–I line chart (measured amber, fit green),
   and 18 detail rows: Open-circuit voltage · Probe wiring · Measured (incl.
   leads) · **Uncertainty (±)** · Fit quality (R²) · Est. short-circuit I · Sag at

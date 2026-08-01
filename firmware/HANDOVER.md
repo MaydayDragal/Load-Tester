@@ -9,7 +9,56 @@ ALIENTEK EL15 electronic load. Update this at the end of each session.
 
 ---
 
-## 0a. Latest session (2026-08-01b) — capacity-test overhaul + SD/RTC fixes
+## 0a. Latest session (2026-08-01c) — R-test is now a continuous sweep
+
+The stepped current ladder is gone. `resistance_test.h` now ramps current
+**smoothly up and back down** over a user-set duration and fits EVERY status
+packet, instead of dwelling at 8-20 discrete levels with a settle window and a
+collect window at each.
+
+- **Why:** the ladder spent ~2.3 s per level to buy ~10 usable readings, so the
+  sweep length was a side effect of the step count rather than something the
+  user chose. A 30 s ramp at the 20 Hz default collects ~300 points in the time
+  the 8-step ladder collected ~80, and the duration becomes a plain editable
+  number.
+- **Setup is now Start current / Max current / Duration** (5-900 s, default 30),
+  replacing Steps. Max current 0 means "whatever the fuse safely allows"; the
+  engine still clamps everything to `min(80 % fuse, 12 A, 150 W / Voc, 40 A)`
+  and the setup screen shows the live cap so you can see it before starting.
+- **Live graphs on the running screen**, laid out like the capacity test: big
+  V / I / R readouts, a V + I vs time chart on two Y axes, and a resistance vs
+  time chart that appears once the fit has enough current span to mean anything.
+- **The fit is incremental** — six running sums, no sample buffer — which is
+  what makes the live R free and means the engine allocates nothing between
+  start and completion.
+- **Drift cancellation is preserved.** The ramp is symmetric in time, so every
+  current is visited once up and once down about the midpoint; that is the same
+  argument the up-then-down ladder relied on. The reported curve bins samples
+  into 32 current bands, each averaging its two visits.
+- **Setpoint cadence must stay slower than the poll**: every control write
+  defers the next poll (the device drops crowded commands), so updating the ramp
+  faster than we poll would starve telemetry and collect nothing.
+  `setpointStepMs() = max(100, pollIntervalMs + 50)` enforces it, and the setup
+  hint quotes the resulting sample count rather than the raw poll rate.
+- Result rows/CSV now report what was **measured** (current range, sag, peak
+  power, temp range, max fan, raw sample count, band count) rather than
+  re-deriving them from the binned curve.
+
+Two chart-safety details worth keeping: the live refresh is throttled to ~6 Hz
+(three 120-point series resampled at 20 Hz is ~7000 chart writes/s for a curve
+the eye cannot follow), and the resistance chart picks its scale from the data
+because `lv_coord_t` is int16 — milliohms for a low-R circuit would overflow on
+a multi-ohm result.
+
+`RTEST_ACCURACY.md` §6 records what carried over from the stepped analysis and
+what the ramp changes, including a new caveat: with ~300 samples the reported
+σ_R is ~2x tighter, which is only honest if the sample errors are independent.
+
+**Not yet run with real current.**
+
+---
+
+## 0b. Earlier that day (2026-08-01b) — capacity-test overhaul + SD/RTC fixes
 
 Eight features/fixes, all built and flashed to the board. Flash **69.0 %** of the
 3 MB slot, RAM **18.2 %** static, clean under `-Wall -Wextra`.
@@ -80,7 +129,7 @@ Leftover: `SDTEST_003.CSV` / `SDTEST_004.CSV` are on the card from this session.
 
 ---
 
-## 0b. Earlier that day (2026-08-01) — documentation audit, no functional change
+## 0c. Earlier that day (2026-08-01) — documentation audit, no functional change
 
 A read-only pass over the whole firmware tree to bring every doc back in line
 with the code. Build re-verified at `6adea41`: **clean under `-Wall -Wextra`**,
@@ -193,8 +242,8 @@ main.cpp            owns objects, routes events, buttons, emergency stop
 el15_protocol.h     wire protocol (header-only, pure): parse + command frames
 el15_client.{h,cpp} BLE central (NimBLE 2.5): scan/connect/subscribe/poll/reassemble
 el15_controller.h   El15Controller interface ONLY (demo simulator removed — see §5)
-resistance_test.h   fuse-aware sweep engine — bidirectional + slope uncertainty +
-                    4-wire/tare correction (§6)
+resistance_test.h   fuse-aware CONTINUOUS current sweep — triangular ramp, live
+                    incremental fit, slope uncertainty, 4-wire/tare correction
 capacity_test.h     battery discharge / capacity engine
 display.{h,cpp}     CO5300/SH8601 AMOLED (QSPI 80 MHz) + touch + LVGL + touch-snap
                     engine + PMIC/RTC read+set + buttons + sleep + burn-in shift/dim

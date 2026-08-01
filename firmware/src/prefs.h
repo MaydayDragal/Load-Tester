@@ -25,9 +25,13 @@ struct Data {
   // Sampling
   uint16_t pollMs = 50;   // 20 Hz — the EL15's practical max fresh-data rate
 
-  // R-Test setup
+  // R-Test setup. The sweep is a continuous triangular current ramp:
+  // rtStartA -> rtMaxA -> rtStartA over rtSweepS seconds. rtMaxA == 0 means
+  // "use whatever the fuse rating safely allows".
   float fuseRating = 0;
-  uint8_t rtSteps = 8;
+  float rtStartA = 0;
+  float rtMaxA = 0;
+  uint16_t rtSweepS = 30;
   bool fourWire = false;     // 4-wire (Kelvin) probing
   float tareOhm = 0;         // measured lead+contact resistance (2-wire only)
 

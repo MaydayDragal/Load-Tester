@@ -4,7 +4,15 @@ Evaluation of the circuit-resistance test in `firmware/src/resistance_test.h`
 (fit math) + `firmware/src/ui.cpp` result rows. Focus: where measurement error
 comes from, and what actually improves accuracy on this hardware.
 
-## 1. What the current method does
+> **Superseded by the continuous sweep (2026-08-01).** Sections 1–5 below were
+> written against the STEPPED ladder — settle, collect, average, repeat — which
+> no longer exists. The engine now ramps current smoothly up and back down over
+> a user-set duration and fits every status packet it receives. The analysis
+> still holds; what changed is how the points are gathered. See
+> [§6](#6-the-continuous-sweep-2026-08-01) for what carried over and what the
+> ramp changes.
+
+## 1. What the stepped method did (historical)
 
 1. **Prime** (load off): measure open-circuit voltage `Voc` — keeps the *last*
    priming packet's voltage.
@@ -171,6 +179,63 @@ raise the sample rate to claw the time back.
 Expected effect: (1)+(3) tighten and de-bias R by the largest margin; (2)+(5)
 make the *reported confidence* trustworthy; (4) fixes absolute accuracy at low
 resistance. None require reversing current or new silicon.
+
+---
+
+## 6. The continuous sweep (2026-08-01)
+
+The stepped ladder was replaced by a **continuous triangular current ramp**:
+`start -> max -> start` over a user-set duration, with every status packet fed
+into the fit.
+
+### What carried over unchanged
+
+- **§2.1 drift cancellation.** The ramp is symmetric in time, so every current
+  is visited once going up and once coming down, equally spaced about the sweep
+  midpoint. First-order drift still cancels — this is the same argument as the
+  up-then-down ladder, applied continuously.
+- **§2.2 uncertainty as the confidence statistic.** Still `R ± σ_R`, still
+  gating "reliable" on absolute (≤5 mΩ) or relative (≤5 %) tolerance, still
+  judged against the *raw* slope rather than the tare-corrected figure.
+- **§3.1 the intercept absorbing constant offsets**, and **§3.2 OLS over
+  Deming** — both are properties of fitting a line, not of how it is sampled.
+- **§4 the 2-wire ceiling** and the tare that partly compensates it.
+
+### What the ramp changes
+
+- **§2.3 sample density is no longer the limiting factor.** Every packet counts
+  instead of ~10 per level, so a 30 s sweep collects ~300 points where the
+  8-step ladder collected ~80 in about the same time. The fit runs incrementally
+  on six running sums, so this costs no memory and makes a **live** R estimate
+  free — which is what the running screen now plots.
+- **§2.4 point placement is now uniform in time**, hence uniform in current.
+  The D-optimal argument for weighting the endpoints still stands and is still
+  not implemented; a dwell at each extreme would be the way to get it.
+- **§2.6 settle time no longer exists as a parameter.** Nothing waits for the
+  load to settle, because nothing needs a settled reading: V and I inside one
+  status frame are simultaneous, so regulation lag shifts *which* current a
+  packet reports, not the voltage that belongs with it. What lag does cost is
+  span — the measured current trails the commanded ramp slightly at the turning
+  point — which is why the result reports the current range it actually
+  measured rather than the one it commanded.
+- **New caveat: correlated noise.** With ~300 samples the reported σ_R is roughly
+  √(300/80) ≈ 2× tighter than the ladder's for the same data quality. That is
+  only honest if sample errors are independent. They largely are (the EL15
+  re-samples per frame), but a slow systematic — a thermal drift the symmetric
+  ramp does not fully cancel — will not show up in σ_R. Treat a very small σ_R
+  on a very short sweep with the same suspicion as any other overconfident
+  statistic.
+- **Reported curve.** Raw samples feed the fit; the result curve and the CSV
+  carry them **binned into 32 current bands**, each band averaging its up-ramp
+  and down-ramp visits. That keeps the V-I chart readable and the CSV compact
+  without the engine allocating per sample.
+
+### Still not done (from §5)
+
+- **Curvature/residual flag** (§2.5) — arguably easier now: with 300 points and
+  both ramp directions in each band, a systematic up-vs-down difference is a
+  direct hysteresis indicator.
+- **Averaging the priming Voc** (§2.6) and an **endpoint-weighted ladder** (§2.4).
 
 ---
 *Companion: resistance_test.h (engine), CAPACITY_PLAN.md, FEATURE_IDEAS.md.*

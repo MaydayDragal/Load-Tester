@@ -27,7 +27,9 @@ void writeAll() {
   g_nvs.putBool("pxShift", g_data.pixelShift);
   g_nvs.putUShort("pollMs20", g_data.pollMs);   // key bumped from "pollMs" on purpose
   g_nvs.putFloat("fuse", g_data.fuseRating);
-  g_nvs.putUChar("rtSteps", g_data.rtSteps);
+  g_nvs.putFloat("rtStartA", g_data.rtStartA);
+  g_nvs.putFloat("rtMaxA", g_data.rtMaxA);
+  g_nvs.putUShort("rtSweepS", g_data.rtSweepS);
   g_nvs.putBool("fourWire", g_data.fourWire);
   g_nvs.putFloat("tare", g_data.tareOhm);
   g_nvs.putUChar("btChem", g_data.battChem);
@@ -61,7 +63,9 @@ void begin() {
   // old 500 ms default re-read absent and pick up the new 50 ms (20 Hz) default.
   g_data.pollMs = g_nvs.getUShort("pollMs20", d.pollMs);
   g_data.fuseRating = g_nvs.getFloat("fuse", d.fuseRating);
-  g_data.rtSteps = g_nvs.getUChar("rtSteps", d.rtSteps);
+  g_data.rtStartA = g_nvs.getFloat("rtStartA", d.rtStartA);
+  g_data.rtMaxA = g_nvs.getFloat("rtMaxA", d.rtMaxA);
+  g_data.rtSweepS = g_nvs.getUShort("rtSweepS", d.rtSweepS);
   g_data.fourWire = g_nvs.getBool("fourWire", d.fourWire);
   g_data.tareOhm = g_nvs.getFloat("tare", d.tareOhm);
   g_data.battChem = g_nvs.getUChar("btChem", d.battChem);

@@ -24,7 +24,7 @@ and runs its own resistance-sweep and battery-capacity test engines.
 | **Adjust** | Dial-stepper with unit-aware step chips and hold-to-repeat, plus a numeric keypad |
 | **Graph** | Live two-series auto-scaling V/I chart |
 | **Modes** | CC / CV / CR / CP / CAP / DCR, plus **RT** and **BATT** UI-only pseudo-modes |
-| **R-Test** | Fuse-aware **bidirectional** current sweep → series resistance with a real **± uncertainty**, Voc, R², est. short-circuit current, sag, peak power, temp rise, max fan; 2-wire/4-wire (Kelvin) with a shorted-probe **tare**; circuit-resistance estimator (wire mm²/length, connections, fuse type). See [`RTEST_ACCURACY.md`](RTEST_ACCURACY.md) |
+| **R-Test** | Fuse-aware **continuous current sweep** — a smooth triangular ramp (start → max → start) over an editable duration, fitting every reading. Live V / I / resistance graphs while it runs; result gives series resistance with a real **± uncertainty**, Voc, R², est. short-circuit current, sag, peak power, temp range, max fan; 2-wire/4-wire (Kelvin) with a shorted-probe **tare**; circuit-resistance estimator (wire mm²/length, connections, fuse type). See [`RTEST_ACCURACY.md`](RTEST_ACCURACY.md) |
 | **Battery capacity** | Chemistry presets, cell count with Voc auto-suggest, auto cutoff, CC discharge with local Ah/Wh integration, debounced cutoff + safety caps, rest/rebound, live discharge curve. See [`CAPACITY_PLAN.md`](CAPACITY_PLAN.md) |
 | **Reports** | Real `RTEST_NNN.CSV` / `BATT_NNN.CSV` written to microSD, with an RTC timestamp when the clock has been set |
 | **Settings** | Sample rate · connection/auto-connect · brightness · volume + mute · screen protection · clock (Wi-Fi NTP) · SD card check · battery · system info · restart |
@@ -51,7 +51,8 @@ main.cpp            owns objects, routes events, buttons, emergency stop
 el15_protocol.h     wire protocol (header-only, pure): parse + command frames
 el15_client.{h,cpp} BLE central (NimBLE 2.5): scan/connect/subscribe/poll/reassemble
 el15_controller.h   El15Controller interface (the engines talk to this, not to BLE)
-resistance_test.h   fuse-aware sweep engine — bidirectional + slope uncertainty + tare
+resistance_test.h   fuse-aware continuous sweep engine — triangular current ramp,
+                    incremental (live) least-squares fit, uncertainty, tare
 capacity_test.h     battery discharge / capacity engine
 display.{h,cpp}     CO5300/SH8601 AMOLED (QSPI 80 MHz) + touch + LVGL + touch-snap
                     + PMIC/RTC read+set + buttons + sleep + burn-in shift/dim
