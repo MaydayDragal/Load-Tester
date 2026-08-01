@@ -321,6 +321,16 @@ void setup() {
   actions.scanWifi   = []() { return net::startScan(); };
   ui::begin(actions);
 
+  // RAM is the binding constraint on this board — no PSRAM, and LVGL allocates
+  // from the system heap. NimBLE needs a ~30 KB CONTIGUOUS block to ESTABLISH a
+  // connection, and running short of it presents as "Connect failed" (HCI 0x3e)
+  // rather than as an out-of-memory error, which is exactly the trap this cost a
+  // session to before (HANDOVER §7). So print both numbers once the UI has
+  // finished allocating: the margin is then observable on any boot instead of
+  // being rediscovered the next time a screen grows.
+  Serial.printf("[boot] heap after UI: %u B free, largest block %u B (BLE connect needs ~30 KB contiguous)\n",
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+
   net::onProgress = [](net::State st, const char *text) { ui::onNetProgress((int)st, text); };
   net::onScanDone = [](int n, const char *err) {
     // Marshal the scan results (owned by netclock until the next scan) into

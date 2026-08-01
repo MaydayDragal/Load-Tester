@@ -279,12 +279,35 @@ window and no collect window.
   still shown as "Measured (incl. leads)").
 
 ### 5.8 Battery capacity (`SCR_BATT`)
-- **Setup:** chemistry tiles (Li-ion 3.7/4.2/3.0 · LiFePO4 3.2/3.65/2.5 ·
-  Lead-acid 2.0/2.13/1.75 per 2 V cell · NiMH 1.2/1.4/1.0 · Custom), cell count
-  −/+ with per-chemistry max (14/16/24/40 S), auto-filled cutoff (= cells ×
-  per-cell cutoff, editable), discharge current, **optional rated capacity
-  (mAh)**, a **C-rate chip row**, **Start**. With a rating entered the hint line
-  states the C-rate and the runtime a healthy pack should manage.
+- **Setup:** a **chemistry grid** (one `lv_btnmatrix`, 3 per row), cell count −/+
+  with a per-chemistry max, auto-filled cutoff (= cells × per-cell cutoff,
+  editable), discharge current, **optional rated capacity (mAh)**, a **C-rate
+  chip row**, **Start**. With a rating entered the hint line states the C-rate
+  and the runtime a healthy pack should manage.
+- **Chemistries** (per cell: nominal / full / cutoff · max series count):
+
+  | Chip | Chemistry | V/cell | Max | Full pack |
+  |---|---|---|---|---|
+  | Li-ion | Li-ion (NMC/LCO) | 3.7 / 4.2 / 3.0 | 14S | 58.8 V |
+  | LiHV | LiPo HV (4.35 V) | 3.8 / 4.35 / 3.0 | 13S | 56.6 V |
+  | LiFePO4 | LiFePO4 | 3.2 / 3.65 / 2.5 | 16S | 58.4 V |
+  | LTO | Lithium titanate | 2.4 / 2.8 / 1.8 | 21S | 58.8 V |
+  | Na-ion | Sodium-ion | 3.1 / 4.0 / 1.5 | 14S | 56.0 V |
+  | Pb 12V | Lead-acid 12 V | 2.0 / 2.13 / 1.75 | **fixed 6S** | 12.8 V |
+  | NiMH | NiMH | 1.2 / 1.4 / 1.0 | 40S | 56.0 V |
+  | NiCd | NiCd | 1.2 / 1.35 / 0.9 | 40S | 54.0 V |
+  | Alkaline | Alkaline (primary) | 1.5 / 1.6 / 0.8 | 36S | 57.6 V |
+  | Custom | — | no cell model | — | keypad cutoff only |
+
+  Every max is set so a **fully charged** pack of that size stays under the
+  EL15's 60 V input rating. **Lead-acid is 12 V only** (six 2 V cells): its
+  cell-count row is hidden and the cutoff auto-fills to the standard 10.5 V.
+  Alkaline is a **primary** cell — the test consumes it.
+  *Test:* tap each chip and confirm the detail line below it restates the choice
+  in pack volts ("6S pack = 12.0 V nominal, 10.5 V empty to 12.8 V full"); that
+  the cells −/+ row disappears for **Pb 12V** and **Custom**; that the cutoff
+  re-derives on every change unless you typed one; and that a chip tap is
+  refused outright while a test is running.
 - **C-rate → current:** the four chips carry the chemistry's own conventional
   rates (lead-acid 0.05/0.1/0.2/0.5C — it is rated at the C20 hour rate; every
   other chemistry 0.1/0.2/0.5/1C). Tapping one sets the discharge current to

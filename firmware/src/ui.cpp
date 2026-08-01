@@ -324,9 +324,19 @@ static int btHistN = 0, btHistStride = 1, btHistAcc = 0;
 static uint32_t btLastElapsed = 0;
 
 static lv_obj_t *btIdleBox, *btRunBox, *btResultBox, *btChartCard;
-static lv_obj_t *btChemVal, *btCellsVal, *btVocLbl, *btCutoffVal, *btAmpsVal, *btStartBtn, *btStartLbl, *btStatusLbl;
+static lv_obj_t *btCellsVal, *btVocLbl, *btCutoffVal, *btAmpsVal, *btStartBtn, *btStartLbl, *btStatusLbl;
 static lv_obj_t *btRatedVal, *btRateHint;
 static lv_obj_t *btCRateChip[battmodel::CRATE_N], *btCRateChipLbl[battmodel::CRATE_N];
+// The chemistry picker is ONE lv_btnmatrix, not ten buttons with ten labels.
+// That is a heap decision, not a style one: this board has no PSRAM, LVGL
+// allocates from the system heap, and NimBLE needs a ~30 KB contiguous block to
+// establish a connection — ten chip widgets cost ~6 KB of it and pushed the
+// largest free block to 31.7 KB, i.e. into the margin. A button matrix renders
+// the same grid as a single object. It is also safe with the touch-snap engine:
+// snapOffset() clamps a near-miss INTO the target rect rather than moving it to
+// the centre, so a tap inside the matrix is never displaced onto a neighbour.
+static lv_obj_t *btChemMx;
+static lv_obj_t *btChemDetail, *btCellsRow;
 static lv_obj_t *btPhaseLbl, *btElapsedLbl, *btVLbl, *btCutSub, *btILbl, *btAhLbl, *btWhLbl, *btTempLbl;
 static lv_obj_t *btEtaLbl, *btPauseCard, *btPauseWhyLbl, *btResumeBtn;
 static lv_obj_t *btChart, *btChartYLbl, *btChartXLbl;
@@ -2206,6 +2216,30 @@ static void applyCRate() {
   battAmps = clampBattAmps(BATT_CHEMS[battChem].cRate[battCRateIdx] * battRatedAh);
 }
 
+// Bring the pack size into range for a chemistry without touching a cutoff the
+// user typed themselves. Used both when adopting a chemistry and at boot, where
+// a setup stored by an older firmware may name a cell count this build no longer
+// allows (lead-acid is fixed at 12 V now, and every limit is capped so a FULL
+// pack stays under the EL15's 60 V input rating).
+static void clampCells() {
+  if (battChem < 0 || battChem >= BATT_CHEM_N) battChem = 0;
+  const BattChem &c = BATT_CHEMS[battChem];
+  if (c.fixedCells) battCells = c.fixedCells;
+  else if (c.maxCells && battCells > c.maxCells) battCells = c.maxCells;
+  if (battCells < 1) battCells = 1;
+}
+
+// Adopt a chemistry: fix or clamp the pack size, re-derive the auto cutoff, and
+// re-apply the selected test rate (the C-rate presets are per chemistry).
+static void applyChem(int idx) {
+  battChem = idx;
+  clampCells();
+  const BattChem &c = BATT_CHEMS[battChem];
+  battCutoffCustom = false;
+  if (c.maxCells) battCutoff = c.cut * battCells;
+  applyCRate();
+}
+
 static void battHistPush(float v) {
   // Light EMA first: the raw load-ADC voltage carries a few mV of noise that
   // otherwise shows as squiggle. The discharge is slow, so the lag is trivial.
@@ -2277,7 +2311,27 @@ static void refreshBatt() {
     lv_obj_clear_flag(btIdleBox, LV_OBJ_FLAG_HIDDEN);
     const BattChem &c = BATT_CHEMS[battChem];
     char b[96];
-    lv_label_set_text(btChemVal, c.name);
+    // one_checked mode clears the other buttons for us
+    lv_btnmatrix_set_btn_ctrl(btChemMx, (uint16_t)battChem, LV_BTNMATRIX_CTRL_CHECKED);
+    // The cell-count control only earns its space when the count is actually a
+    // choice: lead-acid is fixed at 12 V here, and Custom has no cell model.
+    if (c.maxCells > 0 && !c.fixedCells) lv_obj_clear_flag(btCellsRow, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(btCellsRow, LV_OBJ_FLAG_HIDDEN);
+    char det[224];
+    if (c.maxCells) {
+      int n = snprintf(det, sizeof(det),
+                       "%s: %.2f V/cell nominal, %.2f-%.2f V/cell.\n%dS pack = %.1f V nominal, "
+                       "%.1f V empty to %.1f V full.",
+                       c.name, c.nom, c.cut, c.full, battCells,
+                       c.nom * battCells, c.cut * battCells, c.full * battCells);
+      if (!c.fixedCells && n < (int)sizeof(det))
+        snprintf(det + n, sizeof(det) - n, " Up to %dS (the EL15 tops out at 60 V).", c.maxCells);
+    } else {
+      snprintf(det, sizeof(det),
+               "No cell model - set the cutoff voltage directly. Custom has no discharge "
+               "curve, so time remaining falls back to the rated capacity.");
+    }
+    lv_label_set_text(btChemDetail, det);
     if (c.maxCells) { snprintf(b, sizeof(b), "%dS", battCells); lv_label_set_text(btCellsVal, b); }
     else lv_label_set_text(btCellsVal, "-");
     snprintf(b, sizeof(b), "%.2f V", battCutoff); lv_label_set_text(btCutoffVal, b);
@@ -2422,20 +2476,57 @@ static void buildBatt() {
     *valOut = lbl(row, "--", COL_ACCENT2, F16);
     lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, nullptr);
   };
-  bRow(setupCard, "Chemistry - tap to cycle", &btChemVal, [](lv_event_t *) {
-    battChem = (battChem + 1) % BATT_CHEM_N;
-    const BattChem &c = BATT_CHEMS[battChem];
-    if (c.maxCells && battCells > c.maxCells) battCells = c.maxCells;
-    battCutoffCustom = false;
-    if (c.maxCells) battCutoff = c.cut * battCells;
-    // The preset rates are per chemistry (lead-acid is rated at the C20 hour
-    // rate, the lithium chemistries at 0.2C), so a selected chip means a
-    // different current here than it did a moment ago.
-    applyCRate();
+  // Chemistry: one chip per family rather than a tap-to-cycle row. With ten of
+  // them, cycling would be up to ten taps to get back to where you started —
+  // and picking the wrong chemistry silently mis-reads every charge estimate,
+  // so it should be a choice you can see, not one you land on.
+  lbl(setupCard, "Chemistry", COL_MUTED, F12);
+  // Three per row. The map is built rather than written out so adding a
+  // chemistry to battery_model.h needs no change here.
+  static const char *chemMap[BATT_CHEM_N + BATT_CHEM_N / 3 + 2];
+  {
+    int m = 0;
+    for (int i = 0; i < BATT_CHEM_N; i++) {
+      chemMap[m++] = BATT_CHEMS[i].shortName;
+      if ((i + 1) % 3 == 0 && i + 1 < BATT_CHEM_N) chemMap[m++] = "\n";
+    }
+    chemMap[m] = "";   // terminator
+  }
+  btChemMx = lv_btnmatrix_create(setupCard);
+  lv_btnmatrix_set_map(btChemMx, chemMap);
+  lv_btnmatrix_set_one_checked(btChemMx, true);   // radio behaviour
+  lv_obj_set_width(btChemMx, LV_PCT(100));
+  lv_obj_set_height(btChemMx, 4 * 32 + 3 * 5 + 8);   // 4 rows of 32 px + gaps
+  lv_obj_set_style_bg_opa(btChemMx, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(btChemMx, 0, 0);
+  lv_obj_set_style_pad_all(btChemMx, 0, 0);
+  lv_obj_set_style_pad_row(btChemMx, 5, 0);
+  lv_obj_set_style_pad_column(btChemMx, 5, 0);
+  lv_obj_set_style_bg_color(btChemMx, COL_INSET, LV_PART_ITEMS);
+  lv_obj_set_style_bg_opa(btChemMx, LV_OPA_COVER, LV_PART_ITEMS);
+  lv_obj_set_style_border_color(btChemMx, COL_BORDER, LV_PART_ITEMS);
+  lv_obj_set_style_border_width(btChemMx, 1, LV_PART_ITEMS);
+  lv_obj_set_style_radius(btChemMx, 9, LV_PART_ITEMS);
+  lv_obj_set_style_text_color(btChemMx, COL_MUTED, LV_PART_ITEMS);
+  lv_obj_set_style_text_font(btChemMx, F12, LV_PART_ITEMS);
+  lv_obj_set_style_bg_color(btChemMx, lv_color_hex(0x1d1b33), LV_PART_ITEMS | LV_STATE_CHECKED);
+  lv_obj_set_style_border_color(btChemMx, COL_ACCENT, LV_PART_ITEMS | LV_STATE_CHECKED);
+  lv_obj_set_style_text_color(btChemMx, COL_ACCENT2, LV_PART_ITEMS | LV_STATE_CHECKED);
+  lv_obj_add_event_cb(btChemMx, [](lv_event_t *e) {
+    uint16_t id = lv_btnmatrix_get_selected_btn(lv_event_get_target(e));
+    // Refresh either way: a rejected tap has already moved the matrix's own
+    // checked state, so the screen has to be put back the way it was.
+    if (!engineBusy() && id < BATT_CHEM_N) applyChem((int)id);
     refreshBatt();
-  });
-  // cells -/+ row
+  }, LV_EVENT_VALUE_CHANGED, nullptr);
+  // What the selection means in pack volts — the number the user actually wires
+  // up to, rather than a per-cell figure they have to multiply in their head.
+  btChemDetail = lbl(setupCard, "", COL_FAINT, F12);
+  lv_label_set_long_mode(btChemDetail, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(btChemDetail, LV_PCT(100));
+  // cells -/+ row (hidden for chemistries whose pack size is fixed or absent)
   lv_obj_t *crow = cont(setupCard);
+  btCellsRow = crow;
   lv_obj_set_size(crow, LV_PCT(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(crow, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(crow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -3356,10 +3447,16 @@ void onStatus(const el15::Status &s) {
     if (BATT_CHEMS[battChem].maxCells) {
       const BattChem &c = BATT_CHEMS[battChem];
       float perCell = s.voltage / battCells;
-      int sug = (int)(s.voltage / c.nom + 0.5f);
-      if (sug < 1) sug = 1;
-      if (sug > c.maxCells) sug = c.maxCells;
-      snprintf(vb, sizeof(vb), "Voc %.2f V - %.2f V/cell (looks like %dS)", s.voltage, perCell, sug);
+      if (c.fixedCells) {
+        // Nothing to suggest when the pack size is fixed — but the per-cell
+        // figure still tells the user whether they hooked up what they think.
+        snprintf(vb, sizeof(vb), "Voc %.2f V - %.2f V/cell", s.voltage, perCell);
+      } else {
+        int sug = (int)(s.voltage / c.nom + 0.5f);
+        if (sug < 1) sug = 1;
+        if (sug > c.maxCells) sug = c.maxCells;
+        snprintf(vb, sizeof(vb), "Voc %.2f V - %.2f V/cell (looks like %dS)", s.voltage, perCell, sug);
+      }
       setTextIf(btVocLbl, vb);
       bool odd = perCell < c.cut * 0.95f || perCell > c.full * 1.08f;
       static int lastOdd = -1;
@@ -3944,6 +4041,7 @@ void begin(const UiActions &actions) {
   battAmps = p.battAmps;
   battRatedAh = p.battRatedMah / 1000.0f;
   battCRateIdx = p.battCRateIdx >= battmodel::CRATE_N ? -1 : p.battCRateIdx;
+  clampCells();   // a stored pack size may be out of range for its chemistry
   if (A.setPollRate) A.setPollRate(pollMs);
 
   scrRoot = lv_scr_act();

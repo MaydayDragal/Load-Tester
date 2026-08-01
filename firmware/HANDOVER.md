@@ -45,6 +45,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-01 | **Ten chemistries** (added LiPo HV, LTO, Na-ion, NiCd, alkaline; **lead-acid fixed at 12 V** — the only size this bench uses), each with its voltage range and a max cell count that keeps a full pack under 60 V. Picker rebuilt as one `lv_btnmatrix` after the chip version cost 6 KB of the BLE heap margin (§13). NVS battery keys bumped, since the chemistry indices moved. |
 | 2026-08-01 | **Capacity test: real time remaining + C-rate from pack size.** New `battery_model.h` (per-chemistry OCV-vs-charge curves, standard test C-rates). The ETA now measures pack internal resistance from the switch-on sag, reads charge state off the curve, learns the pack's capacity during the run, and counts down to the CUTOFF — so it works with no rated capacity and no longer assumes a full pack. Setup gained C-rate chips that set the current from the rated capacity. `CAPACITY_PLAN.md` §4b/§4c. **Compile-clean only — no capacity run has ever drawn real current.** |
 | 2026-08-01 | R-test rebuilt as a **continuous triangular sweep** with live graphs, replacing the stepped ladder — then four defects found by running it against real hardware (§9), and the ramp/sample timing tuned by measurement (§10). |
 | 2026-08-01 | **Capacity overhaul**: pause/resume, rated-capacity metrics (C-rate, ETA, state of health), auto-save, flash-buffered per-sample CSV. **SD/RTC**: FAT directory timestamps, re-init after eject. Screen-timeout options. Fixed a running test being torn down by the user's own scan (§7). |
@@ -405,6 +406,11 @@ partly done — hardware e-stop + sleep done, start/stop/screenshot not).
   Keep a **≥~30 KB contiguous margin for BLE**; if you grow the UI or the buffer,
   re-check that connects still work. (First-principles proof it was memory:
   freeing heap right before a connect made it succeed instantly.)
+  **You no longer have to guess at this margin:** `main.cpp` prints
+  `[boot] heap after UI: N B free, largest block N B` once the UI has finished
+  allocating. Read that line after any screen grows. It is also how the chemistry
+  picker ended up as a single `lv_btnmatrix` rather than ten chip widgets —
+  measured 31.7 KB vs 37.9 KB largest block (§13).
 - **Wi-Fi needs even more (~50 KB contiguous) than the trimmed buffer leaves**,
   so `display::setLowMemMode(true)` shrinks the draw buffer to 16 lines for the
   duration of a scan/sync, freeing ~70 KB; the UI keeps rendering (more, smaller
@@ -627,8 +633,12 @@ session's git history.
 ## 13. The capacity test's battery model (2026-08-01)
 
 `battery_model.h` holds a per-cell open-circuit-voltage curve for each chemistry
-plus the C-rates that chemistry is conventionally tested at. Two features hang
-off it; the full rationale is in `CAPACITY_PLAN.md` §4b/§4c. What matters here:
+plus the C-rates that chemistry is conventionally tested at. Ten chemistries:
+Li-ion, LiPo HV (4.35 V), LiFePO4, LTO, Na-ion, **lead-acid fixed at 12 V**,
+NiMH, NiCd, alkaline (primary), Custom. Every max cell count is chosen so a
+FULLY CHARGED pack of that size stays under the EL15's 60 V input rating.
+Two features hang off it; full rationale in `CAPACITY_PLAN.md` §4b/§4c/§4d.
+What matters here:
 
 - **The old ETA was wrong twice over** — it assumed the pack started full, and it
   counted down to the *rating* when the *cutoff* is what ends the run. The new one
@@ -656,6 +666,22 @@ off it; the full rationale is in `CAPACITY_PLAN.md` §4b/§4c. What matters here
 - **Fallbacks are labelled, never silent.** Custom chemistry has no curve, and a
   run where R was never measurable never invents one. Both drop to the old
   rated-capacity estimate and the UI says "(from the rating)".
+- **Chemistry indices are load-bearing and they moved.** The presets are stored
+  in NVS as an INDEX, so growing the list renamed everybody's saved chemistry.
+  The four battery-setup keys were therefore bumped (`btChem`→`btChem2`, and the
+  same for cells/cutoff/cutoff-custom) so the whole setup re-defaults once
+  together — otherwise a device came back as LiFePO4 carrying an old lead-acid
+  42 V cutoff. Same trick as `pollMs`→`pollMs20`. **Do this again if the list
+  order ever changes.**
+- **The picker is ONE `lv_btnmatrix`, and that is a heap decision.** Ten chip
+  buttons with ten labels cost ~6 KB and dropped the largest contiguous block to
+  31.7 KB — 1.7 KB above what NimBLE needs to connect. The matrix renders the
+  same grid as a single object: 37.9 KB. `main.cpp` now prints
+  `[boot] heap after UI: … free, largest block …` so this is observable on any
+  boot. **Watch that line whenever a screen grows.** (Checked before committing
+  to it: `snapOffset()` clamps a near-miss INTO the target rect and leaves an
+  inside-the-target point alone, so touch-snap cannot displace a tap onto a
+  neighbouring button of the matrix.)
 - **The curves are per family, not per cell.** Every charge figure in the UI is
   prefixed "~" for that reason. LiFePO4's plateau spans ~150 mV from 20 % to
   90 %, so its charge readout is coarse until the knee — the learned-capacity

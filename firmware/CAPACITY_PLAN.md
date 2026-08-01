@@ -27,16 +27,40 @@ status.*
 ## 2. Feature design
 
 ### 2.1 Battery setup (new Setup phase)
-- **Chemistry presets** (per-cell nominal / full / cutoff defaults):
-  - Li-ion: 3.7 / 4.2 / 3.0 V
-  - LiFePO4: 3.2 / 3.65 / 2.5 V
-  - Lead-acid (per 2 V cell): 2.0 / 2.13 / 1.75 V
-  - NiMH: 1.2 / 1.4 / 1.0 V
-  - Custom: keypad-entered cutoff, no per-cell logic
-- **Cell count** −/+ (1–20S) with an **auto-suggest**: at setup the live Voc is
-  shown and the firmware proposes the S count whose per-cell voltage best fits
-  the chosen chemistry (e.g. 12.45 V Li-ion → "3S (4.15 V/cell)"). Wrong-count
-  mismatch (per-cell outside plausible window) shows an amber warning.
+- **Chemistry presets** (per-cell nominal / full / cutoff, max series count).
+  Extended 2026-08-01 from the original four to ten; every max cell count is set
+  so a **fully charged** pack of that size stays under the EL15's 60 V input
+  rating, because offering a size that cannot be tested would be a trap:
+
+  | Chemistry | nom / full / cut (V per cell) | Max cells | Full-pack V |
+  |---|---|---|---|
+  | Li-ion (NMC/LCO) | 3.7 / 4.2 / 3.0 | 14S | 58.8 |
+  | LiPo HV (LiHV) | 3.8 / 4.35 / 3.0 | 13S | 56.6 |
+  | LiFePO4 | 3.2 / 3.65 / 2.5 | 16S | 58.4 |
+  | LTO (titanate) | 2.4 / 2.8 / 1.8 | 21S | 58.8 |
+  | Sodium-ion | 3.1 / 4.0 / 1.5 | 14S | 56.0 |
+  | **Lead-acid 12 V** | 2.0 / 2.13 / 1.75 | **fixed 6S** | 12.8 |
+  | NiMH | 1.2 / 1.4 / 1.0 | 40S | 56.0 |
+  | NiCd | 1.2 / 1.35 / 0.9 | 40S | 54.0 |
+  | Alkaline (primary) | 1.5 / 1.6 / 0.8 | 36S | 57.6 |
+  | Custom | — | — | keypad cutoff, no cell model |
+
+  **Lead-acid is fixed at 12 V** (six 2 V cells) at the user's request — it is the
+  only lead-acid size on this bench — so its cell-count control is hidden
+  entirely and the cutoff lands on the standard 10.5 V without being asked for.
+  Alkaline is a *primary* cell: a capacity test consumes it. It earns a slot
+  because its steep, near-linear decline is both a thing people measure and the
+  easiest curve to read a charge state from.
+
+  The picker is a **`lv_btnmatrix`**, not ten chip widgets — see §4d.
+- **Cell count** −/+ from 1S to the chemistry's own maximum (table above), with
+  an **auto-suggest**: at setup the live Voc is shown and the firmware proposes
+  the S count whose per-cell voltage best fits the chosen chemistry (e.g.
+  12.45 V Li-ion → "3S (4.15 V/cell)"). Wrong-count mismatch (per-cell outside
+  the plausible window) turns the line amber. The control is **hidden entirely**
+  for chemistries whose size is fixed (lead-acid 12 V) or absent (Custom), and
+  the setup card shows what the selection means in pack volts — nominal, empty
+  and full — so the user does not multiply per-cell figures in their head.
 - **Cutoff voltage** auto-filled = cells × per-cell cutoff, always editable via
   keypad. This is the "automatic min voltage stop point."
 - **Discharge current** via keypad/steps, clamped to min(12 A, 150 W ÷ Voc).
@@ -262,6 +286,35 @@ every charge-state figure in the UI is prefixed "~". LiFePO4's plateau spans
 sharpens at the knee — the learned-capacity term is doing most of the work there.
 R is measured once at switch-on and held, though it rises as a pack empties;
 there is only ever one open-circuit reading to measure it against.
+
+## 4d. Why the chemistry picker is one widget (2026-08-01)
+
+Ten chemistries behind the old "tap to cycle" row would have been up to ten taps
+to get back where you started, and picking the wrong one silently mis-reads every
+charge estimate — it should be a choice you can *see*. But ten chip buttons with
+ten labels is twenty LVGL objects, and **that is a heap decision on this board**,
+not a styling one. Measured with a boot-time print added for the purpose:
+
+| Build | Free heap after UI | Largest contiguous block |
+|---|---|---|
+| Ten chip widgets | 57,668 B | **31,732 B** |
+| One `lv_btnmatrix` | 64,084 B | **37,876 B** |
+
+NimBLE needs a **~30 KB contiguous block to establish a connection**, and running
+short presents as "Connect failed" (HCI 0x3e), not as an allocation error — the
+trap documented in `HANDOVER.md` §7. The chip version left only 1.7 KB of that
+margin. The button matrix renders the identical grid as a single object and gives
+the margin back.
+
+It is also safe with the touch-snap engine, which was worth checking before
+committing to it: `snapOffset()` clamps a near-miss *into* the target rectangle
+rather than moving it to the centre, and leaves a point already inside a target
+untouched — so a tap within the matrix is never displaced onto a neighbouring
+button, and a near-miss lands on the closest edge button, which is what the user
+meant anyway.
+
+`main.cpp` now prints `[boot] heap after UI: … free, largest block …` on every
+boot, so this margin is observable rather than rediscovered.
 
 ## 5. Open questions (answers change the plan)
 

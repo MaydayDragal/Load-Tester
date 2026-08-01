@@ -32,10 +32,15 @@ void writeAll() {
   g_nvs.putUShort("rtSweepS", g_data.rtSweepS);
   g_nvs.putBool("fourWire", g_data.fourWire);
   g_nvs.putFloat("tare", g_data.tareOhm);
-  g_nvs.putUChar("btChem", g_data.battChem);
-  g_nvs.putUChar("btCells", g_data.battCells);
-  g_nvs.putFloat("btCut", g_data.battCutoff);
-  g_nvs.putBool("btCutCust", g_data.battCutoffCustom);
+  // Keys deliberately bumped with a "2" suffix: the chemistry list grew and its
+  // INDICES shifted, so a stored index now names a different chemistry — and the
+  // cell count and cutoff are derived from it, so all four have to re-default
+  // together or a device would come back as, say, LiFePO4 carrying an old
+  // lead-acid 42 V cutoff. Same trick as pollMs -> pollMs20 below.
+  g_nvs.putUChar("btChem2", g_data.battChem);
+  g_nvs.putUChar("btCells2", g_data.battCells);
+  g_nvs.putFloat("btCut2", g_data.battCutoff);
+  g_nvs.putBool("btCutCust2", g_data.battCutoffCustom);
   g_nvs.putFloat("btAmps", g_data.battAmps);
   g_nvs.putFloat("btRated", g_data.battRatedMah);
   g_nvs.putChar("btCRIdx", g_data.battCRateIdx);
@@ -69,10 +74,12 @@ void begin() {
   g_data.rtSweepS = g_nvs.getUShort("rtSweepS", d.rtSweepS);
   g_data.fourWire = g_nvs.getBool("fourWire", d.fourWire);
   g_data.tareOhm = g_nvs.getFloat("tare", d.tareOhm);
-  g_data.battChem = g_nvs.getUChar("btChem", d.battChem);
-  g_data.battCells = g_nvs.getUChar("btCells", d.battCells);
-  g_data.battCutoff = g_nvs.getFloat("btCut", d.battCutoff);
-  g_data.battCutoffCustom = g_nvs.getBool("btCutCust", d.battCutoffCustom);
+  // See writeAll(): the "2" keys re-default the whole battery setup once, because
+  // the chemistry indices moved when the preset list grew.
+  g_data.battChem = g_nvs.getUChar("btChem2", d.battChem);
+  g_data.battCells = g_nvs.getUChar("btCells2", d.battCells);
+  g_data.battCutoff = g_nvs.getFloat("btCut2", d.battCutoff);
+  g_data.battCutoffCustom = g_nvs.getBool("btCutCust2", d.battCutoffCustom);
   g_data.battAmps = g_nvs.getFloat("btAmps", d.battAmps);
   g_data.battRatedMah = g_nvs.getFloat("btRated", d.battRatedMah);
   g_data.battCRateIdx = g_nvs.getChar("btCRIdx", d.battCRateIdx);
