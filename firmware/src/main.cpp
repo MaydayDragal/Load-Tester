@@ -66,11 +66,48 @@ static bool g_wasConnected = false;
 // loop() knows it may resume the test once power comes back.
 static bool g_powerPaused = false;
 
+// ---- Probe-wiring compensation (4-wire Kelvin / 2-wire lead tare) ----------
+// The EL15 senses voltage at ITS OWN terminals, so in a 2-wire hook-up every
+// reading is short by the drop across the test leads and their contacts:
+//
+//     V_at_the_device_under_test = V_at_the_load_terminals + I * R_leads
+//
+// At 3 A through 20 mohm that is 60 mV, and it is not a cosmetic error. It makes
+// a battery cutoff fire early (so a capacity test stops before the pack is
+// actually empty and under-reports it), it understates a source on the Monitor,
+// and it grows with current — exactly when you care most.
+//
+// Once the lead resistance is known (measured by the R-Test tare sweep, or typed
+// into Settings) the controller can put that drop back on every reading. In
+// 4-wire (Kelvin) the sense path carries no current, so there is nothing to add:
+// the reading already belongs to the device under test.
+//
+// Applied ONCE here, before the packet fans out, so the screen and the engines
+// can never disagree about what the voltage is.
+static el15::Status compensateProbe(const el15::Status &s) {
+  const prefs::Data &p = prefs::get();
+  if (!s.valid || p.fourWire || p.tareOhm <= 0) return s;
+  el15::Status c = s;
+  c.voltage = s.voltage + s.current * p.tareOhm;
+  c.power = c.voltage * c.current;   // keep W consistent with the corrected V
+  return c;
+  // Deliberately NOT touched: `setpoint`. In CV mode that is a value the device
+  // regulates at its own terminals — a command, not a measurement — so showing
+  // it uncorrected next to a corrected reading is the honest pairing, and the
+  // difference between them IS the lead drop.
+}
+
 // ---- Status routing --------------------------------------------------------
 static void handleStatus(const el15::Status &s) {
-  ui::onStatus(s);
+  const el15::Status c = compensateProbe(s);
+  ui::onStatus(c);
+  // The R-test gets the RAW packet on purpose. Its fit already removes the lead
+  // tare from the SLOPE (resistance_test.h correct()), and a pre-corrected
+  // voltage would take the same resistance off a second time — the sweep would
+  // report a DUT that is one tare too low, and a low-milliohm result could land
+  // at zero. Every other consumer wants the corrected reading.
   if (g_test.running()) g_test.onStatus(s);
-  if (g_batt.running()) g_batt.onStatus(s);
+  if (g_batt.running()) g_batt.onStatus(c);
 
   // Arm/disarm the link supervisor from the load's own reported state — the
   // device is the authority on whether current is flowing, not our intentions.

@@ -5,7 +5,7 @@ a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
 **Last updated:** 2026-08-01.
-**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `933fac5`.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `923e266`.
 `origin/main` and `origin/claude/…` are kept at the same commit, and pushing the
 branch does NOT move main — push both.
 
@@ -45,6 +45,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-01 | **Probe wiring went device-wide.** 2-wire/4-wire + lead resistance moved out of the R-test into **Settings ▸ Probe wiring** and are now applied to every mode: `main.cpp compensateProbe()` adds `I × R_lead` back onto each status packet before it fans out. Biggest real effect is on the capacity test — its cutoff was firing at the load's terminals, so a 2-wire rig stopped early and under-reported the pack. The R-test is deliberately excluded (double-subtraction — §14). |
 | 2026-08-01 | **Ten chemistries** (added LiPo HV, LTO, Na-ion, NiCd, alkaline; **lead-acid fixed at 12 V** — the only size this bench uses), each with its voltage range and a max cell count that keeps a full pack under 60 V. Picker rebuilt as one `lv_btnmatrix` after the chip version cost 6 KB of the BLE heap margin (§13). NVS battery keys bumped, since the chemistry indices moved. |
 | 2026-08-01 | **Capacity test: real time remaining + C-rate from pack size.** New `battery_model.h` (per-chemistry OCV-vs-charge curves, standard test C-rates). The ETA now measures pack internal resistance from the switch-on sag, reads charge state off the curve, learns the pack's capacity during the run, and counts down to the CUTOFF — so it works with no rated capacity and no longer assumes a full pack. Setup gained C-rate chips that set the current from the rated capacity. `CAPACITY_PLAN.md` §4b/§4c. **Compile-clean only — no capacity run has ever drawn real current.** |
 | 2026-08-01 | R-test rebuilt as a **continuous triangular sweep** with live graphs, replacing the stepped ladder — then four defects found by running it against real hardware (§9), and the ramp/sample timing tuned by measurement (§10). |
@@ -688,7 +689,40 @@ What matters here:
   term carries it there. Do not present any of this as a measured state of
   charge.
 
-## 14. Doc map — read in this order
+## 14. Probe wiring is device-wide (2026-08-01)
+
+`Settings ▸ Probe wiring` holds 2-wire/4-wire and the lead resistance for the
+WHOLE controller. `main.cpp compensateProbe()` applies it to every status packet
+before the packet fans out. Things to know before touching it:
+
+- **One correction, one place.** The compensation happens once, in
+  `handleStatus()`, so the UI and the engines can never disagree about what the
+  voltage is. Do not add a second correction downstream.
+- **The R-test gets the RAW packet, deliberately.** Its fit already removes the
+  tare from the SLOPE (`resistance_test.h correct()`), so a pre-corrected voltage
+  would subtract the same resistance twice and a low-milliohm result could come
+  out at zero. If you ever unify the two, remove one of them — not neither, and
+  not both.
+- **The tare sweep must stay uncorrected too.** It measures the leads; feeding it
+  lead-corrected volts would measure zero. It is safe today only because it runs
+  through the R-test path, which is already excluded. Keep that true.
+- **`setpoint` is not corrected.** In CV mode it is a command the device
+  regulates at its own terminals, not a measurement. The gap between it and the
+  corrected reading IS the lead drop, which is useful to see.
+- **Biggest practical win is the capacity test**, not the R-test: the cutoff used
+  to be applied at the load's terminals, so a 2-wire discharge stopped early by
+  the lead drop and under-reported the pack. It now cuts at the pack.
+- **Knock-on:** the capacity test's internal-resistance figure measures the pack
+  ALONE once compensation is active (the leads are already out of the reading),
+  so the result row relabels itself "Pack resistance" vs "Pack + lead
+  resistance". `BATT_NNN.CSV` records the wiring and whether voltages were
+  corrected — without that the file's volts would be ambiguous.
+- **Both screens edit the same two values** (`probeFourWire`, `probeTareOhm`);
+  the R-Test card is where the tare is MEASURED, not a second setting. Any edit
+  must call `persistProbe()` — main.cpp reads `prefs` on every packet, so a value
+  that only reaches prefs on the next screen refresh would be silently stale.
+
+## 15. Doc map — read in this order
 
 New to the tree? `README.md` (what it is and how to build) → this file §0/§3/§7
 (state, hardware facts, gotchas) → `FIRST_CONTACT.md` (what to do at the bench).

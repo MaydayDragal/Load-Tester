@@ -118,7 +118,7 @@ lifting; several of these are small deltas on existing code.
 |---|---|---|
 | **2-point user calibration of V and I** | M | Correct against a reference DMM, store slope/offset in NVS. Turns "indication" into "measurement". |
 | ~~Zero/tare offset~~ | **done** | R-test setup (2-wire): "Measure (short the probes)" runs a tare sweep, stores it in NVS, subtracts it from every later result and shows the raw figure alongside. |
-| ~~4-wire (Kelvin) workflow support~~ | **done** | R-test setup has a 2-wire/4-wire toggle with hook-up guidance; the result carries the wiring and (2-wire) the tare. `resistance_test.h` + `ui.cpp`. |
+| ~~4-wire (Kelvin) workflow support~~ | **done, now global** | **Settings ▸ Probe wiring** sets 2-wire/4-wire and the lead resistance for the WHOLE device, not just the R-test. In 2-wire with a lead figure, `main.cpp compensateProbe()` adds `I × R_lead` back onto every status packet before it fans out, so the monitor, graph, battery cutoff and reports all read at the part rather than at the load's terminals. 4-wire applies no correction (the sense path carries no current). The R-Test setup mirrors the same two values and is still where the tare is *measured*; it deliberately fits on the RAW packet, since it already removes the tare from its own slope. |
 | **Calibration due-date reminder** | S | If this ever does real QA work. |
 
 ## 7. Optional external hardware

@@ -39,7 +39,12 @@ class CapacityTest {
     uint32_t pausedS = 0;  // total time spent paused (excluded from durationS)
     // Battery-model figures. All are 0 / -1 when the chemistry carries no
     // voltage curve (Custom) or the model never established itself.
-    float internalResistanceOhm = 0;  // pack + contacts + leads, from the switch-on sag
+    // internalResistanceOhm is measured from the switch-on sag, so it covers
+    // everything between the sense point and the cells: with probe compensation
+    // active (4-wire, or a 2-wire lead tare — see main.cpp compensateProbe) the
+    // leads are already out of the reading and this is the pack alone; without
+    // it, it is pack + contacts + leads.
+    float internalResistanceOhm = 0;
     float startSocPct = -1;           // state of charge when the discharge began
     float endSocPct = -1;             // ... and when it stopped
     // Full-pack capacity implied by this run: Ah drawn per unit of state of

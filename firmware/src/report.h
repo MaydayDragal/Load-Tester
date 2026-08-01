@@ -15,6 +15,7 @@
 
 #include "capacity_test.h"
 #include "display.h"
+#include "prefs.h"
 #include "resistance_test.h"
 #include "sample_log.h"
 #include "sd_card.h"
@@ -106,6 +107,18 @@ inline bool saveBatt(const CapacityTest::Result &r, char *msg, size_t msgLen) {
     writeStamp(f);
     fpf(f, "# Cutoff voltage (V),%.2f\n", r.cutoffV);
     fpf(f, "# Discharge current (A),%.3f\n", r.currentA);
+    // Probe wiring is a device-wide setting rather than something the engine
+    // carries, but it changes what every voltage in this file MEANS — corrected
+    // back to the pack, or measured at the load's terminals — so the file has to
+    // state it. Read live at save time, which is moments after the run.
+    {
+      const prefs::Data &p = prefs::get();
+      fpf(f, "# Probe wiring,%s\n", p.fourWire ? "4-wire (Kelvin)" : "2-wire");
+      fpf(f, "# Lead resistance corrected (ohm),%.6f\n", p.fourWire ? 0.0f : p.tareOhm);
+      fpf(f, "# Voltages,%s\n",
+          (p.fourWire || p.tareOhm <= 0) ? "as reported by the load"
+                                         : "corrected to the pack terminals (V + I*R_lead)");
+    }
     if (r.ratedAh > 0) {
       fpf(f, "# Rated capacity (Ah),%.3f\n", r.ratedAh);
       fpf(f, "# Rated capacity (mAh),%.0f\n", r.ratedAh * 1000.0f);

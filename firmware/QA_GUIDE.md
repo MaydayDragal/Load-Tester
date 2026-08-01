@@ -366,8 +366,8 @@ window and no collect window.
   flat-line degeneracy.
 
 ### 5.10 Settings (`SCR_SET`)
-Seven cards: **SAMPLE RATE** (20/10/4/2 Hz chips — 20 Hz = 50 ms is the
-default) · **CONNECTION** (auto-connect toggle) · **BATTERY** (controller's own
+Eight cards: **SAMPLE RATE** (20/10/4/2 Hz chips — 20 Hz = 50 ms is the
+default) · **PROBE WIRING** (below) · **CONNECTION** (auto-connect toggle) · **BATTERY** (controller's own
 %, mV, charge state) · **CLOCK** (RTC readout, Wi-Fi network picker, password
 entry, UTC offset, "Sync clock now") · **SCREEN PROTECTION** (pixel shift +
 **screen timeout**: Never / 30 s / 1 / 5 / 10 / 30 min, with a line stating that
@@ -377,6 +377,34 @@ re-initialises, so it is also how you confirm a freshly-inserted card) ·
 - *Test:* change brightness / volume / sample rate → reboot → they stick.
   A **successful clock sync deliberately reboots** the board (see §8).
   Wi-Fi scan and sync are **refused while a test runs**.
+
+#### PROBE WIRING — device-wide, all modes
+The EL15 senses voltage at **its own terminals**, so a 2-wire hook-up reads short
+by the drop across the leads and clips: `V_dut = V_terminals + I × R_lead`. This
+card holds the wiring for the whole controller, not just the R-test.
+
+- **2-wire + lead resistance** → every status packet is corrected by
+  `+ I × R_lead` in `main.cpp compensateProbe()`, *before* it fans out, so the
+  screen and the engines can never disagree. Enter the figure by tapping **Lead
+  resistance** (milliohms, capped at 1 Ω), or let **R-Test ▸ Measure (short the
+  probes)** capture it — both write the same value.
+- **4-wire (Kelvin)** → no correction at all; the sense path carries no current,
+  so the reading already belongs to the part. The lead-resistance row is hidden.
+- The Monitor's voltage caption reads **VOLTAGE**, **VOLTAGE - 4-WIRE**, or
+  **VOLTAGE - LEAD-CORRECTED**, so a reading that deliberately differs from the
+  EL15's own front panel always says why.
+- **The R-test is excluded** from the correction on purpose: it already subtracts
+  the tare from its own fitted slope, and pre-correcting the volts would remove
+  the same resistance twice (a low-milliohm result could land at zero).
+- *Test:* set a lead resistance of, say, 50 mΩ with a load drawing 2 A and
+  confirm the Monitor voltage sits ~0.10 V above the EL15's own panel and the
+  caption says LEAD-CORRECTED; switch to 4-wire and it returns to the panel
+  figure with the row hidden; toggle from **either** screen (Settings or R-Test
+  setup) and confirm the other screen agrees — they are one setting, not two.
+- *Test the capacity effect:* a 2-wire discharge with a lead figure set should
+  now cut off later than the same run uncorrected — the cutoff is being applied
+  at the pack rather than at the load's terminals. `BATT_NNN.CSV` records the
+  wiring, the corrected lead resistance, and whether voltages were corrected.
 
 ### 5.11 Audio & buttons
 - Tones: click on taps, firmer confirm on physical buttons, rising chime on test

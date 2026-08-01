@@ -94,8 +94,14 @@ static const uint32_t TARE_SWEEP_S = 8;   // shorted probes need no dwell time
 // leads, so the lead and contact resistance carried by the force leads never
 // appears in the reading; 2-wire measures it in series with the DUT, which is
 // what the tare below subtracts (measure with the probes shorted, store R).
-static bool    rtFourWire = false;
-static float   rtTareOhm = 0;
+// Probe wiring, GLOBAL to every mode (Settings ▸ Probe wiring, and mirrored on
+// the R-Test setup where the tare is captured). The EL15 senses voltage at its
+// own terminals, so in a 2-wire hook-up every reading is short by the drop
+// across the leads and contacts; with that resistance measured once, main.cpp
+// puts it back on every status packet. In 4-wire the sense path carries no
+// current, so there is nothing to add and nothing to subtract.
+static bool    probeFourWire = false;
+static float   probeTareOhm = 0;
 static bool    rtTareRunning = false;   // this sweep is a lead-tare measurement
 static RtPhase rtPhase = RT_IDLE;
 static ResistanceTest::Result lastResult;
@@ -215,7 +221,7 @@ static bool faultLocked = false;
 static std::function<void()> guardAction;
 
 static lv_obj_t *modeAbbrLbl, *modeNameLbl, *setLabelLbl, *setValLbl, *setUnitLbl;
-static lv_obj_t *vHeroBlock, *vHeroVal, *iHeroBlock, *iHeroLabelRow, *iHeroSink, *iHeroVal, *iHeroUnit;
+static lv_obj_t *vHeroBlock, *vHeroCap, *vHeroVal, *iHeroBlock, *iHeroLabelRow, *iHeroSink, *iHeroVal, *iHeroUnit;
 static lv_obj_t *rtSetupGroup, *battSetupGroup;  // reparented onto Monitor in RT/BATT mode
 static lv_obj_t *loadBar, *loadBtn, *loadIcon, *loadTitle, *loadSub;
 
@@ -260,6 +266,7 @@ static lv_obj_t *setBriVal, *setBattVal, *setBattState, *setRtcVal, *setSdVal, *
 static lv_obj_t *setPxShiftBtn, *setPxShiftLbl, *dimChip[6], *dimChipLbl[6], *setDimSummary;
 static lv_obj_t *setAutoConnBtn, *setAutoConnLbl;
 static lv_obj_t *setSsidVal, *setPassVal, *setTzVal, *setSyncBtn, *setSyncLbl, *setNetStatus;
+static lv_obj_t *setProbeBtn, *setProbeLbl, *setTareRow, *setProbeNote;
 // Text-entry overlay (password + manual/hidden SSID entry).
 static lv_obj_t *kbOverlay, *kbTextArea, *kbTitle;
 enum { KB_SSID = 1, KB_PASS = 2 };
@@ -384,6 +391,8 @@ static void syncMonitorExtras();
 static void refreshWifi();
 static void openTextEntry(int target);
 static void startWifiScan();
+static void refreshProbe();
+static void persistProbe();
 static void addDeviceRow(const char *sym, const char *name, const char *sub, const char *addr);
 
 // ---- Small builders --------------------------------------------------------
@@ -766,7 +775,11 @@ static void buildMonitor() {
   styleCard(vh, COL_VHERO_BG, COL_VHERO_BD, 14, 6);
   lv_obj_set_flex_flow(vh, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(vh, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-  lbl(vh, "VOLTAGE", COL_GREEN, F12);
+  // The caption doubles as the probe-wiring indicator: a lead-corrected reading
+  // deliberately DIFFERS from what the EL15's own panel shows, so the screen has
+  // to say why rather than leave the user to find the discrepancy. Reusing this
+  // label costs no extra widget, which on this heap matters (HANDOVER §7).
+  vHeroCap = lbl(vh, "VOLTAGE", COL_GREEN, F12);
   lv_obj_t *vrow = cont(vh);
   lv_obj_set_size(vrow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(vrow, LV_FLEX_FLOW_ROW);
@@ -824,7 +837,7 @@ static void buildLoadBar() {
     if (isRT()) {
       if (!fuseRating) return;
       if (!connected) { showScreen(SCR_CONNECT); return; }
-      if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtStartA, rtMaxA, (uint32_t)rtSweepS, rtFourWire, rtTareOhm); enterRtRun(); }
+      if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtStartA, rtMaxA, (uint32_t)rtSweepS, probeFourWire, probeTareOhm); enterRtRun(); }
       return;
     }
     if (isBatt()) {
@@ -1106,8 +1119,13 @@ static void buildRtest() {
   lv_label_set_long_mode(rtProbeHint, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(rtProbeHint, LV_PCT(100));
   lv_obj_add_event_cb(probeCard, [](lv_event_t *) {
-    rtFourWire = !rtFourWire;
+    // Same two values Settings ▸ Probe wiring edits — this card is the place the
+    // tare is MEASURED, not a second copy of the setting.
+    probeFourWire = !probeFourWire;
+    persistProbe();
+    refreshProbe();
     refreshRtest();
+    refreshMonitor();
   }, LV_EVENT_CLICKED, nullptr);
 
   // Lead tare (2-wire only): one shorted-probe sweep, stored and subtracted
@@ -1153,7 +1171,13 @@ static void buildRtest() {
   styleCard(tClear, COL_INSET, COL_BORDER, 11, 0);
   lv_obj_t *tClearLbl = lbl(tClear, "Clear", COL_MUTED, F14);
   lv_obj_center(tClearLbl);
-  lv_obj_add_event_cb(tClear, [](lv_event_t *) { rtTareOhm = 0; refreshRtest(); }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(tClear, [](lv_event_t *) {
+    probeTareOhm = 0;
+    persistProbe();
+    refreshProbe();
+    refreshRtest();
+    refreshMonitor();
+  }, LV_EVENT_CLICKED, nullptr);
 
   // circuit estimate (optional): wire + connections + fuse -> predicted R
   lv_obj_t *estCard = cont(rtSetupGroup);
@@ -1224,7 +1248,7 @@ static void buildRtest() {
     if (engineBusy()) return;
     if (!fuseRating) return;
     if (!connected) { showScreen(SCR_CONNECT); return; }
-    if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtStartA, rtMaxA, (uint32_t)rtSweepS, rtFourWire, rtTareOhm); enterRtRun(); }
+    if (A.startRTest) { rtTareRunning = false; A.startRTest(fuseRating, rtStartA, rtMaxA, (uint32_t)rtSweepS, probeFourWire, probeTareOhm); enterRtRun(); }
   }, LV_EVENT_CLICKED, nullptr);
 
   // running
@@ -1439,8 +1463,8 @@ static void persistSetup() {
     d.rtStartA = rtStartA;
     d.rtMaxA = rtMaxA;
     d.rtSweepS = (uint16_t)rtSweepS;
-    d.fourWire = rtFourWire;
-    d.tareOhm = rtTareOhm;
+    d.fourWire = probeFourWire;
+    d.tareOhm = probeTareOhm;
     d.battChem = (uint8_t)battChem;
     d.battCells = (uint8_t)battCells;
     d.battCutoff = battCutoff;
@@ -1504,15 +1528,15 @@ static void refreshRtest() {
     // Probe wiring + tare. The hint is deliberately a hook-up instruction
     // rather than a definition: 4-wire only works if the sense leads land on
     // the DUT itself, past the force-lead contacts.
-    lv_label_set_text(rtProbeVal, rtFourWire ? "4-wire (Kelvin)" : "2-wire");
-    lv_obj_set_style_text_color(rtProbeVal, rtFourWire ? COL_GREEN : COL_INK, 0);
+    lv_label_set_text(rtProbeVal, probeFourWire ? "4-wire (Kelvin)" : "2-wire");
+    lv_obj_set_style_text_color(rtProbeVal, probeFourWire ? COL_GREEN : COL_INK, 0);
     lv_label_set_text(rtProbeHint,
-        rtFourWire ? "Sense leads land ON the part, inside the force-lead clamps. Lead and contact resistance is excluded, so no tare is used."
+        probeFourWire ? "Sense leads land ON the part, inside the force-lead clamps. Lead and contact resistance is excluded, so no tare is used."
                    : "Lead and contact resistance is measured in series with the part. Tare it below, or switch to 4-wire.");
-    if (rtFourWire) lv_obj_add_flag(rtTareCard, LV_OBJ_FLAG_HIDDEN);
+    if (probeFourWire) lv_obj_add_flag(rtTareCard, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_clear_flag(rtTareCard, LV_OBJ_FLAG_HIDDEN);
-    if (rtTareOhm > 0) {
-      char ob[20]; fmtOhm(ob, sizeof(ob), rtTareOhm);
+    if (probeTareOhm > 0) {
+      char ob[20]; fmtOhm(ob, sizeof(ob), probeTareOhm);
       lv_label_set_text(rtTareVal, ob);
       lv_obj_set_style_text_color(rtTareVal, COL_GREEN, 0);
     } else {
@@ -1830,6 +1854,61 @@ static void refreshWifi() {
   lv_obj_set_style_text_color(setSyncLbl, ready ? COL_ACCENT2 : COL_FAINT, 0);
 }
 
+// Probe wiring is read by main.cpp on EVERY status packet, so it has to reach
+// prefs the moment it changes rather than waiting for a screen refresh to
+// persist it. prefs::change updates the live struct immediately; the flash write
+// stays debounced.
+static void persistProbe() {
+  prefs::change([](prefs::Data &d) {
+    d.fourWire = probeFourWire;
+    d.tareOhm = probeTareOhm;
+  });
+}
+
+static void refreshProbe() {
+  if (!setProbeBtn) return;
+  setTextIf(setProbeLbl, probeFourWire ? "4-wire (Kelvin)" : "2-wire");
+  lv_obj_set_style_text_color(setProbeLbl, probeFourWire ? COL_GREEN : COL_INK, 0);
+  lv_obj_set_style_border_color(setProbeBtn, probeFourWire ? COL_GREEN : COL_BORDER, 0);
+  // The tare only exists to stand in for sense leads you do not have; in 4-wire
+  // there is nothing for it to correct, so the row goes away rather than sitting
+  // there implying it still does something.
+  lv_obj_t *tareRow = lv_obj_get_parent(setTareRow);
+  if (probeFourWire) lv_obj_add_flag(tareRow, LV_OBJ_FLAG_HIDDEN);
+  else lv_obj_clear_flag(tareRow, LV_OBJ_FLAG_HIDDEN);
+  if (probeTareOhm > 0) {
+    char ob[24];
+    fmtOhm(ob, sizeof(ob), probeTareOhm);
+    setTextIf(setTareRow, ob);
+    lv_obj_set_style_text_color(setTareRow, COL_GREEN, 0);
+  } else {
+    setTextIf(setTareRow, "not set");
+    lv_obj_set_style_text_color(setTareRow, COL_FAINT, 0);
+  }
+  char note[288];
+  if (probeFourWire) {
+    snprintf(note, sizeof(note),
+             "Sense leads land ON the part, inside the force-lead clamps, so lead and "
+             "contact resistance never enters the reading. Readings are used exactly as "
+             "the load reports them. Applies to every mode.");
+  } else if (probeTareOhm > 0) {
+    char ob[24];
+    fmtOhm(ob, sizeof(ob), probeTareOhm);
+    snprintf(note, sizeof(note),
+             "Every voltage is corrected back to the part by adding current x %s - "
+             "%.0f mV at 1 A, %.0f mV at 5 A. Applies to every mode: monitor, graph, "
+             "battery cutoff and reports. R-Test is excluded (it already subtracts the "
+             "tare from its own slope).", ob, probeTareOhm * 1000.0f, probeTareOhm * 5000.0f);
+  } else {
+    snprintf(note, sizeof(note),
+             "The load senses voltage at its own terminals, so readings are short by the "
+             "drop across your leads. Set the lead resistance - type it, or let "
+             "R-Test > Measure (short the probes) find it - and every mode is corrected "
+             "for it.");
+  }
+  lv_label_set_text(setProbeNote, note);
+}
+
 static void refreshRateChips() {
   for (int i = 0; i < 4; i++) {
     bool on = RATE_MS[i] == pollMs;
@@ -1972,6 +2051,28 @@ static void buildSettings() {
     lv_obj_add_event_cb(rateChip[i], onRateChip, LV_EVENT_CLICKED, (void *)(intptr_t)i);
   }
   refreshRateChips();
+
+  // probe wiring — global, applied to every mode (not just the R-test)
+  lv_obj_t *pwc = settingsCard("PROBE WIRING");
+  lv_obj_set_style_pad_row(pwc, 8, 0);
+  setProbeBtn = flatBtn(pwc);
+  lv_obj_set_size(setProbeBtn, LV_PCT(100), 46);
+  styleCard(setProbeBtn, COL_BLACK, COL_GREEN, 11, 0);
+  lv_obj_set_style_bg_opa(setProbeBtn, LV_OPA_TRANSP, 0);
+  setProbeLbl = lbl(setProbeBtn, "2-wire", COL_INK, F16);
+  lv_obj_center(setProbeLbl);
+  lv_obj_add_event_cb(setProbeBtn, [](lv_event_t *) {
+    probeFourWire = !probeFourWire;
+    persistProbe();
+    refreshProbe();
+    refreshRtest();     // the R-Test setup mirrors these two values
+    refreshMonitor();   // the voltage caption says when a correction is live
+  }, LV_EVENT_CLICKED, nullptr);
+  setTareRow = tapRow(pwc, "Lead resistance", [](lv_event_t *) { openKeypad(10); }, nullptr);
+  setProbeNote = lbl(pwc, "", COL_FAINT, F12);
+  lv_label_set_long_mode(setProbeNote, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(setProbeNote, LV_PCT(100));
+  refreshProbe();
 
   // connection: auto-connect to the last device on startup
   lv_obj_t *conc = settingsCard("CONNECTION");
@@ -2847,6 +2948,7 @@ static void kpRefresh() {
   const char *unit = kpTarget == 2 ? "A" : kpTarget == 3 ? "m" : kpTarget == 4 ? "V"
                    : kpTarget == 5 ? "A" : kpTarget == 6 ? "mAh"
                    : kpTarget == 7 ? "A" : kpTarget == 8 ? "A" : kpTarget == 9 ? "s"
+                   : kpTarget == 10 ? "mohm"
                    : modeUnit();
   lv_label_set_text(kpUnit, unit);
   lv_label_set_text(kpTitle, kpTarget == 2 ? "Fuse rating" : kpTarget == 3 ? "Wire length"
@@ -2854,7 +2956,8 @@ static void kpRefresh() {
                              : kpTarget == 6 ? "Rated capacity"
                              : kpTarget == 7 ? "Sweep start current"
                              : kpTarget == 8 ? "Sweep max current (0 = auto)"
-                             : kpTarget == 9 ? "Sweep duration" : modeName());
+                             : kpTarget == 9 ? "Sweep duration"
+                             : kpTarget == 10 ? "Lead resistance" : modeName());
   UnitCfg c = unitCfg(unit);
   for (int i = 0; i < 4; i++) {
     char b[20]; snprintf(b, sizeof(b), "%g", c.preset[i]);
@@ -2873,6 +2976,7 @@ static void openKeypad(int target) {
   else if (target == 7) { snprintf(b, sizeof(b), "%g", rtStartA); kpBuf = b; }
   else if (target == 8) { if (rtMaxA > 0) { snprintf(b, sizeof(b), "%g", rtMaxA); kpBuf = b; } else kpBuf = ""; }
   else if (target == 9) { snprintf(b, sizeof(b), "%d", rtSweepS); kpBuf = b; }
+  else if (target == 10) { if (probeTareOhm > 0) { snprintf(b, sizeof(b), "%g", probeTareOhm * 1000.0f); kpBuf = b; } else kpBuf = ""; }
   else kpBuf = fuseRating ? std::to_string((int)fuseRating) : "";
   kpRefresh();
   showOverlay(OV_KEYPAD);
@@ -2920,6 +3024,18 @@ static void kpSet() {
                : s > (int)ResistanceTest::MAX_SWEEP_S ? (int)ResistanceTest::MAX_SWEEP_S : s;
     }
     refreshRtest();
+  }
+  // Lead resistance, typed in milliohms. Capped at 1 ohm: this stands in for test
+  // leads and clips, and a figure past that is a typo, not a lead — one that
+  // would inflate every voltage on the device by volts.
+  else if (kpTarget == 10) {
+    if (!engineBusy()) {
+      probeTareOhm = v <= 0 ? 0 : (v > 1000.0f ? 1.0f : v / 1000.0f);
+      persistProbe();
+    }
+    refreshProbe();
+    refreshRtest();
+    refreshMonitor();
   }
   else { fuseRating = v; refreshRtest(); refreshMonitor(); }
   showOverlay(OV_NONE);
@@ -3320,6 +3436,17 @@ static void syncMonitorExtras() {
 static void refreshMonitor() {
   setTextIf(modeAbbrLbl, modeAbbr());
   setTextIf(modeNameLbl, modeName());
+  // Probe wiring, on the voltage caption. Only says something when the reading
+  // is NOT the load's own number: 4-wire means it was sensed at the part, and a
+  // lead correction means we added the drop back. Plain "VOLTAGE" therefore
+  // always means "exactly what the EL15 reports".
+  if (vHeroCap) {
+    char cap[28];
+    if (probeFourWire) snprintf(cap, sizeof(cap), "VOLTAGE - 4-WIRE");
+    else if (probeTareOhm > 0) snprintf(cap, sizeof(cap), "VOLTAGE - LEAD-CORRECTED");
+    else snprintf(cap, sizeof(cap), "VOLTAGE");
+    setTextIf(vHeroCap, cap);
+  }
   char b[24];
   if (isRT()) {
     setTextIf(setLabelLbl, "FUSE");
@@ -3713,14 +3840,17 @@ void onTestComplete(const ResistanceTest::Result &r) {
   // RAW slope (nothing is subtracted from a tare) and go straight back to setup.
   if (rtTareRunning) {
     rtTareRunning = false;
-    rtTareOhm = r.rawResistanceOhm;
+    probeTareOhm = r.rawResistanceOhm;
     rtPhase = RT_IDLE;
     char t[96], ob[20];
-    fmtOhm(ob, sizeof(ob), rtTareOhm);
-    snprintf(t, sizeof(t), "Lead tare stored: %s. It is subtracted from 2-wire results.", ob);
+    fmtOhm(ob, sizeof(ob), probeTareOhm);
+    snprintf(t, sizeof(t), "Lead tare stored: %s. Now corrected for in every mode.", ob);
     lv_label_set_text(rtStatusLbl, t);
     lv_obj_clear_flag(rtStatusLbl, LV_OBJ_FLAG_HIDDEN);
-    refreshRtest();   // also persists the new tare
+    persistProbe();   // main.cpp reads it per packet, so it must land now
+    refreshProbe();
+    refreshRtest();
+    refreshMonitor();
     showScreen(SCR_RTEST);
     return;
   }
@@ -3980,6 +4110,12 @@ void onBattComplete(const CapacityTest::Result &r) {
   if (r.internalResistanceOhm > 0) {
     fmtOhm(b, sizeof(b), r.internalResistanceOhm);   // ASCII "mohm" — Montserrat has no omega
     lv_label_set_text(brVal[BR_IR], b);
+    // What that resistance actually covers depends on the probe wiring: with the
+    // leads corrected out (4-wire, or a 2-wire tare) the sag measures the pack
+    // alone; with no correction it is the pack plus everything in series with it.
+    lv_label_set_text(lv_obj_get_child(brRow[BR_IR], 0),
+                      (probeFourWire || probeTareOhm > 0) ? "Pack resistance"
+                                                          : "Pack + lead resistance");
     lv_obj_clear_flag(brRow[BR_IR], LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_add_flag(brRow[BR_IR], LV_OBJ_FLAG_HIDDEN);
@@ -4032,8 +4168,8 @@ void begin(const UiActions &actions) {
   rtStartA = p.rtStartA;
   rtMaxA = p.rtMaxA;
   rtSweepS = p.rtSweepS;
-  rtFourWire = p.fourWire;
-  rtTareOhm = p.tareOhm;
+  probeFourWire = p.fourWire;
+  probeTareOhm = p.tareOhm;
   battChem = p.battChem;
   battCells = p.battCells;
   battCutoff = p.battCutoff;

@@ -132,6 +132,20 @@ dominant *absolute* error — no firmware change can remove it.
   shorted, store it, subtract from the result. Turns a 2-wire rig into a
   usable low-R tool. Cheap firmware feature, high real-world value.
 
+> **Extended device-wide, 2026-08-01.** Probe wiring is no longer an R-test
+> setting: **Settings ▸ Probe wiring** holds it for the whole controller. The
+> same physics applies to every mode, not just a sweep — `V_dut = V_terminals +
+> I·R_lead` — so with a lead figure entered, `main.cpp compensateProbe()` adds
+> that drop back on every status packet before it reaches the UI or the capacity
+> engine. The gain is largest where it was previously invisible: a battery cutoff
+> was firing at the *load's terminals*, so a 2-wire rig stopped a discharge early
+> and under-reported the pack by the lead drop.
+>
+> The R-test is deliberately **excluded** from that correction and keeps fitting
+> the raw packet: it already removes the tare from its own slope (§5 item 4), and
+> pre-correcting the volts would subtract the same resistance twice — a
+> low-milliohm result could land at zero. Two paths, one tare, applied once each.
+
 ## 5. Recommended change set (no new hardware)
 
 Priority order, all firmware-only:
