@@ -138,10 +138,30 @@ Priority order, all firmware-only:
 3. **[IMPLEMENTED]** **More samples/step via the sample rate** — the collect
    window now scales to ~10 readings/step (capped 2.5 s), so a higher Settings
    sample rate tightens the fit (§2.3).
-4. **Tare/zero step** to subtract lead+contact resistance (§4.1) — biggest
-   real-world absolute-accuracy win short of true 4-wire. *(not yet done)*
+4. **[IMPLEMENTED]** **Tare/zero step + 4-wire support** (§4) — R-Test setup has
+   a **2-wire / 4-wire (Kelvin)** toggle with hook-up guidance. In 2-wire,
+   *"Measure (short the probes)"* runs a full sweep with the probes shorted and
+   stores the raw slope in NVS as `tareOhm`; every later 2-wire result subtracts
+   it (clamped at zero) and still reports the uncorrected figure as
+   *"Measured (incl. leads)"*. In 4-wire nothing is subtracted — the sense leads
+   carry no current, so there is nothing to correct. The wiring and the tare are
+   both carried into `RTEST_NNN.CSV`. Note the reliability test judges σ against
+   the **raw** slope, not the tare-corrected one: subtracting a constant cannot
+   improve a fit, and a near-tare result would otherwise look wildly unreliable.
 5. **Curvature/residual flag** to catch non-resistive DUTs (§2.5). *(not yet done)*
 6. Minor: average the priming Voc; optional endpoint-weighted ladder. *(not yet done)*
+
+**Sample-density note (updates §2.3).** That section was written when the poll
+default was 500 ms and assumed a 10 Hz ceiling. Real hardware turned out to cap
+at **~17–19 fresh samples/s**, and the default poll is now **50 ms (20 Hz)**, so
+the adaptive collect window reaches its ~10-readings-per-step target inside the
+2.5 s cap at the default rate. Polling faster than 20 Hz buys nothing — it
+refetches repeated frames.
+
+**Still unproven with real current.** Every technique above has been exercised
+against the phone simulator and verified by reading the code; no R-test has yet
+been run with actual current flowing through a real EL15. Until that happens,
+treat the accuracy claims here as design intent rather than measured results.
 
 Note: bidirectional roughly doubles the physical step count (n levels → 2n−1
 steps) and the adaptive window can lengthen each step, so a sweep takes

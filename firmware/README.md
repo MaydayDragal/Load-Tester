@@ -3,140 +3,202 @@
 Turns a **Waveshare ESP32-C6-Touch-AMOLED-1.8** into a self-contained
 controller for the ALIENTEK **EL15** electronic load — no phone required. The
 board is the BLE central, renders the instrument UI on its AMOLED touch panel,
-and runs the same reverse-engineered EL15 protocol and fuse-aware resistance
-test as the Android app in this repo.
+and runs its own resistance-sweep and battery-capacity test engines.
 
-> **Status: first firmware pass (load-bearing core).** This was written against
-> the named libraries and the board's published pin map, but it has **not been
-> compiled or flashed on hardware** from this environment — there's no ESP
-> toolchain or board here. Treat it as a working foundation to build, flash, and
-> iterate on your device. The [hardware checklist](#before-you-flash-verify)
-> below lists the handful of board-specific things to confirm first.
+> **Status (2026-08-01): running on real hardware.** The firmware builds clean,
+> boots clean, and has been driven against a **real ALIENTEK EL15** — connect,
+> telemetry, all six mode opcodes, setpoint and LOAD ON/OFF are verified on the
+> instrument itself, as is SD-card read/write. What has **not** been done yet is
+> a full R-test or capacity run with **real current** flowing. See
+> [`HANDOVER.md`](HANDOVER.md) §6 for the exact verified/unverified split and
+> [`FIRST_CONTACT.md`](FIRST_CONTACT.md) for the bench procedure.
 
-Builds **two ways from one source tree** (`src/`): with **PlatformIO** or with
-**ESP-IDF** (`idf.py`). The ESP-IDF build uses arduino-esp32 as a component, so
-the same `setup()`/`loop()` code compiles unchanged either way — pick whichever
-toolchain you prefer.
+---
 
-## What's implemented in this pass
+## Feature set
 
-| Feature | Status |
+| Area | What it does |
 |---|---|
-| BLE central: scan, connect, subscribe FFF1, write FFF3, poll | ✅ |
-| EL15 protocol (packet parse + command frames), byte-identical to the app | ✅ |
-| Frame reassembly across notifications | ✅ |
-| Live monitor: V / I / P / mode / temp / fan / load / protection | ✅ |
-| Manual control: mode (CC/CV/CR/CP/CAP/DCR), setpoint, Load ON/OFF, Lock | ✅ |
-| Fuse-aware circuit-resistance test with least-squares R + R² | ✅ |
-| LVGL touch UI (top bar + Monitor / Control / R-Test tabs) | ✅ |
+| **Connect** | Scan (named devices only, deduped, random-address peers OK), connect, disconnect; optional auto-connect to the last device at boot |
+| **Monitor** | V / I heroes (current turns red + "SINKING" under load), telemetry row (W · fan% · temp · runtime · Ah/mΩ), mode\|setpoint bar, pinned LOAD / RUN-TEST bar |
+| **Adjust** | Dial-stepper with unit-aware step chips and hold-to-repeat, plus a numeric keypad |
+| **Graph** | Live two-series auto-scaling V/I chart |
+| **Modes** | CC / CV / CR / CP / CAP / DCR, plus **RT** and **BATT** UI-only pseudo-modes |
+| **R-Test** | Fuse-aware **bidirectional** current sweep → series resistance with a real **± uncertainty**, Voc, R², est. short-circuit current, sag, peak power, temp rise, max fan; 2-wire/4-wire (Kelvin) with a shorted-probe **tare**; circuit-resistance estimator (wire mm²/length, connections, fuse type). See [`RTEST_ACCURACY.md`](RTEST_ACCURACY.md) |
+| **Battery capacity** | Chemistry presets, cell count with Voc auto-suggest, auto cutoff, CC discharge with local Ah/Wh integration, debounced cutoff + safety caps, rest/rebound, live discharge curve. See [`CAPACITY_PLAN.md`](CAPACITY_PLAN.md) |
+| **Reports** | Real `RTEST_NNN.CSV` / `BATT_NNN.CSV` written to microSD, with an RTC timestamp when the clock has been set |
+| **Settings** | Sample rate · connection/auto-connect · brightness · volume + mute · screen protection · clock (Wi-Fi NTP) · SD card check · battery · system info · restart |
+| **Safety** | BOOT-button hardware e-stop · link-loss auto-stop supervisor · crash/reboot recovery · controller-brownout auto-off · load-safe power-off · engine mutual exclusion |
+| **Audio** | ES8311 tones: tap click, button confirm, rising chime on completion, falling on error, urgent alarm on fault/e-stop |
+| **Screen care** | AMOLED pixel shift + idle dim → true-black blank (suppressed while a test runs) |
 
 There is deliberately **no on-device simulator**: all simulation lives in the
 Android **EL15 Load Simulator** app (`simulator/` in this repo), which
-impersonates the load — including full battery discharge-curve simulation —
-over a *real* BLE link. That way the firmware always exercises its actual
-radio/transport path, never an in-process fake.
+impersonates the load — including a full battery discharge curve — over a *real*
+BLE link. That way the firmware always exercises its actual radio/transport
+path, never an in-process fake.
 
-**Deferred to later passes** (the Android app has these; the firmware doesn't
-yet): the four bench tests (capacity/runtime/step/OCP), on-device history &
-graphs, CSV/PDF export, settings, alarms, and the calibration sweep. The
-architecture below is set up so these drop in as new engines + tabs.
+**Not ported from the Android app:** the runtime/step/OCP bench tests,
+on-device history browsing, PDF export, alarms, and the calibration sweep. The
+engine + screen architecture is set up so these drop in as new engines and tabs.
 
-## Architecture (mirrors the Android app)
+---
+
+## Architecture
 
 ```
-main.cpp            ← owns objects + routes events   (≈ DeviceCore)
-├─ el15_protocol.h  ← wire protocol                   (= El15Protocol.kt)
-├─ el15_client.*    ← BLE central transport           (= El15BleManager.kt)
-├─ el15_controller.h← controller interface           (= El15Controller)
-├─ resistance_test.h← fuse-aware sweep engine         (= CircuitResistanceTester.kt)
-├─ display.*        ← SH8601 AMOLED + FT3168 + LVGL glue
-├─ ui.*             ← LVGL screens
-└─ board_config.h   ← ALL board-specific pins (verify these)
+main.cpp            owns objects, routes events, buttons, emergency stop
+el15_protocol.h     wire protocol (header-only, pure): parse + command frames
+el15_client.{h,cpp} BLE central (NimBLE 2.5): scan/connect/subscribe/poll/reassemble
+el15_controller.h   El15Controller interface (the engines talk to this, not to BLE)
+resistance_test.h   fuse-aware sweep engine — bidirectional + slope uncertainty + tare
+capacity_test.h     battery discharge / capacity engine
+display.{h,cpp}     CO5300/SH8601 AMOLED (QSPI 80 MHz) + touch + LVGL + touch-snap
+                    + PMIC/RTC read+set + buttons + sleep + burn-in shift/dim
+audio.{h,cpp}       ES8311 codec feedback (continuous-stream I2S tone synth)
+es8311.{c,h}        vendored Espressif/Waveshare ES8311 driver (Arduino I²C HAL)
+sd_card.{h,cpp}     microSD on bit-banged software SPI (SdFat) — own driver
+report.h            CSV test reports (RTEST_/BATT_) written via sd_card
+prefs.{h,cpp}       NVS persistence (debounced) + synchronous in-flight/creds flags
+link_guard.h        link-loss auto-stop supervisor + crash recovery (header-only)
+netclock.{h,cpp}    Wi-Fi scan + NTP → PCF85063 (radio powered only per op)
+ui.{h,cpp}          LVGL UI — all screens, overlays, result rows
+board_config.h      ALL board pins (display, touch, PMIC, RTC, audio, buttons, SD)
+include/lv_conf.h   LVGL config (fonts, chart, refr period 16 ms, indev 10 ms)
 ```
 
-The protocol and test engines are line-for-line ports of the Kotlin, so the
-firmware talks to the load identically to the phone.
+**Threading contract (do not break this):** NimBLE host-task callbacks only
+*enqueue* onto a FreeRTOS queue; `El15Client::loopTick()` drains it on the loop
+task, so LVGL and both test engines are only ever touched single-threaded.
+`main.cpp handleStatus()` fans a decoded status packet to `ui::onStatus()` plus
+whichever engine is running. **Never call LVGL or an engine from a NimBLE
+callback.** Audio runs on its own FreeRTOS task (priority 8) streaming I²S.
+
+---
 
 ## Build & flash → PlatformIO
 
+PlatformIO Core is typically installed **off-PATH**; the board's COM port can
+hop between resets, so discover it rather than hard-coding it.
+
 ```bash
-# from the firmware/ directory
-pio run                 # build
-pio run -t upload       # flash over USB
-pio device monitor      # serial log @ 115200
+PIO=~/.platformio/penv/Scripts/pio.exe
+PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
+"$PIO" run -d firmware                                  # build (-Wall -Wextra on)
+"$PIO" run -d firmware -t upload --upload-port "$PORT"  # flash
+"$PIO" device monitor -p "$PORT" -b 115200              # serial log
 ```
+
+Current build: **~2.11 MB** of the 3 MB `huge_app` slot, **RAM 17.8 %** static.
+First build downloads ~1 GB (platform + RISC-V toolchain + arduino-esp32 + libs);
+later builds are incremental. Changing `include/lv_conf.h` forces a full LVGL
+recompile.
 
 The ESP32-C6 needs **arduino-esp32 3.x** (IDF 5.1+), which mainline PlatformIO
-doesn't ship yet — `platformio.ini` therefore uses the community
+doesn't ship — `platformio.ini` therefore uses the community
 [pioarduino](https://github.com/pioarduino/platform-espressif32) platform fork.
-Libraries are pinned in `lib_deps` and resolved automatically:
+Libraries are pinned in `lib_deps` and resolve **newer** than the `^` floors:
 
-- `lvgl/lvgl @ ^8.3` — UI toolkit (config in `include/lv_conf.h`)
-- `moononournation/GFX Library for Arduino @ ^1.4` — SH8601 AMOLED driver
-- `h2zero/NimBLE-Arduino @ ^2.1` — BLE central
+| Pinned | Resolves to | Used for |
+|---|---|---|
+| `lvgl/lvgl @ ^8.3.11` | 8.4.0 | UI toolkit (config in `include/lv_conf.h`) |
+| `moononournation/GFX Library for Arduino @ ^1.4.9` | 1.6.7 | SH8601 AMOLED driver |
+| `h2zero/NimBLE-Arduino @ ^2.1.0` | 2.5.0 | BLE central (2.x required — 1.x callback signatures differ) |
+| `greiman/SdFat @ ^2.2.2` | 2.x | microSD over the custom software-SPI driver |
 
-## Build & flash → ESP-IDF
+Notable build flags (all with reasons in `platformio.ini`):
+`ARDUINO_LOOP_STACK_SIZE=12288`, `SPI_DRIVER_SELECT=3` (our own SdSpi driver),
+`USE_SD_CRC=1`, `huge_app.csv` partitions, `qio_qspi` memory type.
 
-The ESP-IDF project (`CMakeLists.txt`, `main/`, `sdkconfig.defaults`,
-`partitions.csv`) compiles the same `src/` tree with arduino-esp32 as a
-component. LVGL and arduino-esp32 are pulled by the component manager
-(`main/idf_component.yml`); the two Arduino-only libraries are vendored once:
+### Test scaffolding (compiled out of normal builds)
+
+| Flag | What it does |
+|---|---|
+| `EL15_SDTEST` | Boot-time SD info / write ×2 / readback, via the same paths the UI uses |
+| `EL15_POLLTEST` | Poll-rate sweep, reporting fresh-vs-repeated frames per interval |
+| `EL15_SELFTEST` | Safe mode-cycle sweep (load stays OFF) |
+| `EL15_NO_POLL` | Disable polling entirely — proves whether telemetry is poll-driven |
 
 ```bash
-cd firmware
-# one-time: drop the Arduino-only libs into components/ (see components/README.md)
-git clone --depth 1 https://github.com/moononournation/Arduino_GFX.git /tmp/agfx
-git clone --depth 1 https://github.com/h2zero/NimBLE-Arduino.git        /tmp/nimble
-cp -r /tmp/agfx/src   components/Arduino_GFX/
-cp -r /tmp/nimble/src components/NimBLE-Arduino/
-
-idf.py set-target esp32c6
-idf.py build flash monitor
+PLATFORMIO_BUILD_FLAGS="-D EL15_SDTEST" "$PIO" run -d firmware -t upload --upload-port "$PORT"
 ```
 
-`CONFIG_AUTOSTART_ARDUINO=y` (in `sdkconfig.defaults`) makes IDF run the
-Arduino `setup()`/`loop()`, so no `app_main()` is needed. LVGL is configured
-from `include/lv_conf.h` via `LV_CONF_INCLUDE_SIMPLE` (set in
-`main/CMakeLists.txt`); alternatively configure it through
-`idf.py menuconfig → Component config → LVGL`.
+### Build & flash → ESP-IDF (stale)
+
+An ESP-IDF project (`CMakeLists.txt`, `main/`, `sdkconfig.defaults`,
+`partitions.csv`) also exists in the tree, compiling the same `src/` with
+arduino-esp32 as a component. **It has not been kept current** — `main/CMakeLists.txt`
+predates the audio feature and does not list `audio.cpp` / `es8311.c`, so it
+will not link until updated. The PlatformIO/Arduino build is the one that is
+built and flashed.
 
 ### Arduino IDE alternative
 
 Install **esp32 by Espressif 3.0.0+** (Boards Manager), select an ESP32-C6
-board, add the three libraries above via Library Manager, copy
+board, add the four libraries above via Library Manager, copy
 `include/lv_conf.h` next to your LVGL library folder (or keep
 `LV_CONF_INCLUDE_SIMPLE` on the include path), then open `src/*` as a sketch.
-NimBLE-Arduino 2.x is required — the 1.x callback signatures differ.
 
-## Before you flash: verify
+---
 
-1. **Panel pins** — `board_config.h` holds every board-specific GPIO (QSPI
-   data/clock/CS, reset, touch I2C). They follow Waveshare's published
-   ESP32-C6-Touch-AMOLED-1.8 example, but **cross-check them against the
-   [board wiki](https://www.waveshare.com/wiki/ESP32-C6-Touch-AMOLED-1.8)** and
-   their Arduino demo's config header — revisions vary, and some control lines
-   may sit behind the on-board TCA9554 I/O expander (`LCD_RST_VIA_EXPANDER`).
-2. **Colour order** — if colours look inverted/swapped, flip `LV_COLOR_16_SWAP`
-   in `include/lv_conf.h`.
-3. **Touch chip** — the FT3168 driver in `display.cpp` uses the common
-   FT6x36-family register map (0x02 count, 0x03.. coordinates). If touches don't
-   register, confirm the address (`TOUCH_I2C_ADDR`) and that the touch panel
-   isn't held in reset.
-4. **Brightness** — `display::setBrightness` calls `Arduino_SH8601::setBrightness`;
-   if your Arduino_GFX version lacks it, update the library.
-5. **BLE address type** — `El15Client::connectTo` uses `BLE_ADDR_PUBLIC`. If a
-   scan finds your EL15 but a direct reconnect fails, it may advertise a random
-   address — switch to `BLE_ADDR_RANDOM`.
+## Hardware notes (verified on this board)
+
+- **No PSRAM.** 512 KB on-chip HP SRAM (~320 KB usable), 16 MB flash. LVGL uses
+  a **1/7-frame (64-line, ~47 KB)** partial draw buffer — sized so NimBLE keeps
+  the ≥~30 KB contiguous block it needs to *establish* a connection. Growing the
+  buffer breaks BLE connects (HCI 0x3e); see `BUF_LINES` in `display.cpp`.
+- **Display:** Waveshare call it **CO5300**; driven with Arduino_GFX's
+  `Arduino_SH8601` (compatible command set) over QSPI at **80 MHz**.
+  Reset/panel-enable via the **TCA9554 expander (0x20) bits 4,5**.
+  `LV_COLOR_16_SWAP 0`.
+- **Touch:** Waveshare call it **CST820**; this unit answers on the **FocalTech**
+  (FT3168/FT6x36) register map. `touchInit()` writes both families' anti-sleep
+  registers so idle auto-sleep is defeated either way. I²C SDA=8 SCL=7 addr 0x38.
+- **Audio:** **ES8311** at I²C 0x18 (shared bus). I²S MCLK=19 BCLK=20 DIN=21
+  WS=22 DOUT=23; speaker-amp power-enable is **TCA9554 bit 7**.
+- **PMIC:** AXP2101 at 0x34 (battery %, VBAT, USB present, power-off). The
+  **PWR key** arrives as PMIC IRQ bits, not a GPIO.
+- **RTC:** PCF85063 at 0x51, readable *and* settable (NTP sync).
+- **SD:** SPI mode (the C6 has no SDMMC host) on **bit-banged software SPI**,
+  SCK=11 MOSI=10 MISO=18 CS=6 — deliberately independent of the panel's SPI2.
+- **Buttons:** BOOT = GPIO9 (active-low strapping pin) · PWR = PMIC key.
+- Unused so far: QMI8658 IMU, 802.15.4 radio, RTC backup-battery pads.
+
+---
 
 ## Using it
 
 1. Power the board over USB; the instrument UI comes up.
-2. Tap **Connect** → pick your EL15 from the scan list.
-3. **Monitor** tab shows the live readout. **Control** sets mode / setpoint /
-   load. **R-Test** runs the fuse-aware resistance sweep and shows R, Voc, R².
+2. **Connect** → Scan → pick your EL15. (Settings ▸ Connection can make this
+   automatic on the next boot.)
+3. **Monitor** shows the live readout; the **mode\|set** bar and **Adjust**
+   drive the load; the pinned bar toggles LOAD.
+4. **R-Test** runs the fuse-aware sweep; **Battery** runs a capacity discharge.
+   Both offer **Save to SD card** on their result screen.
+5. **BOOT** is a hardware emergency stop from any screen. **PWR** short-press
+   sleeps/wakes the screen; a long press powers the controller off *after*
+   forcing the load off.
 
 To test with no load hardware, run the Android **EL15 Load Simulator** app on a
 second phone: it advertises as an EL15 over real BLE and models either a fixed
-circuit (a resistance test recovers its configured emf / series R) or a full
-battery with a chemistry-accurate discharge curve. The ESP connects to it
-exactly as it would to the real instrument.
+circuit or a full battery with a chemistry-accurate discharge curve.
+
+> ⚠ **Safety** — this drives real current. Set the EL15's own hardware UVP as a
+> backstop before discharging a pack (the firmware's link guard needs a working
+> radio to act; the instrument's UVP does not), keep the controller on USB for
+> long unattended runs, and stay clear of the setup while a test runs.
+
+---
+
+## Companion docs
+
+| Doc | What's in it |
+|---|---|
+| [`HANDOVER.md`](HANDOVER.md) | **Read first.** Living session handover: current state, hardware facts, gotchas, open items |
+| [`FIRST_CONTACT.md`](FIRST_CONTACT.md) | Ordered bench checklist for working with the real EL15 |
+| [`QA_GUIDE.md`](QA_GUIDE.md) | Per-feature test matrix and procedures |
+| [`QA_REPORT.md`](QA_REPORT.md) | 2026-07-21 code audit + its resolution status |
+| [`RTEST_ACCURACY.md`](RTEST_ACCURACY.md) | R-test measurement methodology and remaining improvements |
+| [`CAPACITY_PLAN.md`](CAPACITY_PLAN.md) | Battery-test roadmap and phase status |
+| [`FEATURE_IDEAS.md`](FEATURE_IDEAS.md) | Full feature / UX / audio / buttons backlog |
+| [`UI_DESIGN_BRIEF.md`](UI_DESIGN_BRIEF.md) | v2 "Focus" UI spec (design-time brief) |

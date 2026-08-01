@@ -11,11 +11,12 @@
 // driver and an Arduino_ESP32QSPI bus; this is the same combination Waveshare's
 // demos use for this panel.
 //
-// is_shared_interface = true is REQUIRED, not cosmetic: with it false the
-// driver acquires the SPI bus lock once in begin() and never releases it, which
-// would block the SD card (a second device on the C6's only SPI host — see
-// sd_card.cpp) forever. Shared mode acquires/releases per draw instead, which
-// costs one lock round-trip per flush chunk.
+// is_shared_interface = true acquires/releases the SPI bus lock per draw instead
+// of holding it from begin() onwards, at the cost of one lock round-trip per
+// flush chunk. It was REQUIRED while the SD card was a second device on this same
+// SPI host; since 2026-07-24 the card runs on bit-banged software SPI (see
+// sd_card.cpp) and nothing else touches SPI2, so this could now be false for a
+// small flush speedup. Left true until someone re-verifies the panel on hardware.
 static Arduino_DataBus *g_bus = new Arduino_ESP32QSPI(
     LCD_QSPI_CS, LCD_QSPI_SCK, LCD_QSPI_D0, LCD_QSPI_D1, LCD_QSPI_D2, LCD_QSPI_D3,
     true /* is_shared_interface */);

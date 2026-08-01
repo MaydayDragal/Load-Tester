@@ -4,6 +4,17 @@ A design brief for a **new touchscreen UI** for a standalone hardware controller
 This document is self-contained: you do not need the source code to design from
 it. The goal is a layout that is **legible and tappable on a very small screen**.
 
+> **Read this as the visual language, not as a feature list.** It is a
+> *design-time* brief, written before the board's hardware was fully explored,
+> and the shipped firmware has since moved past it in several ways:
+> the built-in demo simulator in §1 was **removed** (bench-testing now uses the
+> Android simulator app over real BLE); there are now **two physical buttons**
+> (BOOT = emergency stop, PWR = sleep / load-safe power-off) contradicting §2's
+> "no physical buttons"; **audio feedback** exists (ES8311 codec); the draw
+> buffer is **1/7 frame**, not 1/8; and the screen set has grown to seven
+> (Monitor / Adjust / Graph / R-Test / Connect / Settings / Battery) with an
+> 8-tile Menu. For what the UI actually does today, see `QA_GUIDE.md` §5.
+
 ---
 
 ## 1. What the device is

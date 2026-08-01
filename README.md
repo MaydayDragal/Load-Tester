@@ -1,12 +1,24 @@
-# EL15 Load Control — Android
+# EL15 Load Control
 
-An Android app to control an **EL15 electronic load** (a DC "load tester") over
-Bluetooth Low Energy, from your phone.
-
-It re-implements the BLE protocol used by the desktop
+Tools for controlling an **EL15 electronic load** (a DC "load tester") over
+Bluetooth Low Energy. They re-implement the BLE protocol used by the desktop
 [DM40GUI](https://github.com/maj113/DM40GUI) project (see its
 [Device Support](https://github.com/maj113/DM40GUI/blob/master/README.md#device-support)
 section — the EL15 is the electronic load). No PC required.
+
+This repo holds three things:
+
+| Directory | What it is |
+|---|---|
+| [`app/`](app/) | **Android app** — control the load from your phone. The bulk of this README. |
+| [`firmware/`](firmware/) | **Standalone ESP32-C6 controller** — a Waveshare ESP32-C6-Touch-AMOLED-1.8 that drives the EL15 with no phone involved: BLE central, touchscreen instrument UI, resistance-sweep and battery-capacity engines, SD-card CSV reports, and a stack of safety supervisors. See [`firmware/README.md`](firmware/README.md). |
+| [`simulator/`](simulator/) | **Android BLE load simulator** — impersonates an EL15 over a real BLE link (fixed circuit or a full battery discharge curve) so either client can be bench-tested with no load hardware. |
+
+> ⚠️ **Known defect (app):** the Android app's command frames are missing the
+> trailing checksum byte that a real EL15 requires (see [Protocol](#protocol)
+> below). Telemetry works, but mode / setpoint / load commands are **silently
+> dropped by real hardware**. This was found and fixed in the ESP firmware on
+> 2026-07-24 and has not yet been ported back to the app.
 
 ## Interface — blueprint instrument panel
 
@@ -172,18 +184,37 @@ The app talks to the standard Nordic-style GATT service exposed by the EL15:
 | Notify | `0000fff1-0000-1000-8000-00805f9b34fb`   |
 | Write  | `0000fff3-0000-1000-8000-00805f9b34fb`   |
 
-**Commands** (written to FFF3, no response):
+**Commands** (written to FFF3, **write-no-response only**). The wire format is
+`AF 07 03 <cmd> <len> <data…> <checksum>`, where the checksum byte makes the
+**whole frame sum to 0 (mod 256)** — the same rule the status parser applies to
+incoming packets. A real EL15 silently drops any command that doesn't sum to zero.
 
-| Action        | Frame (hex)                         |
-|---------------|-------------------------------------|
-| Poll status   | `AF 07 03 08 00 3F`                 |
-| Load ON       | `AF 07 03 09 01 04`                 |
-| Load OFF      | `AF 07 03 09 01 00`                 |
-| Lock keypad   | `AF 07 03 09 01 01`                 |
-| Set mode      | `AF 07 03 03 01 <mode>`             |
-| Set setpoint  | `AF 07 03 04 04 <float32 LE>`       |
+| Action        | Frame (hex)                              |
+|---------------|------------------------------------------|
+| Poll status   | `AF 07 03 08 00 3F`                      |
+| Load ON       | `AF 07 03 09 01 04 39`                   |
+| Load OFF      | `AF 07 03 09 01 00 3D`                   |
+| Lock keypad   | `AF 07 03 09 01 01 3C`                   |
+| Set mode      | `AF 07 03 03 01 <mode> <cksum>`          |
+| Set setpoint  | `AF 07 03 04 04 <float32 LE> <cksum>`    |
 
-Mode IDs: CC `0x01`, CAP `0x02`, CV `0x09`, DCR `0x0A`, CR `0x11`, CP `0x19`.
+Mode IDs: CC `0x01`, CAP `0x02`, CV `0x09`, DCR `0x0A`, CR `0x11`, CP `0x19` —
+all six verified against a real unit.
+
+> The DM40GUI reference these were ported from hand-wrote its command constants
+> as prefix + value with **no checksum byte**, so only POLL (whose `0x3F` was
+> captured whole) ever worked. The ESP firmware fixes this
+> ([`el15_protocol.h`](firmware/src/el15_protocol.h) `frameChecksum()`); the
+> Android [`El15Protocol.kt`](app/src/main/java/com/loadtester/el15/El15Protocol.kt)
+> **does not yet** — its `LOAD_ON`/`LOAD_OFF`/`LOCK`/`modeCommand`/
+> `setpointCommand` still emit checksum-less frames.
+
+Two more real-hardware behaviors worth knowing for any client:
+
+- **Telemetry is poll-driven** — the device answers a POLL write with one status
+  frame; it does not free-run.
+- **Control writes must be paced** ≥50 ms apart and clear of the poll, or the
+  device drops the one that arrives too soon.
 
 **Status notification** (28 bytes, header `DF 07 03 08`, CRC = `sum(bytes) & 0xFF == 0`):
 

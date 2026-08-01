@@ -1,12 +1,30 @@
 # First Contact — Real EL15 Bench Checklist
 
-Ordered procedure for the first session with the real ALIENTEK EL15 (150 W / 60 V / 12 A).
-Until now every BLE behavior has only ever been exercised against the Android simulator.
+Ordered procedure for working with the real ALIENTEK EL15 (150 W / 60 V / 12 A).
 **BLOCKING** = do not proceed past a failure of this step. Work the list top to bottom.
 
 Derived from a code audit on 2026-07-22 (protocol cross-checked byte-for-byte against the
 DM40GUI reference, github.com/maj113/DM40GUI). Items marked *(fixed 2026-07-22)* refer to
 holes found in that audit and already patched — listed so you know they were considered.
+
+> ## Progress as of 2026-08-01
+>
+> **Phase 0 and Phase 1 are DONE** (session of 2026-07-24). Steps 1–14 passed on
+> the real unit, with three defects found and fixed on the bench:
+> the missing **command checksum** (step 9/10/11 all failed until every command
+> frame was made to sum to zero — see `HANDOVER.md` §10), a **connect crash**
+> from re-discovering GATT characteristics, and **dropped no-response writes**
+> that now require ≥50 ms pacing between control commands. SD read/write was
+> also proven in the same session.
+>
+> **Still to do: steps 15–16b (the safety drills) and all of Phase 2 (real
+> current).** No current has yet been drawn on the real unit. Start at step 15.
+>
+> Two corrections to the text below, from what was learned that day:
+> **step 13 is obsolete** — the poll default is now **50 ms (20 Hz)**, which was
+> measured as the device's practical maximum, so leave it there rather than at
+> 500 ms; and in **step 23** the SD card no longer shares the panel's SPI bus, so
+> there is no "shared-bus handover" to survive — just confirm the file.
 
 ## Phase 0 — before the EL15 is powered
 
@@ -74,8 +92,12 @@ holes found in that audit and already patched — listed so you know they were c
     nothing garbles, return to CC. Tomorrow's battery runs use the BATT screen (CC +
     local integration), never device CAP mode.
 
-13. *(advisory)* Leave the poll rate at the 500 ms default; probe faster rates only after
-    everything below passes.
+13. ~~*(advisory)* Leave the poll rate at the 500 ms default; probe faster rates only after
+    everything below passes.~~ **Done and superseded 2026-07-24:** the rate was swept
+    250→20 ms against the real unit. It produces **~17-19 fresh samples/s**, so **50 ms
+    (20 Hz) is the practical maximum** and is now the default — faster only refetches
+    repeated frames and floods the link (a 20 ms flood once dropped the board off USB
+    entirely, needing a physical unplug). Leave it at 20 Hz.
 
 14. **BLOCKING — BOOT e-stop dry run.** LOAD ON at open input → BOOT: serial
     `[btn] EMERGENCY STOP`, alarm, red banner, and the EL15 panel showing input OFF.
@@ -137,6 +159,11 @@ holes found in that audit and already patched — listed so you know they were c
     confirm "LOAD FORCED OFF" and input OFF on the panel — hand on the leads throughout.
     **No unattended run is permitted until this passes.**
 
-23. *(advisory)* **Save the first CSV.** Green `BATT_NNN.CSV` (or honest red "No card
-    detected"), then navigate screens to confirm the display survived the shared-SPI-bus
-    handover; open the CSV on a PC.
+23. *(advisory)* **Save the first CSV.** Green `BATT_NNN.CSV` (or an honest red reason —
+    "No card detected (reseat it)" / "Card not formatted (use FAT32)"), then open the CSV
+    on a PC and confirm the header carries the probe wiring and a real RTC timestamp.
+    The card is on its own bit-banged SPI pins now, so there is no bus handover for the
+    display to survive — but the save still blocks the loop task for ~1 s, so expect the
+    UI to sit on "Saving..." and then report. This UI Save path has **never been
+    exercised**; it is the single highest-value untested item in the firmware.
+    Also delete any leftover `SDTEST_00N.CSV` files from the SD bring-up session.

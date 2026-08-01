@@ -8,7 +8,8 @@
 //           display.cpp initialises for both — see touchInit().
 //   MCU   : ESP32-C6 (RISC-V, Wi-Fi 6 / BLE 5 / 802.15.4)
 //   RAM   : 512 KB on-chip HP SRAM. There is NO PSRAM on this board, which is
-//           why LVGL uses a partial (1/8 frame) draw buffer.
+//           why LVGL uses a partial (1/7 frame, 64-line) draw buffer — sized to
+//           leave NimBLE the contiguous heap it needs to connect (display.cpp).
 //   Also on board, currently unused by this firmware: QMI8658 6-axis IMU,
 //   RTC backup-battery pads.
 //
