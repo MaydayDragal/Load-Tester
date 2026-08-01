@@ -214,6 +214,17 @@ static void stopAll() {
   g_guard.disarm();
 }
 
+#ifdef EL15_RTUNE
+// Defined below (after the button handlers) but referenced from setup()'s
+// engine callbacks.
+namespace rtune {
+void onDone(const ResistanceTest::Result &r);
+void onFail(const char *msg);
+void begin();
+void tick();
+}  // namespace rtune
+#endif
+
 void setup() {
   Serial.begin(115200);
   prefs::begin();   // before display/audio: they start from the stored values
@@ -367,10 +378,22 @@ void setup() {
   };
   g_test.onComplete = [](const ResistanceTest::Result &r) {
     g_lastRTest = r;   // keep it for a later Save to SD
+#ifdef EL15_RTUNE
+    // The tuning harness owns the engine: report to serial and go straight to
+    // the next run, without the UI's auto-save writing a card file per sweep.
+    rtune::onDone(r);
+    return;
+#endif
     audio::success();
     ui::onTestComplete(r);
   };
-  g_test.onError    = [](const char *m) { audio::failure(); ui::onTestError(m); };
+  g_test.onError    = [](const char *m) {
+#ifdef EL15_RTUNE
+    rtune::onFail(m);
+    return;
+#endif
+    audio::failure(); ui::onTestError(m);
+  };
 
   g_batt.onProgress = [](float v, float i, float ah, float wh, float temp, uint32_t el, int ph) {
     ui::onBattProgress(v, i, ah, wh, temp, el, ph);
@@ -500,6 +523,153 @@ void setup() {
 #endif
 }
 
+#ifdef EL15_RTUNE
+// ---- R-test tuning harness (build-flag gated, not in normal builds) --------
+// Runs a matrix of sweeps back-to-back and prints one CSV row per run, so the
+// sweep parameters can be chosen from measured data instead of guesswork.
+//
+// The number that matters is NOT the sigma each fit reports about itself — it is
+// the run-to-run SPREAD of R across repeats of the same configuration. A fit can
+// be confidently wrong; only repetition shows that. Every configuration is
+// therefore run REPEATS times and the summary compares the two.
+//
+// Safety: the peak current here is deliberately far below what the fuse/ratings
+// would allow. Accuracy tuning is about repeatability, not amplitude, and the
+// source on the bench is not necessarily something that wants to be loaded hard.
+namespace rtune {
+
+struct Cfg {
+  uint32_t sweepS;
+  uint32_t pollMs;
+  float maxA;
+  uint32_t setpointMs;   // 0 = engine default (derived from the poll interval)
+  uint32_t settleMs;     // 0 = keep every sample
+  const char *name;
+};
+
+static const Cfg MATRIX[] = {
+#if defined(EL15_RTUNE_STAGE3)
+    // Ramp quality: how often the setpoint is re-commanded, and whether
+    // discarding the load's switch-on transient helps.
+    {30, 50, RTUNE_PEAK_A, 100,   0, "cad100"},
+    {30, 50, RTUNE_PEAK_A, 150,   0, "cad150"},
+    {30, 50, RTUNE_PEAK_A, 200,   0, "cad200"},
+    {30, 50, RTUNE_PEAK_A, 100, 750, "cad100+settle"},
+#elif defined(EL15_RTUNE_STAGE2)
+    {10,  50, RTUNE_PEAK_A, 0, 0, "10s@20Hz"},
+    {20,  50, RTUNE_PEAK_A, 0, 0, "20s@20Hz"},
+    {30,  50, RTUNE_PEAK_A, 0, 0, "30s@20Hz"},
+    {60,  50, RTUNE_PEAK_A, 0, 0, "60s@20Hz"},
+    {30, 100, RTUNE_PEAK_A, 0, 0, "30s@10Hz"},
+    {30, 250, RTUNE_PEAK_A, 0, 0, "30s@4Hz"},
+#else
+    // Stage 1: one short, gentle probe to characterise the source before
+    // deciding whether a fuller matrix is safe.
+    {10, 50, RTUNE_PEAK_A, 0, 0, "probe"},
+#endif
+};
+static const int N_CFG = (int)(sizeof(MATRIX) / sizeof(MATRIX[0]));
+#ifdef EL15_RTUNE_STAGE2
+static const int REPEATS = 3;
+#else
+static const int REPEATS = 2;
+#endif
+
+static int cfgIdx = 0, rep = 0;
+static bool active = false, waiting = false, done = false;
+static uint32_t nextAtMs = 0;
+static float rOf[N_CFG][8];      // measured R per repeat, for the spread summary
+static int rN[N_CFG];
+
+void summarise() {
+  Serial.println("[rtune] ===== SUMMARY (run-to-run spread is the real accuracy) =====");
+  Serial.println("[rtune] config,runs,mean_mohm,spread_mohm,spread_pct");
+  for (int c = 0; c < N_CFG; c++) {
+    if (rN[c] < 2) continue;
+    double sum = 0;
+    for (int k = 0; k < rN[c]; k++) sum += rOf[c][k];
+    double mean = sum / rN[c];
+    double var = 0;
+    for (int k = 0; k < rN[c]; k++) { double d = rOf[c][k] - mean; var += d * d; }
+    double sd = sqrt(var / (rN[c] - 1));
+    Serial.printf("[rtune] %s,%d,%.3f,%.3f,%.2f\n", MATRIX[c].name, rN[c],
+                  mean * 1000.0, sd * 1000.0,
+                  mean > 1e-9 ? sd / mean * 100.0 : 0.0);
+  }
+  Serial.println("[rtune] ===== END =====");
+}
+
+void startNext() {
+  const Cfg &c = MATRIX[cfgIdx];
+  g_ble.pollIntervalMs = c.pollMs;
+  g_test.pollIntervalMs = c.pollMs;
+  g_test.startCurrent = 0;
+  g_test.maxCurrent = c.maxA;
+  g_test.sweepSeconds = c.sweepS;
+  g_test.setpointMs = c.setpointMs;
+  g_test.settleMs = c.settleMs;
+  g_test.fourWire = false;
+  g_test.tareOhm = 0;
+  Serial.printf("[rtune] run %s rep %d/%d: %lu s ramp to %.2f A, poll %lu ms, setpoint %lu ms, settle %lu ms\n",
+                c.name, rep + 1, REPEATS, (unsigned long)c.sweepS, c.maxA,
+                (unsigned long)c.pollMs, (unsigned long)c.setpointMs, (unsigned long)c.settleMs);
+  waiting = true;
+  g_guard.arm(prefs::Data::RTEST);
+  g_test.start(30.0f);   // fuse rating high enough not to bind; maxCurrent rules
+}
+
+void onDone(const ResistanceTest::Result &r) {
+  if (!active) return;
+  const Cfg &c = MATRIX[cfgIdx];
+  Serial.printf("[rtune] RESULT,%s,%d,%.6f,%.6f,%.5f,%d,%.4f,%.4f,%.4f,%.3f,%.2f,%d,%s\n",
+                c.name, rep + 1, r.resistanceOhm, r.resistanceStdErr, r.rSquared,
+                r.rawSamples, r.openCircuitVoltage, r.minCurrent, r.maxCurrentSeen,
+                r.sagV, r.tempMax - r.tempMin, r.loadDropouts,
+                r.reliable ? "yes" : "no");
+  if (rN[cfgIdx] < 8) rOf[cfgIdx][rN[cfgIdx]++] = r.resistanceOhm;
+  waiting = false;
+  // Bail out if the source turns out not to be stiff enough for the current we
+  // are asking of it. A sag past 10 % of the open-circuit voltage means we are
+  // loading it near its limit, which is neither a good measurement nor a polite
+  // thing to keep doing to somebody's bench supply unattended.
+  if (r.openCircuitVoltage > 1.0f && r.sagV > 0.10f * r.openCircuitVoltage) {
+    Serial.printf("[rtune] STOPPING: %.2f V sag on a %.2f V source is >10%% - "
+                  "the source is not stiff enough for %.2f A\n",
+                  r.sagV, r.openCircuitVoltage, MATRIX[cfgIdx].maxA);
+    active = false; done = true;
+    summarise();
+    return;
+  }
+  // Let the wiring settle back to ambient between runs, so a later run does not
+  // inherit the previous one's self-heating.
+  nextAtMs = millis() + 4000;
+  if (++rep >= REPEATS) { rep = 0; cfgIdx++; }
+  if (cfgIdx >= N_CFG) { active = false; done = true; summarise(); }
+}
+
+void onFail(const char *msg) {
+  Serial.printf("[rtune] ABORTED: %s\n", msg);
+  active = false; waiting = false; done = true;
+  summarise();
+}
+
+void begin() {
+  Serial.println("[rtune] ===== R-TEST TUNING MATRIX =====");
+  Serial.println("[rtune] RESULT,config,rep,R_ohm,sigma_ohm,r2,samples,voc,imin,imax,sag,dTemp,dropouts,reliable");
+  for (int c = 0; c < N_CFG; c++) rN[c] = 0;
+  cfgIdx = 0; rep = 0; active = true; waiting = false; done = false;
+  nextAtMs = millis() + 1500;
+}
+
+void tick() {
+  if (!active || waiting) return;
+  if ((int32_t)(millis() - nextAtMs) < 0) return;
+  startNext();
+}
+
+}  // namespace rtune
+#endif  // EL15_RTUNE
+
 // ---- Physical buttons ------------------------------------------------------
 static void handleButtons() {
   display::ButtonEvent ev = display::pollButtons();
@@ -550,8 +720,44 @@ void loop() {
       Serial.printf("[ble] auto-connect to %s (type %u)\n",
                     prefs::get().lastAddr, (unsigned)prefs::get().lastAddrType);
       g_ble.connectTo(prefs::get().lastAddr, prefs::get().lastAddrType);
+#ifdef EL15_RTUNE
+      // Fail-safe for the unattended test build: if the previous session ended
+      // with the load energised (a reset mid-sweep), force it off the moment we
+      // are back on the link rather than waiting for somebody to tap a banner.
+      // The interactive firmware deliberately asks first; a headless test rig
+      // has nobody to ask.
+      if (g_ble.state() == El15Client::CONNECTED) {
+        Serial.println("[rtune] boot: forcing LOAD OFF before anything else");
+        for (int k = 0; k < 3; k++) { g_ble.setSetpoint(0); g_ble.setLoad(false); delay(120); }
+        prefs::clearInFlight();
+      }
+#endif
     }
   }
+#ifdef EL15_RTUNE
+  {
+    // NEVER auto-start. Opening a serial monitor resets this board (the
+    // USB-Serial/JTAG peripheral treats the DTR/RTS transitions as a reset
+    // request), and on 2026-08-01 that landed mid-sweep: the ESP rebooted with
+    // the load at ~1 A, the EL15 was left sinking with nothing commanding it,
+    // and it ran until its own protection tripped. So the matrix waits for a
+    // key press on the already-open port — by which time every reset that
+    // monitoring is going to cause has already happened, with the load off.
+    static bool started = false, prompted = false;
+    if (!started && g_ble.state() == El15Client::CONNECTED) {
+      if (!prompted) {
+        prompted = true;
+        Serial.println("[rtune] ready - press any key on this port to start the matrix");
+      }
+      if (Serial.available()) {
+        while (Serial.available()) Serial.read();
+        started = true;
+        rtune::begin();
+      }
+    }
+    rtune::tick();
+  }
+#endif
   g_test.tick();
   g_batt.tick();
   g_guard.tick();    // reconnect-and-force-off, if the link dropped hot

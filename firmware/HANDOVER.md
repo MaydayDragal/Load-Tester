@@ -586,6 +586,15 @@ The protocol is confirmed against a real unit now, not just the simulator.
   or the device drops the one that arrives too soon. `writeRaw` enforces this.
 - **All 6 mode opcodes verified** on hardware (CC 01, CV 09, CR 11, CP 19,
   CAP 02, DCR 0A) — commanded mode == device-reported `b5`.
+- **LOAD_ON at a 0.000 A CC setpoint does nothing.** The write is accepted
+  (`write OK`) but the device reports `load=0` and sinks no current, and it never
+  recovers on its own — a sweep starting from 0 A ran to completion with `I=0`
+  throughout and no usable data. **Always command a non-zero current before
+  LOAD_ON.** `resistance_test.h commandable()` floors the ramp at
+  `MIN_TEST_CURRENT` (0.05 A) for this reason, and the engine re-asserts LOAD_ON
+  (rate-limited to 1 Hz) if a mid-sweep packet ever reports the load off. The old
+  stepped ladder never hit this because its first level was `maxCurrent/n`,
+  never zero. Found 2026-08-01 on real hardware.
 
 ## 11. Poll-rate finding (2026-07-24)
 

@@ -63,6 +63,7 @@ class ResistanceTest {
     float peakPowerW = 0;
     float tempMin = 0, tempMax = 0;
     int maxFan = 0;
+    int loadDropouts = 0;   // times the load had to be re-asserted mid-sweep
     // What the slope actually measured, before the lead tare was taken off.
     // rawResistanceOhm is also what a tare run itself records.
     float rawResistanceOhm = 0;
@@ -99,6 +100,13 @@ class ResistanceTest {
 
   float safetyFactor = 0.8f;
   uint32_t pollIntervalMs = 50;
+  // How often the ramp re-commands the setpoint. 0 = derive it from the poll
+  // interval (see setpointStepMs). Every control write defers the next poll, so
+  // this trades ramp granularity against how many samples the sweep collects.
+  uint32_t setpointMs = 0;
+  // Ignore samples for this long after the load is switched on, to skip the
+  // regulator's start-up transient. 0 = use everything.
+  uint32_t settleMs = 0;
 
   static const uint32_t MIN_SWEEP_S = 5;
   static const uint32_t MAX_SWEEP_S = 900;
@@ -121,8 +129,10 @@ class ResistanceTest {
     if (running()) return;
     fuseRating_ = fuseRatingAmps;
     resetAccumulators();
-    vOcMeasured_ = 0; vRecent_ = 0;
+    vOcMeasured_ = 0; vRecent_ = 0; loadDropouts_ = 0;
     state_ = PRIMING;
+    primeStartMs_ = millis();
+    lastClearPushMs_ = 0;
     ble_->setMode(el15::MODE_CC);
     ble_->setSetpoint(0);
     ble_->setLoad(false);
@@ -139,10 +149,70 @@ class ResistanceTest {
   // Feed a live reading into the running test.
   void onStatus(const el15::Status &s) {
     if (!running() || !s.valid) return;
-    if (s.warning[0] != '\0') { abort_("Load protection tripped. Test stopped."); return; }
     vRecent_ = s.voltage;
-    if (state_ == PRIMING) { vOcMeasured_ = s.voltage; return; }
+
+    if (state_ == PRIMING) {
+      // A protection latched by a PREVIOUS run — a link drop or a controller
+      // reset that stranded the load, say — must not veto this one forever.
+      // Priming already commands mode CC / setpoint 0 / LOAD OFF, which is
+      // exactly the state that lets the device clear itself, so keep pushing
+      // that and give it a grace period before giving up. Only a trip that
+      // survives the grace period is a real reason not to start.
+      if (s.warning[0] != '\0') {
+        if (millis() - primeStartMs_ > FAULT_CLEAR_MS) {
+          abort_("Load protection will not clear. Check the setup, then retry.");
+          return;
+        }
+        if (millis() - lastClearPushMs_ > 400) {
+          lastClearPushMs_ = millis();
+          Serial.printf("[rtest] clearing latched protection (%s)...\n", s.warning);
+          ble_->setLoad(false);
+          ble_->setSetpoint(0);
+        }
+        // Do not let the prime timer expire while the device is still faulted,
+        // and do not trust this packet's voltage as an open-circuit reading.
+        timerAt_ = millis() + primeMs();
+        return;
+      }
+      vOcMeasured_ = s.voltage;
+      return;
+    }
+
+    // Mid-sweep a protection trip is real and immediate: current is flowing.
+    if (s.warning[0] != '\0') { abort_("Load protection tripped. Test stopped."); return; }
     if (state_ != SWEEPING) return;
+
+    // The load must actually be sinking for a sample to be part of the sweep.
+    // A packet reporting the load off is either the gap before LOAD_ON lands or
+    // a dropout, and its (0 A, Voc) point would drag the fit toward the
+    // intercept while telling us nothing about the slope. Re-assert LOAD_ON
+    // rather than silently sweeping a dead load, but no faster than once a
+    // second so this cannot become a command flood of its own.
+    if (!s.loadOn) {
+      if (millis() - lastOnPushMs_ > 1000) {
+        lastOnPushMs_ = millis();
+        loadDropouts_++;
+        Serial.printf("[rtest] load reported OFF mid-sweep (target %.3f A) - re-asserting\n",
+                      currentTarget_);
+        ble_->setSetpoint(currentTarget_);
+        ble_->setLoad(true);
+      }
+      if (onProgress)
+        onProgress(elapsedS(), (float)sweepMsEff_ / 1000.0f, currentTarget_,
+                   s.voltage, s.current, 0, false);
+      return;
+    }
+
+    // Optional start-up transient skip. The load has to establish regulation
+    // from off, and those first readings are of that transient rather than of
+    // the ramp. Discarded symmetrically in effect: they are all at the ramp's
+    // baseline current, so dropping them costs no span.
+    if (settleMs > 0 && millis() - tStart_ < settleMs) {
+      if (onProgress)
+        onProgress(elapsedS(), (float)sweepMsEff_ / 1000.0f, currentTarget_,
+                   s.voltage, s.current, 0, false);
+      return;
+    }
 
     // Running least squares. Keeping the six sums rather than the samples means
     // the fit is available at any instant and nothing grows during the sweep —
@@ -188,7 +258,7 @@ class ResistanceTest {
       uint32_t step = setpointStepMs();
       if (lastSetMs_ == 0 || millis() - lastSetMs_ >= step) {
         lastSetMs_ = millis();
-        currentTarget_ = clampToRatings(targetAt(el));
+        currentTarget_ = clampToRatings(commandable(targetAt(el)));
         ble_->setSetpoint(currentTarget_);
       }
       return;
@@ -215,10 +285,19 @@ class ResistanceTest {
 
   uint32_t primeMs() { return max(PRIME_MS, 2 * pollIntervalMs + 300); }
 
+  // Lowest current the load will actually accept as a CC operating point. Below
+  // this the EL15 reports the load off (see finishPriming), so the ramp floors
+  // its commanded value here even when the user asked to start at 0 A. The
+  // result reports the current range it MEASURED, so the floor is visible rather
+  // than hidden.
+  float commandable(float target) const { return max(target, MIN_TEST_CURRENT); }
+
   // One setpoint update per poll-and-a-bit. At the 20 Hz default this is 100 ms,
   // i.e. ~300 discrete setpoints across a 30 s sweep — 13 mA apart on a 4 A
   // ramp, which is smooth as far as the load is concerned.
-  uint32_t setpointStepMs() const { return max((uint32_t)100, pollIntervalMs + 50); }
+  uint32_t setpointStepMs() const {
+    return setpointMs > 0 ? setpointMs : max((uint32_t)100, pollIntervalMs + 50);
+  }
 
   float elapsedS() const { return state_ == SWEEPING ? (millis() - tStart_) / 1000.0f : 0; }
 
@@ -296,17 +375,27 @@ class ResistanceTest {
     float cap = safeMaxCurrent(fuseRating_, voc, safetyFactor);
     maxCurrent_ = (maxCurrent > 0) ? min(maxCurrent, cap) : cap;
     if (maxCurrent_ < MIN_TEST_CURRENT) { abort_("Safe test current too low - check the fuse rating."); return; }
-    // Keep a usable span: a start current too close to the peak leaves nothing
-    // to fit a slope through.
-    startCurrent_ = constrain(startCurrent, 0.0f, maxCurrent_ - MIN_TEST_CURRENT);
-    if (startCurrent_ < 0) startCurrent_ = 0;
+    // The ramp's baseline is the lowest current the load will actually hold, NOT
+    // zero. Interpolating from 0 and clipping on the way out left a flat,
+    // commanded-but-unreachable segment at each end of the triangle — a
+    // discontinuity in an otherwise smooth ramp, and dead time that collected
+    // samples at a single current. Starting the interpolation AT the floor makes
+    // the whole sweep linear and every sample useful.
+    startCurrent_ = constrain(startCurrent, MIN_TEST_CURRENT,
+                              max(maxCurrent_ - MIN_TEST_CURRENT, MIN_TEST_CURRENT));
 
     sweepMsEff_ = constrain(sweepSeconds, MIN_SWEEP_S, MAX_SWEEP_S) * 1000u;
 
     state_ = SWEEPING;
     tStart_ = millis();
     lastSetMs_ = millis();
-    currentTarget_ = clampToRatings(startCurrent_);
+    lastOnPushMs_ = millis();
+    // Command a real current BEFORE switching the load on. Verified on hardware
+    // 2026-08-01: the EL15 accepts LOAD_ON at a 0.000 A CC setpoint and then
+    // simply reports the load off — the whole sweep ran with I=0 and the fit had
+    // nothing to work with. The stepped ladder this replaced never hit it
+    // because its first level was maxCurrent/n, never zero.
+    currentTarget_ = clampToRatings(commandable(startCurrent_));
     ble_->setSetpoint(currentTarget_);
     ble_->setLoad(true);
   }
@@ -340,6 +429,7 @@ class ResistanceTest {
     res.tempMin = haveTemp_ ? tempMin_ : 0;
     res.tempMax = haveTemp_ ? tempMax_ : 0;
     res.maxFan = fanMax_;
+    res.loadDropouts = loadDropouts_;
 
     res.samples.reserve(NBINS);
     for (int k = 0; k < NBINS; k++) {
@@ -376,8 +466,12 @@ class ResistanceTest {
   El15Controller *ble_;
   State state_ = IDLE;
   TimerCb timerCb_ = NONE;
-  uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0;
+  static const uint32_t FAULT_CLEAR_MS = 4000;   // grace period to shed a stale trip
+
+  uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0, lastOnPushMs_ = 0;
+  uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0;
   uint32_t sweepMsEff_ = 30000;
+  int loadDropouts_ = 0;   // how often the load had to be re-asserted
 
   // Running regression sums — the whole sample history in six doubles.
   uint32_t n_ = 0;
