@@ -1469,14 +1469,12 @@ static void refreshRtest() {
                  "Capped at %.2f A: %g A fuse x 80%%, the EL15's 12 A / 150 W, and the "
                  "source voltage. The sweep will use the cap, not %.2f A.", cap, fuseRating, rtMaxA);
       } else if (peak > 0) {
-        // Each setpoint update defers the next poll, so the achievable sample
-        // rate is one per setpoint step, not one per poll interval. Quote the
-        // number the sweep will really collect.
-        int stepMs = LV_MAX(100, (pollMs > 0 ? pollMs : 50) + 50);
+        // The ramp re-commands at a fixed 10 Hz and no longer costs a poll, so
+        // the sample count follows the Settings sample rate directly.
         snprintf(hint, sizeof(hint),
                  "%.2f A up and back down over %d s, about %d readings. "
                  "Longer is steadier; shorter heats the wiring less.",
-                 peak, rtSweepS, rtSweepS * 1000 / stepMs);
+                 peak, rtSweepS, rtSweepS * 1000 / (pollMs > 0 ? pollMs : 50));
       } else {
         snprintf(hint, sizeof(hint), "Set a fuse rating - it sets the safe peak current.");
       }

@@ -189,7 +189,7 @@ class ResistanceTest {
     // rather than silently sweeping a dead load, but no faster than once a
     // second so this cannot become a command flood of its own.
     if (!s.loadOn) {
-      if (millis() - lastOnPushMs_ > 1000) {
+      if (millis() - lastOnPushMs_ > LOAD_REASSERT_MS) {
         lastOnPushMs_ = millis();
         loadDropouts_++;
         Serial.printf("[rtest] load reported OFF mid-sweep (target %.3f A) - re-asserting\n",
@@ -295,8 +295,14 @@ class ResistanceTest {
   // One setpoint update per poll-and-a-bit. At the 20 Hz default this is 100 ms,
   // i.e. ~300 discrete setpoints across a 30 s sweep — 13 mA apart on a 4 A
   // ramp, which is smooth as far as the load is concerned.
+  // The ramp re-commands the setpoint at a fixed 10 Hz, independent of the poll
+  // rate. It used to be derived from the poll interval because every control
+  // write cost a whole poll period; now that a command only holds the poll off
+  // by CTRL_POLL_GAP_MS, the two cadences are genuinely independent — 10 Hz of
+  // ramp AND the full 20 Hz of sampling. 100 ms is also comfortably above the
+  // 50 ms the device needs between control writes.
   uint32_t setpointStepMs() const {
-    return setpointMs > 0 ? setpointMs : max((uint32_t)100, pollIntervalMs + 50);
+    return setpointMs > 0 ? setpointMs : RAMP_STEP_MS;
   }
 
   float elapsedS() const { return state_ == SWEEPING ? (millis() - tStart_) / 1000.0f : 0; }
@@ -389,6 +395,9 @@ class ResistanceTest {
     state_ = SWEEPING;
     tStart_ = millis();
     lastSetMs_ = millis();
+    // Arm the re-assert timer so the FIRST check happens one interval into the
+    // sweep, not one interval after some later event — a LOAD_ON that never
+    // landed has to be caught at the start, where it costs the most.
     lastOnPushMs_ = millis();
     // Command a real current BEFORE switching the load on. Verified on hardware
     // 2026-08-01: the EL15 accepts LOAD_ON at a 0.000 A CC setpoint and then
@@ -466,6 +475,14 @@ class ResistanceTest {
   El15Controller *ble_;
   State state_ = IDLE;
   TimerCb timerCb_ = NONE;
+  static const uint32_t RAMP_STEP_MS = 100;      // 10 Hz setpoint updates
+  // How soon a load reported off is re-asserted. Measured on hardware: the
+  // INITIAL LOAD_ON does not always land, and at the old 1 s interval that lost
+  // the first second of the sweep — the whole low-current end of the ramp, which
+  // is where the fit most needs span (one such run reported a minimum current of
+  // 0.07 A instead of 0.05 and a 1.5% worse spread). 400 ms catches it while
+  // still being far longer than the 50 ms the device needs between commands.
+  static const uint32_t LOAD_REASSERT_MS = 400;
   static const uint32_t FAULT_CLEAR_MS = 4000;   // grace period to shed a stale trip
 
   uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0, lastOnPushMs_ = 0;

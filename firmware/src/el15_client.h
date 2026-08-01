@@ -31,6 +31,19 @@ class El15Client : public El15Controller {
   std::function<void(const char *, const char *)> onDeviceFound;
 
   uint32_t pollIntervalMs = 500;
+  // Minimum separation between a control write and the next poll. Two CONTROL
+  // writes still need CTRL_GAP_MS (50 ms) between them — that is the rule the
+  // device actually enforces by dropping the second — but a poll is a different
+  // opcode and needs less room. Smaller = more samples during a sweep; too
+  // small and the device answers a poll that crowds a setpoint change with a
+  // reading that has not caught up, which shows up as scatter in the fit.
+  // 25 ms measured best on real hardware (3-way A/B, 0.5 A / 10 s sweeps):
+  // 150 samples per 10 s against 87-95 at 60 ms, for the SAME fitted
+  // uncertainty. The extra samples come with proportionally noisier individual
+  // points (R2 0.979 vs 0.987), so sigma_R comes out a wash — but more points
+  // is the more robust place to be, and it is what makes a 20 Hz sample rate
+  // mean something during a sweep.
+  uint32_t ctrlPollGapMs = 25;
 
   void begin();
   void startScan(uint32_t seconds = 8);
@@ -113,6 +126,13 @@ class El15Client : public El15Controller {
   size_t frameLen_ = 0;
 
   uint32_t lastPollMs_ = 0;
+  // Earliest a poll may follow a control write. A control write used to reset
+  // lastPollMs_ outright, which cost a WHOLE poll interval every time — during
+  // a resistance sweep, which re-commands the setpoint at 10 Hz, that halved the
+  // sample rate (a 20 Hz poll delivered ~12 Hz of data). Holding the poll off by
+  // a short fixed gap instead keeps commands from being crowded without
+  // sacrificing the poll cadence the user asked for.
+  uint32_t pollHoldUntilMs_ = 0;
 
   char lastAddr_[24] = "";
   int lastAddrType_ = 0;

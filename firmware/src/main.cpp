@@ -544,6 +544,7 @@ struct Cfg {
   float maxA;
   uint32_t setpointMs;   // 0 = engine default (derived from the poll interval)
   uint32_t settleMs;     // 0 = keep every sample
+  uint32_t gapMs;        // control-write -> poll separation
   const char *name;
 };
 
@@ -551,21 +552,21 @@ static const Cfg MATRIX[] = {
 #if defined(EL15_RTUNE_STAGE3)
     // Ramp quality: how often the setpoint is re-commanded, and whether
     // discarding the load's switch-on transient helps.
-    {30, 50, RTUNE_PEAK_A, 100,   0, "cad100"},
-    {30, 50, RTUNE_PEAK_A, 150,   0, "cad150"},
-    {30, 50, RTUNE_PEAK_A, 200,   0, "cad200"},
-    {30, 50, RTUNE_PEAK_A, 100, 750, "cad100+settle"},
+    {10, 50, RTUNE_PEAK_A, 100, 0, 25, "gap25"},
+    {10, 50, RTUNE_PEAK_A, 100, 0, 40, "gap40"},
+    {10, 50, RTUNE_PEAK_A, 100, 0, 60, "gap60"},
+    
 #elif defined(EL15_RTUNE_STAGE2)
-    {10,  50, RTUNE_PEAK_A, 0, 0, "10s@20Hz"},
-    {20,  50, RTUNE_PEAK_A, 0, 0, "20s@20Hz"},
-    {30,  50, RTUNE_PEAK_A, 0, 0, "30s@20Hz"},
-    {60,  50, RTUNE_PEAK_A, 0, 0, "60s@20Hz"},
-    {30, 100, RTUNE_PEAK_A, 0, 0, "30s@10Hz"},
-    {30, 250, RTUNE_PEAK_A, 0, 0, "30s@4Hz"},
+    {10,  50, RTUNE_PEAK_A, 0, 0, 40, "10s@20Hz"},
+    {20,  50, RTUNE_PEAK_A, 0, 0, 40, "20s@20Hz"},
+    {30,  50, RTUNE_PEAK_A, 0, 0, 40, "30s@20Hz"},
+    {60,  50, RTUNE_PEAK_A, 0, 0, 40, "60s@20Hz"},
+    {30, 100, RTUNE_PEAK_A, 0, 0, 40, "30s@10Hz"},
+    {30, 250, RTUNE_PEAK_A, 0, 0, 40, "30s@4Hz"},
 #else
     // Stage 1: one short, gentle probe to characterise the source before
     // deciding whether a fuller matrix is safe.
-    {10, 50, RTUNE_PEAK_A, 0, 0, "probe"},
+    {10, 50, RTUNE_PEAK_A, 0, 0, 40, "probe"},
 #endif
 };
 static const int N_CFG = (int)(sizeof(MATRIX) / sizeof(MATRIX[0]));
@@ -608,11 +609,13 @@ void startNext() {
   g_test.sweepSeconds = c.sweepS;
   g_test.setpointMs = c.setpointMs;
   g_test.settleMs = c.settleMs;
+  g_ble.ctrlPollGapMs = c.gapMs;
   g_test.fourWire = false;
   g_test.tareOhm = 0;
   Serial.printf("[rtune] run %s rep %d/%d: %lu s ramp to %.2f A, poll %lu ms, setpoint %lu ms, settle %lu ms\n",
                 c.name, rep + 1, REPEATS, (unsigned long)c.sweepS, c.maxA,
                 (unsigned long)c.pollMs, (unsigned long)c.setpointMs, (unsigned long)c.settleMs);
+  Serial.printf("[rtune]   ctrl->poll gap %lu ms\n", (unsigned long)c.gapMs);
   waiting = true;
   g_guard.arm(prefs::Data::RTEST);
   g_test.start(30.0f);   // fuse rating high enough not to bind; maxCurrent rules

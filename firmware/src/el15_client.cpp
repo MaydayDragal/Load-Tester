@@ -271,6 +271,9 @@ void El15Client::writeRaw(const uint8_t *d, size_t n) {
   if (isCtrl) {
     static const uint32_t CTRL_GAP_MS = 50;   // > one BLE connection interval
     static uint32_t lastCtrlMs = 0;
+    // (CTRL_POLL_GAP_MS, used below, is the smaller separation a POLL needs from
+    // a control write — a poll is a different opcode, so it does not collide the
+    // way two control writes do.)
     uint32_t since = millis() - lastCtrlMs;
     if (lastCtrlMs && since < CTRL_GAP_MS) delay(CTRL_GAP_MS - since);
     lastCtrlMs = millis();
@@ -278,7 +281,11 @@ void El15Client::writeRaw(const uint8_t *d, size_t n) {
 
   bool withResp = writeChar_->canWrite();
   bool ok = writeChar_->writeValue(const_cast<uint8_t *>(d), n, withResp);
-  if (isCtrl) lastPollMs_ = millis();   // keep the next poll off this command
+  // Keep the next poll clear of this command, but only by a short gap — NOT by a
+  // whole poll interval, which is what resetting lastPollMs_ used to do. The
+  // device drops a no-response write that lands right behind another one; it
+  // does not need the line quiet for 50-500 ms.
+  if (isCtrl) pollHoldUntilMs_ = millis() + ctrlPollGapMs;
 
   // Log control writes, but not the twice-a-second poll, so the serial log stays
   // readable while still showing every mode/setpoint/load command.
@@ -413,7 +420,8 @@ void El15Client::loopTick() {
 
 #ifndef EL15_NO_POLL
   uint32_t now = millis();
-  if (now - lastPollMs_ >= pollIntervalMs) {
+  if (now - lastPollMs_ >= pollIntervalMs &&
+      (int32_t)(now - pollHoldUntilMs_) >= 0) {
     lastPollMs_ = now;
     poll();
   }
