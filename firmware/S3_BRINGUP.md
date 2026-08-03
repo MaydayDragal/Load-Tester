@@ -11,7 +11,9 @@ step depends only on the ones before it. Work down it with the board on the
 bench; anything that fails tells you which assumption in `src/board_s3_lcd35.h`
 was wrong, and the "if it fails" column says where to look first.
 
-**Related docs:** [`HANDOVER.md`](HANDOVER.md) §0 for where the project stands,
+**Related docs:** [`S3_UI_HANDOVER.md`](S3_UI_HANDOVER.md) for the UI designer's
+view of this panel (geometry, performance budget, what IPS changes),
+[`HANDOVER.md`](HANDOVER.md) §0 for where the project stands,
 [`QA_GUIDE.md`](QA_GUIDE.md) for the per-feature test matrix (written against the
 C6 board — the *behaviour* it describes should be identical here),
 [`FIRST_CONTACT.md`](FIRST_CONTACT.md) for the safe order of approaching a real

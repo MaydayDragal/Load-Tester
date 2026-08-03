@@ -4,6 +4,13 @@ A design brief for a **new touchscreen UI** for a standalone hardware controller
 This document is self-contained: you do not need the source code to design from
 it. The goal is a layout that is **legible and tappable on a very small screen**.
 
+> ⚠️ **Designing for the 3.5″ (ESP32-S3) build? Read
+> [`S3_UI_HANDOVER.md`](S3_UI_HANDOVER.md) alongside this.** This brief describes
+> the 1.8″ AMOLED panel, and its central argument — §3's "this screen is TINY" —
+> **does not hold there**. That panel has 3.6× the physical area at half the
+> pixel density, so the sizing advice below will mislead you. The visual language
+> and the device context carry over; the dimensions do not.
+
 > **Read this as the visual language, not as a feature list.** It is a
 > *design-time* brief, written before the board's hardware was fully explored,
 > and the shipped firmware has since moved past it in several ways:
