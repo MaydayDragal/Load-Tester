@@ -4,8 +4,8 @@ Living handover for the **standalone ESP32-C6 firmware** (`firmware/`) that turn
 a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
-**Last updated:** 2026-08-01.
-**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `923e266`.
+**Last updated:** 2026-08-03.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `b559d6b`.
 `origin/main` and `origin/claude/…` are kept at the same commit, and pushing the
 branch does NOT move main — push both.
 
@@ -19,20 +19,23 @@ eject), the flash-backed datapoint log, and the **continuous R-test sweep — no
 measured, not merely compiled**: 0.5 A / 10 s, repeats agreeing to 0.18–0.9 %,
 with σ_R honest to within ~1.4× of the true run-to-run spread (§10).
 
-**Built but never run with real current:** the battery capacity test in every
-form — pause/resume, rated-capacity metrics, auto-save, the per-sample CSV, and
-now the charge-state time estimate and pack-resistance measurement — plus the
-link guard against a genuine unattended drop.
+**Also proven 2026-08-03 — the capacity test, with real current at last:** a
+92 Ah lead-acid discharged at 4.6 A (0.05C) for 13 842 s. 17.68 Ah, 212 Wh,
+SoH 19.2 %, pack resistance 12.6 mohm, stopped on its own at the 10.50 V cutoff.
+The engine, the auto-save, the C-rate chips and the charge-state model all did
+what they were built to do. The **SD card did not** — it lost 22 KB of the
+report while reporting success (§16).
+
+**Still never exercised:** pause/resume and the link guard against a genuine
+unattended drop.
 
 **Highest-value work next, in order:**
 
-1. **Run a capacity test with real current.** Nothing about it has been. One
-   small protected cell with the cutoff set high is enough. Now also the only way
-   to check the charge-state time estimate: watch that the ETA settles within the
-   first ~10 % of charge travel, that `[batt] pack+lead resistance …` reports a
-   plausible figure, and that the countdown lands near zero at the actual cutoff.
-2. **Tap the SD Save buttons.** The path underneath is verified; the buttons
-   themselves still never have been.
+1. **Replace the SD card and re-verify** (§16). It silently dropped two 16 KB
+   regions of a 300 KB file. Re-run `EL15_SDTEST` on the new one, and consider
+   the read-back verify that §16 leaves open.
+2. **Drill the safety layers** — link-guard hot drop, crash recovery, PWR
+   long-press. None has fired for real. `FIRST_CONTACT.md` steps 15–16b.
 3. **Finish the R-test sweep matrix** (duration 10/30/60 s × sample rate
    20/10/4 Hz). Cut short when the bench source collapsed — §10.
 4. **Port the command checksum to the Android app.** `El15Protocol.kt` still
@@ -45,6 +48,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-03 | **First capacity run with real current** — 92 Ah lead-acid, 4.6 A (0.05C), 13 842 s, 17.68 Ah, SoH 19.2 %, pack resistance 12.6 mohm. The engine, the C-rate chips and the charge-state model all worked. Its `BATT_007.CSV` came back with **22 KB of random bytes in two 16 KB-aligned regions — the SD card silently lost writes it had acknowledged** (§16). Added `tools/repair_report_csv.py`, and `saveCsv` now checks `sync()`/`close()` instead of discarding their result. |
 | 2026-08-01 | **Probe wiring went device-wide.** 2-wire/4-wire + lead resistance moved out of the R-test into **Settings ▸ Probe wiring** and are now applied to every mode: `main.cpp compensateProbe()` adds `I × R_lead` back onto each status packet before it fans out. Biggest real effect is on the capacity test — its cutoff was firing at the load's terminals, so a 2-wire rig stopped early and under-reported the pack. The R-test is deliberately excluded (double-subtraction — §14). |
 | 2026-08-01 | **Ten chemistries** (added LiPo HV, LTO, Na-ion, NiCd, alkaline; **lead-acid fixed at 12 V** — the only size this bench uses), each with its voltage range and a max cell count that keeps a full pack under 60 V. Picker rebuilt as one `lv_btnmatrix` after the chip version cost 6 KB of the BLE heap margin (§13). NVS battery keys bumped, since the chemistry indices moved. |
 | 2026-08-01 | **Capacity test: real time remaining + C-rate from pack size.** New `battery_model.h` (per-chemistry OCV-vs-charge curves, standard test C-rates). The ETA now measures pack internal resistance from the switch-on sag, reads charge state off the curve, learns the pack's capacity during the run, and counts down to the CUTOFF — so it works with no rated capacity and no longer assumes a full pack. Setup gained C-rate chips that set the current from the rated capacity. `CAPACITY_PLAN.md` §4b/§4c. **Compile-clean only — no capacity run has ever drawn real current.** |
@@ -245,10 +249,11 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 | **SD write path incl. FAT timestamps + re-init after eject** | ✅ 2026-08-01 (via `EL15_SDTEST`) |
 | **Flash datapoint log** — mount, tier schedule, replay | ✅ 2026-08-01 |
 | **R-test continuous sweep with real current** | ✅ 2026-08-01 — 0.5 A, 0.18–0.9 % run-to-run (§10) |
-| **SD Save from the UI buttons** (now also automatic on completion) | ❌ never exercised |
-| **Capacity test with real current** — any part of it | ❌ never done |
-| **Pause/resume, rated-capacity metrics, running-test chip** | ❌ compile-clean, needs a real run |
-| **Charge-state time estimate, pack-resistance measurement, C-rate chips** | ❌ compile-clean, needs a real run — see §14 |
+| **SD Save from the UI buttons** (automatic on completion) | ✅ 2026-08-03 — wrote BATT_007.CSV (the CARD then lost 22 KB of it, §16) |
+| **Capacity test with real current** | ✅ 2026-08-03 — 92 Ah lead-acid, 4.6 A, 17.68 Ah, SoH 19.2 % |
+| Rated-capacity metrics, running-test chip | ✅ 2026-08-03 | 
+| Pause/resume | ❌ compile-clean, still never exercised |
+| **Charge-state time estimate, pack-resistance measurement, C-rate chips** | ✅ 2026-08-03 — all three exercised on the 92 Ah run |
 | Link guard, crash recovery, brownout auto-off, load-safe power-off | ❌ never fired for real |
 | NVS persistence, burn-in shift/dim, NTP sync, Kelvin + tare | ❌ compile-clean only |
 
@@ -729,3 +734,46 @@ New to the tree? `README.md` (what it is and how to build) → this file §0/§3
 `QA_GUIDE.md` is the reference you come back to per feature.
 
 *Everything is committed and merged to `main`.*
+
+## 16. The SD card silently loses writes (2026-08-03)
+
+`BATT_007.CSV` — the first real-current capacity run, 317 627 B — came off the
+card with two regions of pure-random bytes:
+
+| file offset | length | aligned to |
+|---|---|---|
+| 114688 – 131071 | 16384 B (exactly 16 KB) | 16 KB, offset 7 |
+| 311296 – EOF | 6331 B | 16 KB, offset 19 |
+
+**It is the card, not the firmware.** The chain of evidence:
+
+- Both regions are aligned to, and sized in, the card's **16 KB allocation
+  unit**. Nothing in the firmware has 16 KB granularity — SdFat's cache is 512 B,
+  the sample-log batch is 768 B, `fpf()`'s buffer is 192 B.
+- The byte accounting across each gap is **exact**: the missing bytes are
+  precisely the rows that belong at those offsets (289 rows at t=4028–4604, and
+  the tail from t=13428). So the firmware generated and submitted every byte.
+- **`USE_SD_CRC=1`.** A corrupted SPI transfer would have been rejected by the
+  card and surfaced as a write error, and `report.h` checks `getWriteError()`
+  after every row — the replay would have stopped and `saveCsv` would have
+  DELETED the file rather than saving it. None of that happened, so the card
+  acknowledged every write.
+- The garbage is uniformly random — 7.99 bits/byte, no repeated 16-byte blocks,
+  no recoverable text. Recycled deleted-file data has structure; erased flash is
+  0x00/0xFF. Random is what an FTL returns for a page it never actually
+  programmed.
+
+So the card took ~22 KB of writes, said OK, and did not retain them. Treat this
+card as suspect — it is the same one that was "verified" during bring-up, but
+that test wrote ~200-byte files; this was the first time anything asked it for
+300 KB. **Replace it before the next long run**, and re-run `EL15_SDTEST`.
+
+- `tools/repair_report_csv.py` strips the garbage from a damaged report, keeps
+  every intact row and marks the holes. It recovered 93 % of BATT_007.
+- The **summary block is computed by the instrument, not from the datapoint
+  rows**, so capacity/energy/duration/SoH survived intact. That separation is
+  worth keeping.
+- **Still open:** nothing verifies a report after writing it. A read-back +
+  compare is the only thing that would have caught this at the time, and it
+  roughly doubles save duration (~10 s → ~20 s for a file this size). Not
+  implemented — it is a deliberate cost/benefit call, not an oversight.

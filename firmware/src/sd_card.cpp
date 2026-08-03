@@ -227,8 +227,15 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
   }
   bool ok = body(f);
   if (f.getWriteError()) ok = false;
-  f.sync();          // flush data + directory entry so a pulled card keeps them
-  f.close();
+  // sync() is where the LAST cache block and the directory entry actually reach
+  // the card, and close() flushes again — so they are the most likely place for a
+  // late failure, and both were being called for their side effect with their
+  // result thrown away. That made "the tail of the file never landed" a silent
+  // outcome, which is exactly what this module exists not to do: a report is
+  // either written or honestly reported as failed.
+  if (!f.sync()) ok = false;
+  if (f.getWriteError()) ok = false;
+  if (!f.close()) ok = false;
   if (!ok) g_sd.remove(name);   // no half-written report left claiming to be a result
 
   if (!ok) {
