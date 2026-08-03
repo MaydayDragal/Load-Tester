@@ -207,6 +207,8 @@ static lv_obj_t *menuOverlay, *kpOverlay, *pickerOverlay;
 static lv_obj_t *stDot, *stConnLabel, *stConnGroup, *stBack, *stBackLabel, *stMenuBtn;
 // "R-TEST 4/8" / "BATT 01:23" chip: the way back to a test you navigated away from.
 static lv_obj_t *stTestChip, *stTestChipLbl;
+// Controller-battery indicator in the status strip (the ESP board's own pack).
+static lv_obj_t *stBattGroup, *stBattIcon, *stBattLbl;
 static lv_obj_t *infoBar, *ibPower, *ibFan, *ibTemp, *ibRuntime, *ibExtra;
 static lv_obj_t *faultBanner, *faultTitle, *faultMsg;
 // The fault banner doubles as the emergency-stop acknowledgement. When shown
@@ -649,6 +651,28 @@ static void buildStatusStrip() {
   lv_obj_center(stTestChipLbl);
   lv_obj_add_event_cb(stTestChip, [](lv_event_t *) { showActiveTest(); }, LV_EVENT_CLICKED, nullptr);
   lv_obj_add_flag(stTestChip, LV_OBJ_FLAG_HIDDEN);
+
+  // Controller battery. This is the ESP board's OWN pack, not the battery under
+  // test — the two are easy to confuse on a battery tester, so this sits in the
+  // chrome (which is always about the controller) rather than anywhere near the
+  // capacity readouts, and its tap goes to Settings where it is spelled out in
+  // full. Hidden entirely when the board is running with no pack fitted.
+  //
+  // Fed from main.cpp's existing 1 Hz brownout poll via onControllerBattery()
+  // rather than reading the PMIC itself: the AXP2101 shares the I2C bus with the
+  // touch controller, and a third periodic reader would add contention to a bus
+  // that already NACKs occasionally, for numbers that are already in hand.
+  stBattGroup = cont(strip);
+  lv_obj_set_size(stBattGroup, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(stBattGroup, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(stBattGroup, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(stBattGroup, 4, 0);
+  lv_obj_add_flag(stBattGroup, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_ext_click_area(stBattGroup, 10);
+  lv_obj_add_event_cb(stBattGroup, [](lv_event_t *) { showScreen(SCR_SET); }, LV_EVENT_CLICKED, nullptr);
+  stBattIcon = lbl(stBattGroup, LV_SYMBOL_BATTERY_EMPTY, COL_MUTED, F14);
+  stBattLbl = lbl(stBattGroup, "--", COL_MUTED, F14);
+  lv_obj_add_flag(stBattGroup, LV_OBJ_FLAG_HIDDEN);   // until the first reading
 
   stMenuBtn = flatBtn(strip);
   // Modest drawn size (a 38 px-tall button rode 2 px under the glass curve);
@@ -2255,6 +2279,56 @@ static void buildSettings() {
     prefs::flush();   // a deliberate restart shouldn't lose the last edit
     ESP.restart();
   }, LV_EVENT_CLICKED, nullptr);
+}
+
+// ---- Controller battery indicator ------------------------------------------
+// Called at 1 Hz from main.cpp's brownout poll, which already has these numbers.
+// Loop task, like everything else that touches LVGL.
+void onControllerBattery(int percent, int milliVolt, int chargeState, bool present, bool usb) {
+  if (!stBattGroup) return;   // a reading can arrive before the UI is built
+  // No pack fitted: the board is on USB alone, and a "0 %" would read as a flat
+  // battery rather than as no battery. Show nothing at all.
+  if (!present) {
+    lv_obj_add_flag(stBattGroup, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  lv_obj_clear_flag(stBattGroup, LV_OBJ_FLAG_HIDDEN);
+
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  // AXP2101 charger status: 1-3 = charging, 4 = charged. Both mean "on external
+  // power", which is worth showing distinctly on a bench instrument — "am I
+  // still running off the pack?" is exactly the question this indicator should
+  // answer without a trip into Settings.
+  const bool charging = usb && chargeState >= 1 && chargeState <= 3;
+  const bool onWall = usb && chargeState == 4;   // topped up, still plugged in
+
+  char txt[8];
+  snprintf(txt, sizeof(txt), "%d%%", percent);
+  setTextIf(stBattLbl, txt);
+
+  // A charging pack shows the bolt rather than a level glyph: while current is
+  // flowing in, the level is rising and the exact segment is the least
+  // interesting thing about it.
+  const char *icon = charging              ? LV_SYMBOL_CHARGE
+                   : percent >= 90         ? LV_SYMBOL_BATTERY_FULL
+                   : percent >= 65         ? LV_SYMBOL_BATTERY_3
+                   : percent >= 40         ? LV_SYMBOL_BATTERY_2
+                   : percent >= 15         ? LV_SYMBOL_BATTERY_1
+                                           : LV_SYMBOL_BATTERY_EMPTY;
+  setTextIf(stBattIcon, icon);
+
+  // Colour thresholds are the ones the brownout guard actually acts on
+  // (main.cpp CRIT_PCT = 8), so red here means "this is about to force LOAD OFF"
+  // rather than a decorative warning. Amber is the band where an unattended
+  // multi-hour discharge is worth reconsidering.
+  lv_color_t c = (charging || onWall) ? COL_GREEN
+               : percent <= 8         ? COL_RED
+               : percent <= 20        ? COL_AMBER
+                                      : COL_MUTED;
+  lv_obj_set_style_text_color(stBattIcon, c, 0);
+  lv_obj_set_style_text_color(stBattLbl, c, 0);
+  (void)milliVolt;   // shown in full on the Settings battery card
 }
 
 // Refresh the live Settings values (1 Hz timer; cheap no-op off-screen).

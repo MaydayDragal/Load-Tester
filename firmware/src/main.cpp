@@ -169,6 +169,22 @@ static void monitorPower() {
   if (!display::batteryStats(pct, mV, chg, present)) return;
   bool usb = display::usbPresent();
 
+  // Feed the status-strip indicator from this poll. It has to happen BEFORE the
+  // not-critical early return below, which is the path taken almost every
+  // second — otherwise the indicator would only ever update while the battery
+  // was already critical.
+  ui::onControllerBattery(pct, mV, chg, present, usb);
+
+  // One-shot at the first successful read: says whether a pack is even fitted,
+  // which is the difference between "the indicator is broken" and "the indicator
+  // is correctly showing nothing".
+  static bool loggedBatt = false;
+  if (!loggedBatt) {
+    loggedBatt = true;
+    Serial.printf("[pmic] controller battery: %s, %d%%, %d mV, charge=%d, usb=%d\n",
+                  present ? "present" : "ABSENT (running on USB)", pct, mV, chg, (int)usb);
+  }
+
   bool crit = present && !usb &&
               (pct <= CRIT_PCT || (mV > 2500 && mV <= CRIT_MV));  // mV range guards a garbled read
   if (!crit) {
