@@ -184,6 +184,141 @@ namespace {
 
 // Next free NNN for `prefix`: one past the highest <prefix>_NNN.* already on the
 // card, so a save never overwrites an earlier report.
+// ---- Write verification ----------------------------------------------------
+// BATT_007.CSV (2026-08-03) came off the card with two 16 KB regions replaced by
+// random bytes. Every byte had left the controller intact and the card had
+// ACKNOWLEDGED all of them — USE_SD_CRC would have rejected a corrupted transfer
+// and surfaced a write error, which would have deleted the file instead of
+// saving it. The card simply did not retain ~22 KB of what it accepted, and
+// nothing here could tell.
+//
+// So a report is no longer trusted because the writes returned success: it is
+// checksummed on the way out, read back off the card, and checksummed again.
+// That is the only check that can catch a card which lies, and this module's
+// whole contract is that a failed save is never reported as a save.
+//
+// Cost: the read-back roughly doubles save time (a 300 KB capacity report goes
+// from ~11 s to ~20 s of blocked loop task). That is a deliberate trade — the
+// alternative is silently losing 7 % of a four-hour discharge, which is what
+// happened.
+const size_t VCHUNK = 8192;      // verification granularity
+const int VMAX_CHUNKS = 64;      // 8 KB x 64 = 512 KB, far past any report we write
+
+// CRC-32, reflected, polynomial 0xEDB88320 — the same one zip/PNG use, so a
+// value logged here can be checked against any desktop tool. Bitwise rather than
+// table-driven: 8 shifts per byte over 300 KB is ~0.15 s, invisible next to the
+// ~10 s the card itself takes, and it costs no flash for a table.
+uint32_t crc32(uint32_t crc, const uint8_t *d, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    crc ^= d[i];
+    for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1)));
+  }
+  return crc;
+}
+
+// A Print that forwards to the file while checksumming what went through it, in
+// fixed-size chunks. Chunked rather than one whole-file CRC so a mismatch says
+// WHERE the card lost data — the 2026-08-03 fault would have printed "chunk 14
+// and chunk 38 differ", which took a byte-level analysis to establish by hand.
+class VerifyingPrint : public Print {
+ public:
+  explicit VerifyingPrint(Print &sink) : sink_(sink) {
+    for (int i = 0; i < VMAX_CHUNKS; i++) crc_[i] = 0xFFFFFFFFu;
+  }
+  using Print::write;
+  size_t write(uint8_t b) override { return write(&b, 1); }
+  size_t write(const uint8_t *buf, size_t len) override {
+    size_t w = sink_.write(buf, len);
+    accumulate(buf, w);
+    // report.h aborts its row loop on getWriteError(), and it is handed THIS
+    // object rather than the file — so the file's error state has to surface here
+    // or a mid-write failure would go unnoticed.
+    if (sink_.getWriteError()) setWriteError(sink_.getWriteError());
+    return w;
+  }
+  void flush() override { sink_.flush(); }
+
+  uint32_t total() const { return total_; }
+  bool overflowed() const { return overflow_; }
+  uint32_t chunk(int i) const { return crc_[i]; }
+
+ private:
+  void accumulate(const uint8_t *b, size_t n) {
+    while (n) {
+      size_t idx = total_ / VCHUNK;
+      size_t room = VCHUNK - (total_ % VCHUNK);
+      size_t take = n < room ? n : room;
+      if (idx < (size_t)VMAX_CHUNKS) crc_[idx] = crc32(crc_[idx], b, take);
+      else overflow_ = true;
+      total_ += take;
+      b += take;
+      n -= take;
+    }
+  }
+  Print &sink_;
+  uint32_t crc_[VMAX_CHUNKS];
+  uint32_t total_ = 0;
+  bool overflow_ = false;
+};
+
+// Read the file back off the card and compare it, chunk by chunk, with what we
+// believe we wrote. Logs the byte range of every chunk that differs.
+bool verifyOnCard(const char *name, const VerifyingPrint &vp) {
+  File32 f;
+  if (!f.open(name, O_RDONLY)) {
+    Serial.printf("[sd] verify: cannot reopen %s\n", name);
+    return false;
+  }
+  uint32_t onCard = f.fileSize();
+  if (onCard != vp.total()) {
+    Serial.printf("[sd] verify FAILED: %s is %lu B on the card, wrote %lu B\n",
+                  name, (unsigned long)onCard, (unsigned long)vp.total());
+    f.close();
+    return false;
+  }
+
+  uint8_t buf[512];
+  uint32_t crc = 0xFFFFFFFFu, pos = 0;
+  int bad = 0;
+  bool ok = true;
+  while (pos < onCard) {
+    size_t room = VCHUNK - (pos % VCHUNK);
+    size_t want = room < sizeof(buf) ? room : sizeof(buf);
+    if (want > onCard - pos) want = onCard - pos;
+    int got = f.read(buf, want);
+    if (got <= 0) {
+      Serial.printf("[sd] verify FAILED: read error at byte %lu of %s\n",
+                    (unsigned long)pos, name);
+      ok = false;
+      break;
+    }
+    crc = crc32(crc, buf, (size_t)got);
+    pos += (uint32_t)got;
+    // End of a chunk (or of the file): settle up.
+    if (pos % VCHUNK == 0 || pos == onCard) {
+      int idx = (int)((pos - 1) / VCHUNK);
+      if (idx < VMAX_CHUNKS && crc != vp.chunk(idx)) {
+        Serial.printf("[sd] verify MISMATCH: bytes %lu..%lu of %s\n",
+                      (unsigned long)((uint32_t)idx * VCHUNK),
+                      (unsigned long)(pos - 1), name);
+        ok = false;
+        if (++bad >= 8) {   // enough to characterise it; do not flood the log
+          Serial.println("[sd] verify: further mismatches suppressed");
+          break;
+        }
+      }
+      crc = 0xFFFFFFFFu;
+    }
+    // The read takes seconds over the bit-banged link. Yield so the idle task
+    // keeps its watchdog fed — the same reason samplelog::replay() does.
+    if ((pos & 0x1FFF) == 0) delay(1);
+  }
+  f.close();
+  if (ok) Serial.printf("[sd] verify OK: %s, %lu B read back and matched\n",
+                        name, (unsigned long)onCard);
+  return ok;
+}
+
 int nextIndex(const char *prefix) {
   int best = 0;
   size_t plen = strlen(prefix);
@@ -208,44 +343,83 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
              char *msg, size_t msgLen) {
   if (!mount(msg, msgLen)) return false;
 
-  int idx = nextIndex(prefix);
-  if (idx > 999) {   // rather than silently overwriting report 001
+  int base = nextIndex(prefix);
+  if (base > 999) {   // rather than silently overwriting report 001
     snprintf(msg, msgLen, "999 %s reports on card - delete some", prefix);
     return false;
   }
-  char name[24];
-  snprintf(name, sizeof(name), "%s_%03d.CSV", prefix, idx);
 
-  File32 f;
-  if (!f.open(name, O_WRITE | O_CREAT | O_TRUNC)) {
-    // Could be a locked/full card — or one that was pulled since the last save
-    // and is still serving a cached FAT. Drop the mount either way so the next
-    // attempt re-inits rather than failing forever against a dead handle.
-    invalidate();
-    snprintf(msg, msgLen, "Cannot write (card removed, locked or full)");
-    return false;
-  }
-  bool ok = body(f);
-  if (f.getWriteError()) ok = false;
-  // sync() is where the LAST cache block and the directory entry actually reach
-  // the card, and close() flushes again — so they are the most likely place for a
-  // late failure, and both were being called for their side effect with their
-  // result thrown away. That made "the tail of the file never landed" a silent
-  // outcome, which is exactly what this module exists not to do: a report is
-  // either written or honestly reported as failed.
-  if (!f.sync()) ok = false;
-  if (f.getWriteError()) ok = false;
-  if (!f.close()) ok = false;
-  if (!ok) g_sd.remove(name);   // no half-written report left claiming to be a result
+  // Files written but rejected by verification. Kept ON the card until an attempt
+  // succeeds, deliberately: a retry then allocates FRESH clusters instead of the
+  // ones the card just failed to retain, which is the difference between working
+  // around a bad region and writing into it a second time. They are deleted
+  // before returning either way — a report that failed verification must never be
+  // left behind looking like a result.
+  const int MAX_ATTEMPTS = 2;
+  char suspect[MAX_ATTEMPTS][24];
+  int nSuspect = 0;
+  auto sweep = [&]() { for (int k = 0; k < nSuspect; k++) g_sd.remove(suspect[k]); };
 
-  if (!ok) {
-    invalidate();   // a mid-write failure usually means the card went away
-    snprintf(msg, msgLen, "Write failed - card removed or full?");
-    return false;
+  for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    int idx = base + attempt;
+    if (idx > 999) break;
+    char name[24];
+    snprintf(name, sizeof(name), "%s_%03d.CSV", prefix, idx);
+
+    File32 f;
+    if (!f.open(name, O_WRITE | O_CREAT | O_TRUNC)) {
+      // Could be a locked/full card — or one that was pulled since the last save
+      // and is still serving a cached FAT. Drop the mount either way so the next
+      // attempt re-inits rather than failing forever against a dead handle.
+      sweep();
+      invalidate();
+      snprintf(msg, msgLen, "Cannot write (card removed, locked or full)");
+      return false;
+    }
+
+    // Everything the body writes goes through the checksummer on its way to the
+    // file, so verification costs no second pass over the source data.
+    VerifyingPrint vp(f);
+    bool ok = body(vp);
+    if (vp.getWriteError() || f.getWriteError()) ok = false;
+    // sync() is where the LAST cache block and the directory entry actually reach
+    // the card, and close() flushes again — so they are the likeliest place for a
+    // late failure, and both used to be called for their side effect with their
+    // result thrown away.
+    if (!f.sync()) ok = false;
+    if (f.getWriteError()) ok = false;
+    if (!f.close()) ok = false;
+
+    if (!ok) {
+      g_sd.remove(name);
+      sweep();
+      invalidate();   // a mid-write failure usually means the card went away
+      snprintf(msg, msgLen, "Write failed - card removed or full?");
+      return false;
+    }
+    if (vp.overflowed()) {
+      // Only reachable past 512 KB, which nothing here writes; verifying part of
+      // a file and calling it verified would be worse than saying so.
+      Serial.println("[sd] report exceeded the verifiable size - NOT verified");
+    }
+
+    if (verifyOnCard(name, vp)) {
+      sweep();
+      Serial.printf("[sd] wrote %s (%lu B, verified)\n", name, (unsigned long)vp.total());
+      snprintf(msg, msgLen, "%s", name);
+      return true;
+    }
+
+    snprintf(suspect[nSuspect++], sizeof(suspect[0]), "%s", name);
+    Serial.printf("[sd] %s did NOT read back correctly - the card accepted writes "
+                  "it did not keep%s\n",
+                  name, attempt + 1 < MAX_ATTEMPTS ? "; retrying on fresh clusters" : "");
   }
-  Serial.printf("[sd] wrote %s\n", name);
-  snprintf(msg, msgLen, "%s", name);
-  return true;
+
+  sweep();
+  invalidate();
+  snprintf(msg, msgLen, "Card lost data twice - replace the card");
+  return false;
 }
 
 bool info(char *msg, size_t msgLen) {

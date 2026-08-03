@@ -450,12 +450,14 @@ static void setTextIf(lv_obj_t *l, const char *t) {
 }
 
 // ---- SD card saves ---------------------------------------------------------
-// A save blocks the loop task for up to ~2 s (card init, then a slow bit-banged
-// write), so the button has to be repainted to its in-progress state and flushed
-// to the panel before the call is made — otherwise the UI just freezes with no
-// explanation.
+// A save blocks the loop task for the whole write AND the read-back that
+// verifies it — for a full capacity report that is ~20 s, not ~2 s, because
+// sd_card.cpp now proves the card actually kept the bytes rather than trusting it
+// to say so. So the button has to be repainted to its in-progress state and
+// flushed to the panel before the call is made, and it has to say that verifying
+// is part of the job — otherwise a correct save looks like a frozen UI.
 static void armSaveButton(lv_obj_t *btn, lv_obj_t *lblObj) {
-  lv_label_set_text(lblObj, LV_SYMBOL_SAVE "  Writing to card...");
+  lv_label_set_text(lblObj, LV_SYMBOL_SAVE "  Writing + verifying...");
   lv_obj_set_style_bg_color(btn, COL_AMBER, 0);
   lv_refr_now(nullptr);
 }

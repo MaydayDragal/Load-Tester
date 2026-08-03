@@ -374,6 +374,18 @@ entry, UTC offset, "Sync clock now") · **SCREEN PROTECTION** (pixel shift +
 it dims at that interval and blanks at 5×) · **SD CARD** (Check card — always
 re-initialises, so it is also how you confirm a freshly-inserted card) ·
 **SYSTEM** (brightness, volume, mute, firmware/heap info, restart).
+- **Every save is verified.** `sd::saveCsv()` checksums the report on the way out
+  (chunked CRC-32, 8 KB granularity), reads it back off the card and compares.
+  A save therefore takes about **twice** as long — ~20 s for a full capacity
+  report — and the button says "Writing + verifying..." while it does. Serial
+  prints `[sd] verify OK: <file>, N B read back and matched`.
+  *Test:* save a report and confirm that line appears, and that the button goes
+  green with the file name only after it does.
+  A card that loses data gets **one retry onto fresh clusters** (the rejected
+  file is left in place meanwhile, precisely so the retry lands elsewhere); both
+  copies are deleted before returning, and two failures report
+  "Card lost data twice - replace the card". Serial localises the damage:
+  `[sd] verify MISMATCH: bytes 114688..122879 of BATT_007.CSV`.
 - *Test:* change brightness / volume / sample rate → reboot → they stick.
   A **successful clock sync deliberately reboots** the board (see §8).
   Wi-Fi scan and sync are **refused while a test runs**.

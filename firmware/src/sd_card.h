@@ -22,10 +22,17 @@ namespace sd {
 // file contents (via the Print interface — print()/println(), or the report.h
 // fpf() printf helper) and returns false if it could not.
 //
-// Returns true only when the file is synced and closed on the card. `msg` gets
-// the bare file name on success, or a short user-facing failure reason ("No
-// card detected", "Card not formatted (use FAT32)", ...) — the UI shows it
-// verbatim, so a failed save is never reported as a save.
+// Returns true only when the file has been synced, closed, AND read back off the
+// card and checksummed against what we wrote. `msg` gets the bare file name on
+// success, or a short user-facing failure reason ("No card detected", "Card not
+// formatted (use FAT32)", "Card lost data twice - replace the card", ...) — the
+// UI shows it verbatim, so a failed save is never reported as a save.
+//
+// The read-back is not optional and roughly DOUBLES the time a save takes (a
+// 300 KB capacity report: ~11 s of blocked loop task becomes ~20 s). It is there
+// because on 2026-08-03 a card acknowledged ~22 KB of writes it did not retain
+// and raised no error anywhere — a checksummed read-back is the only thing that
+// can catch a card which lies about what it kept. See sd_card.cpp.
 bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
              char *msg, size_t msgLen);
 

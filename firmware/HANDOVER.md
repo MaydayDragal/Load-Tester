@@ -5,7 +5,7 @@ a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
 **Last updated:** 2026-08-03.
-**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `b559d6b`.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `3bd378e`.
 `origin/main` and `origin/claude/…` are kept at the same commit, and pushing the
 branch does NOT move main — push both.
 
@@ -31,9 +31,12 @@ unattended drop.
 
 **Highest-value work next, in order:**
 
-1. **Replace the SD card and re-verify** (§16). It silently dropped two 16 KB
-   regions of a 300 KB file. Re-run `EL15_SDTEST` on the new one, and consider
-   the read-back verify that §16 leaves open.
+1. **Replace the SD card, then exercise the new verified save** (§16). The old
+   card silently dropped two 16 KB regions of a 300 KB file. Saves are now
+   read back and checksummed, but that path has not yet run against a card —
+   put one in, `EL15_SDTEST` (which now goes through the verified `saveCsv`),
+   then a real R-test/battery Save. Expect `[sd] verify OK: … read back and
+   matched`, and a save that takes about twice as long as it used to.
 2. **Drill the safety layers** — link-guard hot drop, crash recovery, PWR
    long-press. None has fired for real. `FIRST_CONTACT.md` steps 15–16b.
 3. **Finish the R-test sweep matrix** (duration 10/30/60 s × sample rate
@@ -48,6 +51,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-03 | **Saves are now read back and checksummed** (§16) — chunked CRC-32 at 8 KB, one retry onto fresh clusters, honest failure. Roughly doubles save time; not optional, since a toggle would reintroduce the silent loss it closes. |
 | 2026-08-03 | **First capacity run with real current** — 92 Ah lead-acid, 4.6 A (0.05C), 13 842 s, 17.68 Ah, SoH 19.2 %, pack resistance 12.6 mohm. The engine, the C-rate chips and the charge-state model all worked. Its `BATT_007.CSV` came back with **22 KB of random bytes in two 16 KB-aligned regions — the SD card silently lost writes it had acknowledged** (§16). Added `tools/repair_report_csv.py`, and `saveCsv` now checks `sync()`/`close()` instead of discarding their result. |
 | 2026-08-01 | **Probe wiring went device-wide.** 2-wire/4-wire + lead resistance moved out of the R-test into **Settings ▸ Probe wiring** and are now applied to every mode: `main.cpp compensateProbe()` adds `I × R_lead` back onto each status packet before it fans out. Biggest real effect is on the capacity test — its cutoff was firing at the load's terminals, so a 2-wire rig stopped early and under-reported the pack. The R-test is deliberately excluded (double-subtraction — §14). |
 | 2026-08-01 | **Ten chemistries** (added LiPo HV, LTO, Na-ion, NiCd, alkaline; **lead-acid fixed at 12 V** — the only size this bench uses), each with its voltage range and a max cell count that keeps a full pack under 60 V. Picker rebuilt as one `lv_btnmatrix` after the chip version cost 6 KB of the BLE heap margin (§13). NVS battery keys bumped, since the chemistry indices moved. |
@@ -773,7 +777,37 @@ that test wrote ~200-byte files; this was the first time anything asked it for
 - The **summary block is computed by the instrument, not from the datapoint
   rows**, so capacity/energy/duration/SoH survived intact. That separation is
   worth keeping.
-- **Still open:** nothing verifies a report after writing it. A read-back +
-  compare is the only thing that would have caught this at the time, and it
-  roughly doubles save duration (~10 s → ~20 s for a file this size). Not
-  implemented — it is a deliberate cost/benefit call, not an oversight.
+### Every save is now verified (2026-08-03)
+
+`saveCsv()` no longer trusts the card's acknowledgements. The report is
+checksummed on the way out, read back off the card, and checksummed again:
+
+- **Chunked CRC-32, 8 KB granularity, up to 512 KB.** Chunked rather than one
+  whole-file checksum so a mismatch says WHERE the card lost data — the fault
+  above would have printed `verify MISMATCH: bytes 114688..122879` immediately,
+  instead of taking a byte-level analysis to establish by hand. Length is checked
+  first, which catches a truncated tail.
+- **A `VerifyingPrint` wraps the file**, so the body streams through the
+  checksummer on its way to the card and verification needs no second pass over
+  the source data. It forwards the file's write-error state into its own, because
+  `report.h` aborts its row loop on `getWriteError()` and is handed the wrapper.
+- **One retry, onto FRESH clusters.** A rejected file is deliberately left in
+  place while the retry runs, so the retry allocates different clusters instead of
+  the ones the card just failed to retain. Both are deleted before returning —
+  a report that failed verification is never left behind looking like a result.
+  Two failures report "Card lost data twice - replace the card".
+- **Cost: a save takes about twice as long** — ~11 s → ~20 s of blocked loop task
+  for a 300 KB capacity report, up to ~40 s if the retry fires. The load is off by
+  then (the engine's `finishSafely()` has run), so this is time, not risk. The
+  Save button says "Writing + verifying..." so it does not read as a freeze. The
+  verify loop yields every 8 KB, same watchdog reasoning as `samplelog::replay()`.
+- **`EL15_SDTEST` gets this for free** — it goes through `saveCsv()` — so it is
+  now a real card-qualification test rather than an eight-line eyeball.
+- Not made optional on purpose: a toggle that can be switched off reintroduces
+  exactly the silent-data-loss bug this closes.
+
+Verified off-device against the real damaged file: a clean 295 KB round trip
+reports no mismatch, the actual 16 KB fault is localised to bytes
+114688..122879 + 122880..131071, a single flipped bit is caught in its own chunk,
+and a one-byte truncation is caught by the length check. **The on-device path
+still needs a card in the slot to exercise** — the card was in a PC reader.
