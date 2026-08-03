@@ -110,6 +110,13 @@ void offerRecovery(const char *msg, std::function<void()> action);
 // stale banner must not stay locked on screen suppressing later alerts.
 void clearGuardBanner();
 
+// The controller's OWN battery, once a second, for the status-strip indicator.
+// Pushed in from main.cpp's brownout poll rather than read here, so the PMIC is
+// only polled once per second in total — it shares an I2C bus with the touch
+// controller. `chargeState` is the AXP2101 code (1-3 charging, 4 charged);
+// `present` false means no pack is fitted and the indicator hides itself.
+void onControllerBattery(int percent, int milliVolt, int chargeState, bool present, bool usb);
+
 // The controller's OWN battery hit the critical threshold and the load was
 // force-stopped before brownout. `wasHot` = something was actually sinking.
 void onPowerCritical(int percent, bool wasHot);
