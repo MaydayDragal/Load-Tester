@@ -121,6 +121,13 @@ inline bool saveBatt(const CapacityTest::Result &r, char *msg, size_t msgLen) {
       fpf(f, "# Rated capacity (mAh),%.0f\n", r.ratedAh * 1000.0f);
       fpf(f, "# Discharge rate (C),%.3f\n", r.cRate);
     }
+    // The runaway guards this run armed. Recorded because a run that ends on one
+    // of them reads, in the numbers alone, exactly like a battery that finished
+    // there — and once did: a fixed 50 Ah cap stopped a 92 Ah pack and the report
+    // gave no way to tell the difference. `stop_reason` below names the cap; these
+    // two lines say what it was set to.
+    fpf(f, "# Safety cap - capacity (Ah),%.1f\n", r.capAh);
+    fpf(f, "# Safety cap - duration (h),%.1f\n", r.capDurationS / 3600.0f);
     fpf(f, "\n# Result\n");
     fpf(f, "quantity,value,unit\n");
     fpf(f, "capacity,%.4f,Ah\n", r.capacityAh);

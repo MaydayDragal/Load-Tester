@@ -56,14 +56,34 @@ class CapacityTest {
     // (re)save.
     bool fourWire = false;
     float tareOhm = 0;
+    // The safety caps this run actually armed (see resolveCaps). Recorded so a
+    // run that ended on a cap is traceable to the cap in the report, instead of
+    // looking like a battery that simply stopped there.
+    float capAh = 0;
+    uint32_t capDurationS = 0;
   };
 
   // Configuration — set before start().
   float cutoffV = 0;                     // automatic minimum-voltage stop point
   float dischargeA = 0;                  // requested discharge current
   float ratedAh = 0;                     // optional nameplate capacity (0 = unknown)
-  uint32_t maxDurationS = 12u * 3600u;   // safety cap (counts ACTIVE time only)
-  float maxAh = 50;                      // safety cap
+  // Safety caps. Both default to 0, meaning "work it out from the pack at
+  // start()" — see resolveCaps(). Set either non-zero only to override.
+  //
+  // What these are FOR: bounding a runaway — a discharge that keeps going
+  // because the cutoff never fired (a sense lead fallen off, a stuck voltage
+  // reading, a cutoff set below what the pack can reach). They are not meant to
+  // end a healthy test.
+  //
+  // A FIXED number does exactly that, though, and did: a flat 50 Ah stopped a
+  // 92 Ah pack at 50 Ah — hours short of its cutoff — and reported "Capacity cap
+  // reached" as though that were the measurement. The flat 12 h was the same
+  // trap one step behind it: a 0.05C discharge takes 20 h BY DEFINITION, and
+  // 0.05C is the standard rate for exactly the lead-acid packs this bench uses,
+  // so no such test could ever have finished. Caps that scale with the pack stay
+  // guards instead of becoming the answer.
+  uint32_t maxDurationS = 0;   // 0 = derive; counts ACTIVE time only
+  float maxAh = 0;             // 0 = derive
   uint32_t restS = 60;                   // post-cutoff rebound window (0 = none)
   // Battery model for the time-remaining estimate: an index into
   // battmodel::CHEMS and the pack's series cell count. A chemistry with no
@@ -159,6 +179,7 @@ class CapacityTest {
     stopReason_ = "";
     pausedMs_ = 0; pauseStartMs_ = 0; pauseReason_ = "";
     tStart_ = 0; endMs_ = 0;
+    capAh_ = 0; capS_ = 0;   // armed by resolveCaps() once the current is known
     rInt_ = 0; rIntSum_ = 0; rIntN_ = 0; rIntDone_ = false;
     socNow_ = socStart_ = socCut_ = 0; socValid_ = false;
     ahAtSocStart_ = 0; qLearned_ = 0; lastSocMs_ = 0;
@@ -297,14 +318,19 @@ class CapacityTest {
       enterRest();
       return;
     }
-    if (ah_ >= maxAh) { stopReason_ = "Capacity cap reached"; enterRest(); return; }
+    if (capAh_ > 0 && ah_ >= capAh_) {
+      stopReason_ = "Capacity cap reached";
+      Serial.printf("[batt] STOP: %.3f Ah reached the %.1f Ah safety cap\n", ah_, capAh_);
+      enterRest();
+      return;
+    }
   }
 
   // Pump timers + duration cap; call from loop().
   void tick() {
     // The cap counts ACTIVE discharge time, so a long pause can't end the test
     // by itself — but the total energy budget it guards is unchanged.
-    if (state_ == DISCHARGING && elapsedS() >= maxDurationS) {
+    if (state_ == DISCHARGING && capS_ > 0 && elapsedS() >= capS_) {
       stopReason_ = "Max duration reached";
       enterRest();
       return;
@@ -420,6 +446,38 @@ class CapacityTest {
     }
   }
 
+  // Turn the configured caps (or 0 = auto) into the concrete limits this run
+  // will enforce. Called once the commanded current is known.
+  void resolveCaps() {
+    // Capacity: twice the nameplate. A pack does not deliver double its rating,
+    // so reaching that means the measurement is wrong rather than the battery
+    // being remarkable — which is exactly the runaway worth stopping. The 10 Ah
+    // floor keeps a small pack's cap from sitting so close to its real capacity
+    // that ordinary over-delivery trips it.
+    // With no nameplate entered there is nothing to scale from, so fall back to
+    // a ceiling far past any pack this 150 W load will realistically discharge.
+    // The time cap below is the meaningful guard in that case.
+    capAh_ = maxAh > 0   ? maxAh
+           : ratedAh > 0 ? fmaxf(ratedAh * 2.0f, 10.0f)
+                         : 1000.0f;
+
+    if (maxDurationS > 0) {
+      capS_ = maxDurationS;
+    } else {
+      // Time: 2.5x the full discharge this current implies, so a slow C-rate
+      // gets the hours it genuinely needs. Clamped at both ends — neither a huge
+      // pack nor a trickle current may arm an effectively unbounded run, and a
+      // tiny pack still gets a couple of hours of headroom.
+      float hours = 48.0f;   // unknown pack: generous, but not forever
+      if (ratedAh > 0 && effA_ > 0.001f) hours = ratedAh / effA_ * 2.5f;
+      if (hours < 2.0f) hours = 2.0f;
+      if (hours > 72.0f) hours = 72.0f;
+      capS_ = (uint32_t)(hours * 3600.0f);
+    }
+    Serial.printf("[batt] safety caps armed: %.1f Ah, %.1f h (at %.3f A)\n",
+                  capAh_, capS_ / 3600.0f, effA_);
+  }
+
   void finishPriming() {
     float voc = vOc_;
     if (voc < el15::MIN_VOLTAGE_V) { abort_("No reading, or voltage below the minimum. Test aborted."); return; }
@@ -427,6 +485,9 @@ class CapacityTest {
     if (voc <= cutoffV + 0.2f) { abort_("Battery is already at or below the cutoff voltage."); return; }
     effA_ = min(min(dischargeA, el15::MAX_CURRENT_A), el15::MAX_POWER_W / voc);
     if (effA_ < 0.01f) { abort_("Safe discharge current too low."); return; }
+    // Arm the safety caps now: this is the first point where the current the
+    // load will ACTUALLY draw is known, and the time cap is derived from it.
+    resolveCaps();
     startV_ = voc;
     below_ = 0;
     lastMs_ = 0;
@@ -480,6 +541,8 @@ class CapacityTest {
     r.impliedFullAh = qLearned_;
     r.fourWire = fourWire;
     r.tareOhm = fourWire ? 0 : tareOhm;
+    r.capAh = capAh_;
+    r.capDurationS = capS_;
     if (onComplete) onComplete(r);
   }
 
@@ -503,6 +566,11 @@ class CapacityTest {
   // are both ACTIVE discharge time.
   uint32_t pausedMs_ = 0, pauseStartMs_ = 0;
   const char *pauseReason_ = "";
+
+  // Safety caps resolved at finishPriming(); 0 until then, and checked for >0 at
+  // both enforcement sites so a cap can never fire before it has been armed.
+  float capAh_ = 0;
+  uint32_t capS_ = 0;
 
   float ah_ = 0, wh_ = 0, sumVdt_ = 0, sumDt_ = 0;
   float vOc_ = 0, vNow_ = 0, startV_ = 0, endV_ = 0, reboundV_ = 0, effA_ = 0;
