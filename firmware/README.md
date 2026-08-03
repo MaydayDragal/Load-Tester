@@ -33,13 +33,15 @@ and runs its own resistance-sweep and battery-capacity test engines.
 | **Audio** | ES8311 tones: tap click, button confirm, rising chime on completion, falling on error, urgent alarm on fault/e-stop |
 | **Screen care** | AMOLED pixel shift + idle dim → true-black blank (suppressed while a test runs) |
 
-There is deliberately **no on-device simulator**: all simulation lives in the
-Android **EL15 Load Simulator** app (`simulator/` in this repo), which
-impersonates the load — including a full battery discharge curve — over a *real*
-BLE link. That way the firmware always exercises its actual radio/transport
-path, never an in-process fake.
+There is deliberately **no on-device simulator**: simulation was done with an
+Android **EL15 Load Simulator** app impersonating the load — including a full
+battery discharge curve — over a *real* BLE link, so the firmware always
+exercised its actual radio/transport path, never an in-process fake. That app
+(and the Android control app it shipped beside) was **removed from the repo on
+2026-08-03**; both live in git history, last present at commit `1cd5607`.
+Check the simulator out from there for hardware-free bench testing.
 
-**Not ported from the Android app:** the runtime/step/OCP bench tests,
+**Not ported from the (since-removed) Android app:** the runtime/step/OCP bench tests,
 on-device history browsing, PDF export, alarms, and the calibration sweep. The
 engine + screen architecture is set up so these drop in as new engines and tabs.
 

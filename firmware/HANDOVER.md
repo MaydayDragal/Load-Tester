@@ -41,9 +41,6 @@ unattended drop.
    long-press. None has fired for real. `FIRST_CONTACT.md` steps 15–16b.
 3. **Finish the R-test sweep matrix** (duration 10/30/60 s × sample rate
    20/10/4 Hz). Cut short when the bench source collapsed — §10.
-4. **Port the command checksum to the Android app.** `El15Protocol.kt` still
-   emits checksum-less frames, so the app can read a real EL15 but cannot drive
-   it. One helper plus five call sites.
 
 ### Session log
 
@@ -51,6 +48,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-03 | **Repo slimmed to firmware-only.** The Android control app (`app/`), the phone BLE simulator (`simulator/`), the Gradle scaffolding and the Android CI workflow were removed — last present at `1cd5607`; resurrect from git history if ever needed. Hardware-free bench testing now means checking the simulator out from history and building it, or testing against the real EL15. The app's missing command checksum is moot. |
 | 2026-08-03 | **Full code QA sweep (10-reviewer multi-agent), 11 findings, all fixed.** Worst: reconnecting while already connected wedged `state_ = IDLE` on a live link — telemetry kept flowing but every write, including the safety LOAD_OFF, was silently refused. Also: a failed FFF1 subscribe reported "Connected" with dead telemetry; a DISCONNECTED event could be lost if the queue stayed full (now a latched flag + `loopTick` reconciles `state_` against the real link, both directions); the poll hold froze polling after 24.9 days' uptime; capacity reports now snapshot probe wiring at test START (a Settings change no longer relabels a recorded run) and a `samplelog::replay` failure fails the save; R-test aborts pre-flight on a <0.1 A sweep span instead of drawing current for a fit that cannot succeed; `lib_deps` pinned exactly to the hardware-verified versions; IDF scaffolding reconciled (all 10 TUs, spiffs partition, LVGL ~8.4, SdFat wrapper) but still never built. |
 | 2026-08-03 | **Saves are now read back and checksummed** (§16) — chunked CRC-32 at 8 KB, one retry onto fresh clusters, honest failure. Roughly doubles save time; not optional, since a toggle would reintroduce the silent loss it closes. |
 | 2026-08-03 | **First capacity run with real current** — 92 Ah lead-acid, 4.6 A (0.05C), 13 842 s, 17.68 Ah, SoH 19.2 %, pack resistance 12.6 mohm. The engine, the C-rate chips and the charge-state model all worked. Its `BATT_007.CSV` came back with **22 KB of random bytes in two 16 KB-aligned regions — the SD card silently lost writes it had acknowledged** (§16). Added `tools/repair_report_csv.py`, and `saveCsv` now checks `sync()`/`close()` instead of discarding their result. |
@@ -211,8 +209,9 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 ## 4. Feature set (current)
 
 - **Connect:** scan (named EL15 devices only, dedup by address, random-address
-  peers OK), connect, disconnect. Test WITHOUT hardware using the **Android
-  simulator app** (`simulator/`) over real BLE — the on-device demo was removed.
+  peers OK), connect, disconnect. Testing WITHOUT hardware used the **Android
+  simulator app** over real BLE — removed from the repo 2026-08-03 (last at
+  `1cd5607`; check it out from history if needed).
 - **Monitor:** V/I heroes (current turns red + "SINKING" when load on), telemetry
   row (W · fan% · temp · runtime), mode|set bar, pinned Load/RUN-TEST bar.
 - **Adjust:** dial-stepper with hold-to-repeat + keypad; value card is the keypad
@@ -318,10 +317,11 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
   recovering). Unexplained. The harness's 10 %-of-Voc sag guard caught it.
 
 **Safety / correctness**
-- **Port the command checksum to the Android app.** `El15Protocol.kt` still
-  builds every command frame without the trailing sum-to-zero byte, so the app
-  can read a real EL15 but cannot control it — the same bug this firmware had
-  until 2026-07-24. One `frameChecksum()` helper plus five call sites.
+- ~~Port the command checksum to the Android app~~ — **moot 2026-08-03**: the
+  app was removed from the repo (last at `1cd5607`). If it is ever resurrected
+  from history, `El15Protocol.kt` still builds checksum-less frames (reads a
+  real EL15, cannot drive it) — one `frameChecksum()` helper plus five call
+  sites.
 - ~~Triage the rest of the QA audit~~ **done 2026-08-01** — re-read against
   `6adea41` and recorded in `QA_REPORT.md`. 10 of 12 H/M findings are fixed, M1
   was a deliberate semantics decision (documented), and **M3 is still open**: a

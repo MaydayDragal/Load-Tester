@@ -6,8 +6,10 @@ status, how to build/flash/drive it, the code layout, a per-feature test matrix,
 the wire protocol, safety-critical behavior, and known gaps/risks.
 
 > Scope: the **`firmware/` ESP32-C6 target** running the v2 "Focus" touchscreen
-> UI. The repo also contains the Android app (`app/`) and a phone-based BLE load
-> simulator (`simulator/`); those are referenced here only as test tools.
+> UI. The Android app and the phone-based BLE load simulator this guide once
+> referenced as test tools were removed from the repo on 2026-08-03 (last
+> present at `1cd5607`) — check the simulator out from git history for
+> hardware-free testing, or test against the real EL15.
 
 **Last updated:** 2026-08-01, against `6adea41`. Companion docs:
 [`HANDOVER.md`](HANDOVER.md) (state + gotchas), [`FIRST_CONTACT.md`](FIRST_CONTACT.md)
@@ -57,7 +59,8 @@ don't hard-code it.
 There are **two** test surfaces (the on-device demo simulator was removed —
 bench-testing always goes over a real BLE link now):
 
-1. **Phone BLE simulator** (`simulator/`, real BLE path, no load hardware).
+1. **Phone BLE simulator** (real BLE path, no load hardware; removed from the
+   tree 2026-08-03 — check out from git history at `1cd5607` and build it).
    Advertises the EL15 GATT service as a peripheral and models either a fixed
    circuit or a full battery with a chemistry-accurate discharge curve. **Random
    address** — exercises the scan/connect path that RPA peers need.
