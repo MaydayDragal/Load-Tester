@@ -1,6 +1,13 @@
 #include "sd_card.h"
 
 #include <Arduino.h>
+// board_config.h FIRST: the capability flags it defines decide which storage
+// stack is pulled in below, so including it later silently selects the wrong
+// backend (an undefined macro reads as 0 in #if) and the build fails a hundred
+// lines further down with no hint of the real cause.
+#include "board_config.h"
+
+#if BOARD_SD_SOFT_SPI
 // SdFat skips its own `File` typedef whenever <FS.h> is merely REACHABLE on the
 // include path, and says so with a #warning. Arduino's FS.h has been on the path
 // since sample_log.cpp pulled in LittleFS, so that warning now fires on every
@@ -10,33 +17,56 @@
 #pragma GCC diagnostic ignored "-Wcpp"
 #include <SdFat.h>
 #pragma GCC diagnostic pop
+#else
+#include <FS.h>
+#include <SD_MMC.h>
+#include <sys/time.h>
+#endif
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
-#include "board_config.h"
 #include "display.h"   // rtcTime() — real timestamps on the FAT directory entries
 
-// microSD on BIT-BANGED (software) SPI.
+// microSD, over whichever transport the board actually has. The two are very
+// different and the difference is worth understanding before touching this file.
 //
-// The ESP32-C6 has exactly one general-purpose SPI host and the AMOLED's
-// Arduino_ESP32QSPI driver owns it in quad mode. The IDF `sdspi` driver cannot
-// run transactions on that bus while the panel holds it — a real card gets as
-// far as attaching and then fails at the very first init command (CMD59 CRC
-// on/off returns ESP_ERR_NOT_SUPPORTED). That was the old shared-bus scheme,
-// and it never worked against hardware.
+// C6 board — BIT-BANGED (software) SPI.
+//   The ESP32-C6 has exactly one general-purpose SPI host and the AMOLED's
+//   Arduino_ESP32QSPI driver owns it in quad mode. The IDF `sdspi` driver cannot
+//   run transactions on that bus while the panel holds it — a real card gets as
+//   far as attaching and then fails at the very first init command (CMD59 CRC
+//   on/off returns ESP_ERR_NOT_SUPPORTED). That was the old shared-bus scheme,
+//   and it never worked against hardware.
+//   So the card is driven entirely in software on its own dedicated pins
+//   (SCK 11 / MOSI 10 / MISO 18 / CS 6), through the small custom SdSpiBaseClass
+//   driver below (SdFat's own SoftSpiDriver was too fast — see its comment).
+//   Nothing touches SPI2, so there is no conflict with the panel and no
+//   GPIO-matrix rerouting — a card access and a screen redraw are fully
+//   independent. Software SPI tops out around a few hundred kHz, which is plenty
+//   for the small CSV reports this writes; a save still blocks the loop task for
+//   a moment (card init dominates), so the UI paints its "Saving..." state
+//   before calling in.
 //
-// So the card is driven entirely in software on its own dedicated pins
-// (SCK 11 / MOSI 10 / MISO 18 / CS 6), through the small custom SdSpiBaseClass
-// driver below (SdFat's own SoftSpiDriver was too fast — see its comment).
-// Nothing touches SPI2, so there is no conflict with the panel and no GPIO-matrix
-// rerouting — a card access and a screen redraw are fully independent. Software
-// SPI tops out around a few hundred kHz, which is plenty for the small CSV
-// reports this writes; a save still blocks the loop task for a moment (card
-// init dominates), so the UI paints its "Saving..." state before calling in.
+// S3 board — HARDWARE SDMMC, 1-bit.
+//   The S3 has a real SDMMC host and Waveshare wires the slot straight to it
+//   (CLK 11 / CMD 10 / D0 9). Only those three lines are connected: there is no
+//   D3, so SPI-mode SD is not even possible here, and the bus width is 1 bit.
+//   Even so this is on the order of a hundred times faster than the C6's
+//   software SPI, which changes the feel of a save completely — the verified
+//   read-back that costs ~20 s of blocked loop task on the C6 should cost a
+//   fraction of a second here.
+//   NOTE the timestamp mechanism differs too: SdFat asks us for the time via a
+//   callback, whereas the ESP32's FAT VFS stamps files from the SYSTEM clock, so
+//   on this board we push the RTC into the system clock at mount time instead.
+//
+// Everything below the backend shim — the numbering, the write-verification and
+// the save orchestration — is shared, and is where the real logic lives.
 
 namespace sd {
 namespace {
 
+#if BOARD_SD_SOFT_SPI
 // ---- Custom software-SPI driver --------------------------------------------
 // SdFat's built-in SoftSpiDriver uses DigitalIO fast-register GPIO, which on the
 // 160 MHz C6 clocks fast enough that 512-byte data-block writes corrupt (short
@@ -93,6 +123,60 @@ SoftSpi g_softSpi;
 // FAT16/FAT32 only (File32) — the format essentially every SD card ships in and
 // what the reports need; avoids pulling in the larger exFAT code.
 SdFat32 g_sd;
+
+// ---- Backend shim (software SPI / SdFat) ----------------------------------
+// The shared logic below opens, writes, syncs, closes and re-reads files. These
+// few names are everything it needs from the filesystem, so a second backend is
+// a matter of providing them again rather than touching the save path.
+using SdFile = File32;
+// SdFat is happy with bare names; SD_MMC needs a rooted path. Normalising here
+// keeps the shared code writing plain "RTEST_001.CSV".
+inline const char *fsPath(const char *name, char *buf, size_t n) {
+  (void)buf; (void)n;
+  return name;
+}
+inline bool fsOpenRead(SdFile &f, const char *path) { return f.open(path, O_RDONLY); }
+inline bool fsOpenWrite(SdFile &f, const char *path) {
+  return f.open(path, O_WRITE | O_CREAT | O_TRUNC);
+}
+inline uint32_t fsSize(SdFile &f) { return f.fileSize(); }
+inline bool fsSync(SdFile &f) { return f.sync(); }
+inline bool fsClose(SdFile &f) { return f.close(); }
+inline bool fsWriteError(SdFile &f) { return f.getWriteError() != 0; }
+inline void fsRemove(const char *path) { g_sd.remove(path); }
+inline void backendEnd() { g_sd.end(); }
+
+#else   // ---- BOARD_SD_SDMMC: hardware SDMMC / Arduino SD_MMC ---------------
+
+using SdFile = fs::File;
+
+// SD_MMC insists on an absolute path.
+inline const char *fsPath(const char *name, char *buf, size_t n) {
+  snprintf(buf, n, "/%s", name);
+  return buf;
+}
+inline bool fsOpenRead(SdFile &f, const char *path) {
+  f = SD_MMC.open(path, FILE_READ);
+  return (bool)f;
+}
+inline bool fsOpenWrite(SdFile &f, const char *path) {
+  f = SD_MMC.open(path, FILE_WRITE);
+  return (bool)f;
+}
+inline uint32_t fsSize(SdFile &f) { return (uint32_t)f.size(); }
+// fs::File::flush() returns void and the VFS reports write failures through the
+// Print write-error flag, so a sync is "did the error flag stay clear".
+inline bool fsSync(SdFile &f) { f.flush(); return f.getWriteError() == 0; }
+inline bool fsClose(SdFile &f) {
+  bool ok = f.getWriteError() == 0;
+  f.close();
+  return ok;
+}
+inline bool fsWriteError(SdFile &f) { return f.getWriteError() != 0; }
+inline void fsRemove(const char *path) { SD_MMC.remove(path); }
+inline void backendEnd() { SD_MMC.end(); }
+#endif
+
 bool g_mounted = false;
 
 // ---- FAT directory timestamps ----------------------------------------------
@@ -103,12 +187,37 @@ bool g_mounted = false;
 // close, so the file carries a real created/modified date once the RTC is set.
 // (When the RTC has never been set, rtcTime() fails and we leave the fields at
 // 0 — an obviously-absent date rather than an invented one.)
+#if BOARD_SD_SOFT_SPI
 void fatDateTime(uint16_t *date, uint16_t *time) {
   int Y, M, D, h, m, s;
   if (!display::rtcTime(Y, M, D, h, m, s)) { *date = 0; *time = 0; return; }
   *date = FS_DATE(Y, M, D);
   *time = FS_TIME(h, m, s);
 }
+#else
+// The ESP32's FAT VFS offers no per-file timestamp hook — it stamps files from
+// the SYSTEM clock. So instead of answering a callback, push the RTC into the
+// system clock once per mount. Same end result (a report carries the real date
+// in a PC's file listing), and it also gives anything else that calls time()
+// a correct clock. If the RTC has never been set, leave the system clock alone
+// rather than inventing a date.
+void syncSystemClockFromRtc() {
+  int Y, M, D, h, m, s;
+  if (!display::rtcTime(Y, M, D, h, m, s)) return;
+  struct tm tmv = {};
+  tmv.tm_year = Y - 1900;
+  tmv.tm_mon = M - 1;
+  tmv.tm_mday = D;
+  tmv.tm_hour = h;
+  tmv.tm_min = m;
+  tmv.tm_sec = s;
+  tmv.tm_isdst = -1;
+  time_t epoch = mktime(&tmv);
+  if (epoch <= 0) return;
+  struct timeval tv = {.tv_sec = epoch, .tv_usec = 0};
+  settimeofday(&tv, nullptr);
+}
+#endif
 
 // ---- Mount / unmount -------------------------------------------------------
 
@@ -118,8 +227,16 @@ void fatDateTime(uint16_t *date, uint16_t *time) {
 // ignores SPI commands until CMD0/ACMD41 run again). Cheap: a few dozen bytes
 // over the bit-banged link.
 bool cardResponds() {
+#if BOARD_SD_SOFT_SPI
   cid_t cid;
   return g_sd.card() && g_sd.card()->readCID(&cid);
+#else
+  // The SDMMC driver has no CID round-trip exposed through the Arduino wrapper.
+  // cardType() reads back through the same driver state, so a removed card
+  // reports CARD_NONE — enough to catch the eject case the mount logic cares
+  // about.
+  return SD_MMC.cardType() != CARD_NONE;
+#endif
 }
 
 bool mount(char *msg, size_t msgLen) {
@@ -128,10 +245,11 @@ bool mount(char *msg, size_t msgLen) {
   // the retry loop below runs a full init on the new card.
   if (g_mounted && !cardResponds()) {
     Serial.println("[sd] card stopped answering (removed?) - remounting");
-    g_sd.end();
+    backendEnd();
     g_mounted = false;
   }
   if (g_mounted) return true;
+#if BOARD_SD_SOFT_SPI
   FsDateTime::setCallback(fatDateTime);
   // Init over software SPI is occasionally flaky (a marginal CMD0, or a card
   // still wedged mid-transfer from an earlier aborted write). Retry a few times
@@ -155,13 +273,39 @@ bool mount(char *msg, size_t msgLen) {
   if (ec) snprintf(msg, msgLen, "No card detected (reseat it)");
   else snprintf(msg, msgLen, "Card not formatted (use FAT32)");
   return false;
+#else
+  // Only CLK/CMD/D0 are wired, so this is 1-bit mode — passing mode1bit = true
+  // is not a fallback here, it is the only thing that can work. setPins() must
+  // precede begin(); it fails if the driver is already up, hence the end() in
+  // backendEnd() on every teardown path.
+  SD_MMC.setPins(SD_MMC_CLK_GPIO, SD_MMC_CMD_GPIO, SD_MMC_D0_GPIO);
+  for (int attempt = 0; attempt < 4; attempt++) {
+    if (SD_MMC.begin("/sdcard", true /* mode1bit */)) {
+      if (SD_MMC.cardType() == CARD_NONE) {
+        SD_MMC.end();
+        snprintf(msg, msgLen, "No card detected (reseat it)");
+        return false;
+      }
+      syncSystemClockFromRtc();   // so the FAT VFS stamps files with a real date
+      g_mounted = true;
+      return true;
+    }
+    Serial.printf("[sd] SD_MMC begin attempt %d failed\n", attempt + 1);
+    SD_MMC.end();
+    delay(20);
+  }
+  // SD_MMC.begin() folds "no card" and "not FAT" into one false, so this message
+  // has to cover both rather than pretending to know which.
+  snprintf(msg, msgLen, "No card, or not formatted (use FAT32)");
+  return false;
+#endif
 }
 
 }  // namespace
 
 void invalidate() {
   if (g_mounted) {
-    g_sd.end();
+    backendEnd();
     g_mounted = false;
     Serial.println("[sd] mount invalidated - next access will re-init the card");
   }
@@ -177,7 +321,7 @@ namespace {
 // only actually called by the EL15_SDTEST scaffolding — hence maybe_unused.
 [[maybe_unused]] void unmount() {
   if (g_mounted) {
-    g_sd.end();
+    backendEnd();
     g_mounted = false;
   }
 }
@@ -264,12 +408,13 @@ class VerifyingPrint : public Print {
 // Read the file back off the card and compare it, chunk by chunk, with what we
 // believe we wrote. Logs the byte range of every chunk that differs.
 bool verifyOnCard(const char *name, const VerifyingPrint &vp) {
-  File32 f;
-  if (!f.open(name, O_RDONLY)) {
+  SdFile f;
+  char pbuf[32];
+  if (!fsOpenRead(f, fsPath(name, pbuf, sizeof(pbuf)))) {
     Serial.printf("[sd] verify: cannot reopen %s\n", name);
     return false;
   }
-  uint32_t onCard = f.fileSize();
+  uint32_t onCard = fsSize(f);
   if (onCard != vp.total()) {
     Serial.printf("[sd] verify FAILED: %s is %lu B on the card, wrote %lu B\n",
                   name, (unsigned long)onCard, (unsigned long)vp.total());
@@ -322,18 +467,34 @@ bool verifyOnCard(const char *name, const VerifyingPrint &vp) {
 int nextIndex(const char *prefix) {
   int best = 0;
   size_t plen = strlen(prefix);
+  auto consider = [&](const char *name) {
+    // SD_MMC hands back rooted names ("/RTEST_001.CSV"); compare on the bare
+    // leaf either way so the two backends agree on what counts as a match.
+    if (name[0] == '/') name++;
+    if (strncasecmp(name, prefix, plen) == 0 && name[plen] == '_') {
+      int n = atoi(name + plen + 1);
+      if (n > best) best = n;
+    }
+  };
+#if BOARD_SD_SOFT_SPI
   File32 dir, f;
   if (!dir.open("/")) return 1;
   char name[64];
   while (f.openNext(&dir, O_RDONLY)) {
     f.getName(name, sizeof(name));
     f.close();
-    if (strncasecmp(name, prefix, plen) == 0 && name[plen] == '_') {
-      int n = atoi(name + plen + 1);
-      if (n > best) best = n;
-    }
+    consider(name);
   }
   dir.close();
+#else
+  fs::File dir = SD_MMC.open("/");
+  if (!dir || !dir.isDirectory()) return 1;
+  for (fs::File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    consider(f.name());
+    f.close();
+  }
+  dir.close();
+#endif
   return best + 1;
 }
 
@@ -358,7 +519,10 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
   const int MAX_ATTEMPTS = 2;
   char suspect[MAX_ATTEMPTS][24];
   int nSuspect = 0;
-  auto sweep = [&]() { for (int k = 0; k < nSuspect; k++) g_sd.remove(suspect[k]); };
+  auto sweep = [&]() {
+    char pbuf[32];
+    for (int k = 0; k < nSuspect; k++) fsRemove(fsPath(suspect[k], pbuf, sizeof(pbuf)));
+  };
 
   for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     int idx = base + attempt;
@@ -366,8 +530,9 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
     char name[24];
     snprintf(name, sizeof(name), "%s_%03d.CSV", prefix, idx);
 
-    File32 f;
-    if (!f.open(name, O_WRITE | O_CREAT | O_TRUNC)) {
+    SdFile f;
+    char pbuf[32];
+    if (!fsOpenWrite(f, fsPath(name, pbuf, sizeof(pbuf)))) {
       // Could be a locked/full card — or one that was pulled since the last save
       // and is still serving a cached FAT. Drop the mount either way so the next
       // attempt re-inits rather than failing forever against a dead handle.
@@ -381,17 +546,17 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
     // file, so verification costs no second pass over the source data.
     VerifyingPrint vp(f);
     bool ok = body(vp);
-    if (vp.getWriteError() || f.getWriteError()) ok = false;
+    if (vp.getWriteError() || fsWriteError(f)) ok = false;
     // sync() is where the LAST cache block and the directory entry actually reach
     // the card, and close() flushes again — so they are the likeliest place for a
     // late failure, and both used to be called for their side effect with their
     // result thrown away.
-    if (!f.sync()) ok = false;
-    if (f.getWriteError()) ok = false;
-    if (!f.close()) ok = false;
+    if (!fsSync(f)) ok = false;
+    if (fsWriteError(f)) ok = false;
+    if (!fsClose(f)) ok = false;
 
     if (!ok) {
-      g_sd.remove(name);
+      fsRemove(fsPath(name, pbuf, sizeof(pbuf)));
       sweep();
       invalidate();   // a mid-write failure usually means the card went away
       snprintf(msg, msgLen, "Write failed - card removed or full?");
@@ -427,12 +592,21 @@ bool info(char *msg, size_t msgLen) {
   // re-init rather than reporting whatever was mounted before.
   invalidate();
   if (!mount(msg, msgLen)) return false;
+#if BOARD_SD_SOFT_SPI
   uint64_t bytes = (uint64_t)g_sd.card()->sectorCount() * 512ull;
   uint8_t ct = g_sd.card()->type();
   const char *kind = ct == SD_CARD_TYPE_SDHC ? "SDHC"
                    : ct == SD_CARD_TYPE_SD2  ? "SDSC"
                    : ct == SD_CARD_TYPE_SD1  ? "SD"
                                              : "SD";
+#else
+  uint64_t bytes = SD_MMC.cardSize();
+  sdcard_type_t ct = SD_MMC.cardType();
+  const char *kind = ct == CARD_SDHC ? "SDHC"
+                   : ct == CARD_SD   ? "SDSC"
+                   : ct == CARD_MMC  ? "MMC"
+                                     : "SD";
+#endif
   // Report type + size only. Free space needs freeClusterCount(), which walks
   // the whole FAT — many seconds over software SPI on a 32 GB card, and it was
   // returning an error sentinel anyway. Size is what the user actually wants.
@@ -445,15 +619,17 @@ bool info(char *msg, size_t msgLen) {
 // wrote actually landed on the card.
 bool readBackTest(const char *name, char *msg, size_t msgLen) {
   if (!mount(msg, msgLen)) return false;
-  File32 f;
-  if (!f.open(name, O_RDONLY)) {
+  SdFile f;
+  char pbuf[32];
+  if (!fsOpenRead(f, fsPath(name, pbuf, sizeof(pbuf)))) {
     unmount();
     snprintf(msg, msgLen, "reopen failed");
     return false;
   }
-  // The FAT directory timestamp is what a PC's file listing shows, and it comes
-  // from the fatDateTime() callback, NOT from anything in the file body — so
-  // print it separately to prove the callback is wired up.
+  // The FAT directory timestamp is what a PC's file listing shows, and it does
+  // NOT come from anything in the file body — so print it separately to prove
+  // the timestamp mechanism (SdFat callback / system clock) is wired up.
+#if BOARD_SD_SOFT_SPI
   uint16_t fdate = 0, ftime = 0;
   if (f.getModifyDateTime(&fdate, &ftime)) {
     Serial.printf("[sdtest]   FAT modify stamp: %04d-%02d-%02d %02d:%02d:%02d\n",
@@ -462,11 +638,29 @@ bool readBackTest(const char *name, char *msg, size_t msgLen) {
   } else {
     Serial.println("[sdtest]   FAT modify stamp: none");
   }
+#else
+  time_t mt = f.getLastWrite();
+  struct tm mtm;
+  if (mt > 0 && localtime_r(&mt, &mtm)) {
+    Serial.printf("[sdtest]   FAT modify stamp: %04d-%02d-%02d %02d:%02d:%02d\n",
+                  mtm.tm_year + 1900, mtm.tm_mon + 1, mtm.tm_mday,
+                  mtm.tm_hour, mtm.tm_min, mtm.tm_sec);
+  } else {
+    Serial.println("[sdtest]   FAT modify stamp: none");
+  }
+#endif
   int lines = 0;
   while (f.available() && lines < 8) {
     char line[80];
+#if BOARD_SD_SOFT_SPI
     int n = f.fgets(line, sizeof(line));
     if (n <= 0) break;
+#else
+    size_t n = f.readBytesUntil('\n', line, sizeof(line) - 2);
+    if (n == 0) break;
+    line[n] = '\n';
+    line[n + 1] = '\0';
+#endif
     Serial.printf("[sdtest]   %s", line);
     lines++;
   }

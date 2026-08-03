@@ -1,9 +1,23 @@
-# EL15 Load Control — standalone ESP32-C6 firmware
+# EL15 Load Control — standalone ESP32 firmware
 
-Turns a **Waveshare ESP32-C6-Touch-AMOLED-1.8** into a self-contained
-controller for the ALIENTEK **EL15** electronic load — no phone required. The
-board is the BLE central, renders the instrument UI on its AMOLED touch panel,
-and runs its own resistance-sweep and battery-capacity test engines.
+Turns a Waveshare touchscreen board into a self-contained controller for the
+ALIENTEK **EL15** electronic load — no phone required. The board is the BLE
+central, renders the instrument UI on its touch panel, and runs its own
+resistance-sweep and battery-capacity test engines.
+
+**Two board targets**, one PlatformIO env each (`src/board_config.h` selects the
+pin map):
+
+| Env | Board | Panel | State |
+|---|---|---|---|
+| `esp32-c6-amoled` | ESP32-C6-Touch-AMOLED-1.8 | 368×448 QSPI AMOLED | **hardware-verified** — every bench result in the docs is from this board |
+| `esp32-s3-lcd35` | ESP32-S3-Touch-LCD-3.5 | 320×480 ST7796 SPI IPS | compiles; **never run on hardware** — see [`S3_BRINGUP.md`](S3_BRINGUP.md) |
+
+The S3 board brings 8 MB of PSRAM and a hardware SDMMC host, which lifts the two
+constraints that shape the C6 build (a 1/7-frame draw buffer fighting BLE for
+contiguous heap, and a bit-banged SD link that makes a verified save take ~20 s).
+Waveshare's "-C" SKU of that board is the same hardware bundled with an OV5640
+camera, which this firmware does not use.
 
 > **Status (2026-08-01): running on real hardware.** The firmware builds clean,
 > boots clean, and has been driven against a **real ALIENTEK EL15** — connect,
@@ -89,15 +103,22 @@ hop between resets, so discover it rather than hard-coding it.
 ```bash
 PIO=~/.platformio/penv/Scripts/pio.exe
 PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
-"$PIO" run -d firmware                                  # build (-Wall -Wextra on)
-"$PIO" run -d firmware -t upload --upload-port "$PORT"  # flash
-"$PIO" device monitor -p "$PORT" -b 115200              # serial log
+E=esp32-c6-amoled          # or esp32-s3-lcd35
+"$PIO" run -d firmware -e $E                                  # build (-Wall -Wextra on)
+"$PIO" run -d firmware -e $E -t upload --upload-port "$PORT"  # flash
+"$PIO" device monitor -p "$PORT" -b 115200                    # serial log
 ```
 
-Current build: **~2.11 MB** of the 3 MB `huge_app` slot, **RAM 17.8 %** static.
-First build downloads ~1 GB (platform + RISC-V toolchain + arduino-esp32 + libs);
-later builds are incremental. Changing `include/lv_conf.h` forces a full LVGL
-recompile.
+Omitting `-e` builds **both** targets, which is the cheap way to confirm a change
+has not broken the other board.
+
+Current builds, of the 3 MB `huge_app` slot: C6 **2.19 MB**, S3 **2.02 MB**
+(the S3 image is smaller mainly because it drops the software-SPI SD driver for
+the SoC's SDMMC host). First build of each target downloads ~1 GB (platform +
+toolchain + arduino-esp32 + libs) and the two targets need *different*
+toolchains — RISC-V for the C6, Xtensa for the S3 — so the first S3 build after
+a C6-only checkout has a long download. Later builds are incremental. Changing
+`include/lv_conf.h` forces a full LVGL recompile.
 
 The ESP32-C6 needs **arduino-esp32 3.x** (IDF 5.1+), which mainline PlatformIO
 doesn't ship — `platformio.ini` therefore uses the community

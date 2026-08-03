@@ -28,10 +28,20 @@ static QueueHandle_t g_queue = nullptr;
 // One note. freq 0 = a silent gap. amp is 0..100 before volume/mute scaling.
 struct Note { uint16_t freq; uint16_t durMs; uint8_t amp; };
 
-// Drive the speaker-amp enable bit on the shared TCA9554 expander high, without
+// Power the speaker amplifier, where that is a thing this board lets us do.
+//
+// C6 board: the amp's enable is TCA9554 expander bit 7 — drive it high without
 // disturbing the panel bits already set there (read-modify-write, same pattern
 // as display.cpp's panel enable).
+//
+// S3 board: there is nothing to do. The vendor's port leaves the codec's PA pin
+// unconnected (es8311_cfg.pa_pin = GPIO_NUM_NC) while still declaring a 5 V PA,
+// and no demo asserts an enable line anywhere — the amplifier is powered
+// permanently in hardware and playback works from the codec + I2S alone.
 static void ampEnable() {
+#if !SPK_AMP_EN_VIA_EXPANDER
+  return;
+#else
   auto rmw = [](uint8_t reg, uint8_t setMask, uint8_t clrMask) {
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(reg);
@@ -46,6 +56,7 @@ static void ampEnable() {
   };
   rmw(0x03, 0x00, SPK_AMP_EN_BIT);  // config: 0 = output
   rmw(0x01, SPK_AMP_EN_BIT, 0x00);  // output: drive high (amp on)
+#endif
 }
 
 static bool es8311Init() {

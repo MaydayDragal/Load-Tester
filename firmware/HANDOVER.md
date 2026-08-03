@@ -1,8 +1,15 @@
 # EL15 Controller Firmware — Session Handover
 
-Living handover for the **standalone ESP32-C6 firmware** (`firmware/`) that turns
-a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
-ALIENTEK EL15 electronic load. Update this at the end of each session.
+Living handover for the **standalone ESP32 firmware** (`firmware/`) that turns a
+Waveshare touchscreen board into an on-device controller for the ALIENTEK EL15
+electronic load. Update this at the end of each session.
+
+**Two board targets** (`src/board_config.h`, one PlatformIO env each):
+`esp32-c6-amoled` is the ESP32-C6-Touch-AMOLED-1.8 and is the **hardware-verified**
+one — every bench result below came from it. `esp32-s3-lcd35` is the
+ESP32-S3-Touch-LCD-3.5 being transitioned to; it lives on branch
+`claude/esp32-s3-touch-lcd-3.5`, compiles, and **has never run on hardware**
+(see [`S3_BRINGUP.md`](S3_BRINGUP.md)).
 
 **Last updated:** 2026-08-03.
 **Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `3bd378e`.
@@ -48,6 +55,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-03 | **Port to the ESP32-S3-Touch-LCD-3.5, on branch `claude/esp32-s3-touch-lcd-3.5`** (the hardware is not in hand yet, so it is deliberately NOT on main). The firmware is now dual-board: `src/board_config.h` selects between `board_c6_amoled.h` and `board_s3_lcd35.h`, and platformio.ini has an env for each. New board: 320×480 ST7796 over plain SPI (vs QSPI AMOLED), PWM backlight (vs a panel command), FT6336 touch (same FocalTech family, so the driver is unchanged), 8 MB PSRAM (so LVGL gets double buffers and low-memory mode becomes a no-op), and **hardware SDMMC instead of bit-banged SPI** — which should make a verified save sub-second instead of ~20 s. Both envs build clean; the C6 image is unchanged to within a few bytes. **Nothing is hardware-verified** — every pin came from Waveshare's demo sources, not a schematic. `S3_BRINGUP.md` is the falsify-in-order checklist for when the board arrives. |
 | 2026-08-03 | **Repo slimmed to firmware-only.** The Android control app (`app/`), the phone BLE simulator (`simulator/`), the Gradle scaffolding and the Android CI workflow were removed — last present at `1cd5607`; resurrect from git history if ever needed. Hardware-free bench testing now means checking the simulator out from history and building it, or testing against the real EL15. The app's missing command checksum is moot. |
 | 2026-08-03 | **Full code QA sweep (10-reviewer multi-agent), 11 findings, all fixed.** Worst: reconnecting while already connected wedged `state_ = IDLE` on a live link — telemetry kept flowing but every write, including the safety LOAD_OFF, was silently refused. Also: a failed FFF1 subscribe reported "Connected" with dead telemetry; a DISCONNECTED event could be lost if the queue stayed full (now a latched flag + `loopTick` reconciles `state_` against the real link, both directions); the poll hold froze polling after 24.9 days' uptime; capacity reports now snapshot probe wiring at test START (a Settings change no longer relabels a recorded run) and a `samplelog::replay` failure fails the save; R-test aborts pre-flight on a <0.1 A sweep span instead of drawing current for a fit that cannot succeed; `lib_deps` pinned exactly to the hardware-verified versions; IDF scaffolding reconciled (all 10 TUs, spiffs partition, LVGL ~8.4, SdFat wrapper) but still never built. |
 | 2026-08-03 | **Saves are now read back and checksummed** (§16) — chunked CRC-32 at 8 KB, one retry onto fresh clusters, honest failure. Roughly doubles save time; not optional, since a toggle would reintroduce the silent loss it closes. |

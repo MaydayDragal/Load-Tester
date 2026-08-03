@@ -5,8 +5,15 @@ Advanced-QA reference for the **standalone ESP32-C6 firmware** in `firmware/`
 status, how to build/flash/drive it, the code layout, a per-feature test matrix,
 the wire protocol, safety-critical behavior, and known gaps/risks.
 
-> Scope: the **`firmware/` ESP32-C6 target** running the v2 "Focus" touchscreen
-> UI. The Android app and the phone-based BLE load simulator this guide once
+> Scope: the **`firmware/` ESP32-C6 target** (env `esp32-c6-amoled`) running the
+> v2 "Focus" touchscreen UI. Everything verified in this guide was verified on
+> that board. A second target exists — `esp32-s3-lcd35`, the
+> ESP32-S3-Touch-LCD-3.5 — which compiles but has never run on hardware; the
+> feature *behaviour* described here should be identical, but its board bring-up
+> has its own checklist in [`S3_BRINGUP.md`](S3_BRINGUP.md). Do not read a ✅ in
+> this guide as covering that board.
+>
+> The Android app and the phone-based BLE load simulator this guide once
 > referenced as test tools were removed from the repo on 2026-08-03 (last
 > present at `1cd5607`) — check the simulator out from git history for
 > hardware-free testing, or test against the real EL15.

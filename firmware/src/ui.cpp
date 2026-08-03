@@ -14,6 +14,7 @@
 
 #include "audio.h"
 #include "battery_model.h"
+#include "board_config.h"   // UI_MENU_TILE_W/H — panel-derived grid geometry
 #include "display.h"
 #include "prefs.h"
 #include <math.h>
@@ -2917,9 +2918,11 @@ static void buildMenu() {
   };
   for (int i = 0; i < 8; i++) {
     lv_obj_t *t = flatBtn(grid);
-    // 84 px: 4 rows + 3 gaps must fit the ~366 px grid (448 - chrome, 16 px
-    // overlay pad) now that Settings makes seven tiles.
-    lv_obj_set_size(t, 164, 84);
+    // Tile width is derived from the panel (board_config.h) — two columns plus
+    // the overlay pad and inter-column gap. A fixed 164 px was right for the
+    // 368 px AMOLED but overflows a 320 px panel, wrapping the grid to one
+    // column. 84 px tall: 4 rows + 3 gaps must fit the grid below the chrome.
+    lv_obj_set_size(t, UI_MENU_TILE_W, UI_MENU_TILE_H);
     styleCard(t, COL_CARD, COL_BORDER, 14, 8);
     lv_obj_set_flex_flow(t, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(t, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -3375,7 +3378,7 @@ static void buildPicker() {
   static const char *MU[MODE_N] = {"A", "V", "ohm", "W", "A", "A", "ohm", "V"};
   for (int i = 0; i < MODE_N; i++) {
     lv_obj_t *t = flatBtn(grid);
-    lv_obj_set_size(t, 164, 74);
+    lv_obj_set_size(t, UI_MENU_TILE_W, 74);
     bool rt = (MODE_IDS[i] == MODE_RT || MODE_IDS[i] == MODE_BATT);
     styleCard(t, COL_CARD, rt ? COL_AMBER : COL_BORDER, 14, 4);
     lv_obj_set_flex_flow(t, LV_FLEX_FLOW_COLUMN);

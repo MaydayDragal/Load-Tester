@@ -7,6 +7,10 @@
 
 #include "board_config.h"
 
+// Panel bring-up, per board. Both paths end at a single `g_gfx` that the rest of
+// this file draws through; only brightness differs enough to need its own
+// typed pointer (see setBrightness()).
+#if BOARD_PANEL_QSPI_AMOLED
 // SH8601 AMOLED over QSPI via Arduino_GFX. Arduino_GFX ships an Arduino_SH8601
 // driver and an Arduino_ESP32QSPI bus; this is the same combination Waveshare's
 // demos use for this panel.
@@ -29,12 +33,38 @@ static Arduino_SH8601 *g_amoled = new Arduino_SH8601(
     g_bus, LCD_RST_GPIO, 0 /* rotation */, LCD_WIDTH, LCD_HEIGHT);
 static Arduino_GFX *g_gfx = g_amoled;
 
+#elif BOARD_PANEL_SPI_TFT
+// ST7796 IPS TFT over ordinary 4-wire SPI, matching Waveshare's own
+// ESP32-S3-Touch-LCD-3.5 Arduino demos (08_gfx_helloworld, 11_lvgl_arduino_v8):
+//     Arduino_ESP32SPI(DC, CS, SCK, MOSI, MISO)
+//     Arduino_ST7796(bus, RST, rotation, ips, w, h)
+// CS is not brought out to a GPIO on this board (the panel is the only device on
+// its bus, so it is tied asserted) and RST is on the TCA9554 expander, so both
+// are -1 here and the reset pulse is issued over I2C in expanderPanelEnable().
+// `ips = true` is what the demo passes and is what gets the inversion right —
+// an ST7796 initialised as non-IPS renders colour-inverted.
+static Arduino_DataBus *g_bus = new Arduino_ESP32SPI(
+    LCD_DC_GPIO, LCD_CS_GPIO, LCD_SPI_SCK, LCD_SPI_MOSI, LCD_SPI_MISO);
+static Arduino_GFX *g_gfx = new Arduino_ST7796(
+    g_bus, LCD_RST_GPIO, 0 /* rotation */, true /* ips */, LCD_WIDTH, LCD_HEIGHT);
+#else
+#error "board_config.h defined no panel type"
+#endif
+
 namespace display {
 
 // ---- LVGL draw buffer ------------------------------------------------------
+// Each flush chunk pays a CASET/PASET/RAMWR overhead, so a taller buffer = fewer
+// chunks = faster. How tall it can be is entirely a question of what memory the
+// board has.
+#if BOARD_HAS_PSRAM
+// 8 MB of PSRAM: take a third of the frame per bank, TWO banks (~300 KB total,
+// under 4 % of PSRAM). LVGL then renders into one bank while the other is being
+// flushed, and internal SRAM stays free for BLE and the rest of the system.
+static const uint32_t BUF_LINES = LCD_HEIGHT / 3;
+#else
 // Partial buffer, ONE bank. AMOLED is 16bpp; a full framebuffer
-// (368*448*2 = ~322 KB) is far too large for on-chip RAM, and each flush chunk
-// pays a CASET/PASET/RAMWR overhead, so a taller buffer = fewer chunks = faster.
+// (368*448*2 = ~322 KB) is far too large for on-chip RAM.
 //
 // Sizing is a RAM tug-of-war: this board has 320 KB and no PSRAM, and NimBLE
 // needs a ~25-30 KB contiguous block free to ESTABLISH a connection. With the UI
@@ -45,7 +75,9 @@ namespace display {
 // (7 flush chunks). If the UI ever slims back down, this can grow again — but
 // keep a >=~30 KB contiguous margin for the BLE link, or connects break.
 static const uint32_t BUF_LINES = LCD_HEIGHT / 7;
+#endif
 static lv_color_t *g_buf1 = nullptr;
+static lv_color_t *g_buf2 = nullptr;
 static lv_disp_draw_buf_t g_drawBuf;
 static lv_disp_drv_t g_dispDrv;
 static lv_indev_drv_t g_indevDrv;
@@ -214,12 +246,27 @@ static void touchInit() {
 
 static uint8_t g_brightness = LCD_DEFAULT_BRIGHTNESS;
 
-void setBrightness(uint8_t level) {
+// Push a 0..255 level at the panel. The two boards do this in completely
+// different ways — a controller command on the AMOLED, a PWM'd backlight rail on
+// the TFT — so everything else in this file goes through here and never touches
+// the panel directly.
+static void applyBrightness(uint8_t level) {
+#if BOARD_BACKLIGHT_PWM
+  // LEDC PWM on the backlight pin. Scale the 0..255 UI range onto the timer's
+  // full duty range so the top of the slider is genuinely full brightness.
+  const uint32_t maxDuty = (1u << LCD_BL_PWM_BITS) - 1u;
+  ledcWrite(LCD_BL_GPIO, (uint32_t)level * maxDuty / 255u);
+#else
   // Arduino_SH8601 exposes setBrightness() (SH8601 command 0x51). If your
   // Arduino_GFX version predates it, update the library or send 0x51 via the
   // bus here.
-  g_brightness = level;
   g_amoled->setBrightness(level);
+#endif
+}
+
+void setBrightness(uint8_t level) {
+  g_brightness = level;
+  applyBrightness(level);
 }
 
 uint8_t getBrightness() { return g_brightness; }
@@ -284,7 +331,7 @@ void setSleep(bool on) {
   g_asleep = on;
   if (on) {
     g_wakeBrightness = g_brightness;
-    g_amoled->setBrightness(0);   // keep g_brightness as the restore value
+    applyBrightness(0);   // keep g_brightness as the restore value
   } else {
     setBrightness(g_wakeBrightness);
   }
@@ -385,13 +432,17 @@ bool setRtcTime(int year, int mon, int day, int hour, int min, int sec) {
   return Wire.endTransmission() == 0;
 }
 
-// The AMOLED's reset/enable lines are on the on-board TCA9554 I/O expander, not
-// a GPIO. Drive expander bits 4 & 5 high (read-modify-write on the config +
-// output registers) to power/enable the panel and release it from reset, then
-// let it settle — exactly what Waveshare's demo does before gfx->begin().
+// Both boards put the panel's reset/enable behind the TCA9554 I/O expander at
+// 0x20 rather than on a GPIO, so the panel must be brought up over I2C BEFORE
+// the controller is initialised. What "brought up" means differs:
+//
+//   C6 AMOLED : hold expander bits 4 & 5 HIGH — they power the panel rail and
+//               hold it out of reset for as long as they stay asserted.
+//   S3 TFT    : PULSE expander bit 1 low then high — it is an ordinary
+//               active-low reset line, so it is asserted momentarily and
+//               released, not held.
 static void expanderPanelEnable() {
 #if LCD_RST_VIA_EXPANDER
-  const uint8_t bits = LCD_EXPANDER_PWR_BITS;
   auto rmw = [&](uint8_t reg, uint8_t setMask, uint8_t clrMask) {
     Wire.beginTransmission(IO_EXPANDER_ADDR);
     Wire.write(reg);
@@ -404,9 +455,21 @@ static void expanderPanelEnable() {
     Wire.write(v);
     Wire.endTransmission();
   };
+#if LCD_RST_EXPANDER_ACTIVE_LOW
+  const uint8_t bit = LCD_EXPANDER_RST_BIT;
+  rmw(0x03, 0x00, bit);   // config reg: 0 = output
+  rmw(0x01, bit, 0x00);   // start released (high)
+  delay(10);
+  rmw(0x01, 0x00, bit);   // assert reset (low)
+  delay(10);
+  rmw(0x01, bit, 0x00);   // release
+  delay(200);             // ST7796 needs ~120 ms after reset before commands
+#else
+  const uint8_t bits = LCD_EXPANDER_PWR_BITS;
   rmw(0x03, 0x00, bits);  // config reg: 0 = output → make bits 4,5 outputs
   rmw(0x01, bits, 0x00);  // output reg: drive bits 4,5 high
   delay(500);             // let the panel power rail / reset settle
+#endif
 #endif
 }
 
@@ -449,24 +512,53 @@ void begin() {
   // BOOT button: strapping pin, has an external pull-up; INPUT is enough.
   pinMode(BOOT_BTN_GPIO, INPUT_PULLUP);
 
-  // Run the QSPI display bus at 80 MHz (the SH8601/CO5300 handle it) instead of
-  // Arduino_GFX's 40 MHz default — the synchronous flush dominates every redraw,
-  // so doubling the pixel clock roughly halves screen-transition time.
-  if (!g_gfx->begin(80000000)) {
-    // Panel bring-up failed — most often a QSPI pin mismatch. Check board_config.h.
-    Serial.println("[display] Arduino_GFX begin() failed — verify QSPI pins");
+#if BOARD_BACKLIGHT_PWM
+  // Bring the backlight up dark and let setBrightness() below raise it, so the
+  // panel's first uninitialised frame is never shown.
+  ledcAttach(LCD_BL_GPIO, LCD_BL_PWM_HZ, LCD_BL_PWM_BITS);
+  ledcWrite(LCD_BL_GPIO, 0);
+#endif
+
+  // Pixel clock: see LCD_SPI_HZ in the board header for why each board uses the
+  // value it does. The synchronous flush dominates every redraw, so this is the
+  // single biggest lever on screen-transition speed.
+  if (!g_gfx->begin(LCD_SPI_HZ)) {
+    // Panel bring-up failed — most often a bus pin mismatch. Check board_config.h.
+    Serial.println("[display] Arduino_GFX begin() failed — verify panel bus pins");
   }
   g_gfx->fillScreen(RGB565_BLACK);
   setBrightness(LCD_DEFAULT_BRIGHTNESS);
 
   lv_init();
   size_t bufPx = (size_t)LCD_WIDTH * BUF_LINES;
+#if BOARD_HAS_PSRAM
+  // With 8 MB of PSRAM the RAM tug-of-war that shapes the C6 build does not
+  // exist: take two big buffers so LVGL can render the next chunk while the
+  // current one is being pushed, and leave internal RAM entirely to BLE and the
+  // rest of the system. PSRAM is slower than internal SRAM, but these buffers are
+  // written once and read once per flush, which is exactly the access pattern it
+  // handles well.
+  g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  g_buf2 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  if (!g_buf1) {
+    // Falling back rather than dying: a board whose PSRAM did not come up (wrong
+    // memory_type in platformio.ini is the usual cause) still boots to a usable
+    // UI on a smaller internal buffer, and says so.
+    Serial.println("[display] PSRAM draw-buffer alloc FAILED — is memory_type qio_opi? "
+                   "falling back to internal RAM");
+    bufPx = (size_t)LCD_WIDTH * (LCD_HEIGHT / 8);
+    g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t),
+                                            MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    g_buf2 = nullptr;
+  }
+#else
   g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+#endif
   if (!g_buf1) {
     Serial.println("[display] LVGL draw-buffer alloc failed — reduce BUF_LINES");
     return;  // don't hand LVGL null buffers
   }
-  lv_disp_draw_buf_init(&g_drawBuf, g_buf1, nullptr, bufPx);
+  lv_disp_draw_buf_init(&g_drawBuf, g_buf1, g_buf2, bufPx);
 
   lv_disp_drv_init(&g_dispDrv);
   g_dispDrv.hor_res = LCD_WIDTH;
@@ -481,28 +573,34 @@ void begin() {
   lv_indev_drv_register(&g_indevDrv);
 }
 
-// ---- AMOLED burn-in mitigation ---------------------------------------------
-// This is a static instrument UI on an OLED: "VOLTAGE", "CURRENT", the status
-// strip and the card outlines sit in exactly the same pixels for hours at a
-// time, and on an AMOLED that is permanent damage, not a temporary artefact.
-// Two cheap defences, both on by default:
+// ---- Screen care -----------------------------------------------------------
+// This is a static instrument UI: "VOLTAGE", "CURRENT", the status strip and the
+// card outlines sit in exactly the same pixels for hours at a time. Two cheap
+// defences — but only the second applies to both boards:
 //
 //   1. Pixel shift — the whole UI creeps around a 3x3 px box, one step every
 //      PIXEL_SHIFT_MS. No edge sits over the same subpixel for more than a few
 //      minutes, which is what smears the wear out. Applied as a translate on
 //      the active screen and the overlay layer, so it costs one redraw per step
 //      and needs no cooperation from the UI code.
+//      **AMOLED ONLY.** On an OLED a static UI is permanent damage rather than a
+//      temporary artefact, which is what makes the constant creeping worth a
+//      redraw every 90 s. An IPS LCD does not burn in, so on that board this
+//      defaults OFF and the redraws are pure waste. The setting still exists
+//      there (a user can switch it on), it simply starts disabled.
 //   2. Idle dim, then black — after idleDimS of no touch the panel drops to a
 //      readable-but-dark level; after IDLE_SLEEP_FACTOR x that it blanks
-//      entirely (an AMOLED drawing black uses no backlight power at all).
-//      Either state ends on the first touch. Sleep is suppressed while
-//      inhibitSleep(true) is set, so a long unattended test keeps its (dimmed)
-//      screen instead of going dark mid-run.
+//      entirely. This saves real power on BOTH boards, for different reasons: an
+//      AMOLED drawing black lights no pixels, and on the TFT the blank state
+//      drives the backlight PWM to zero, which is where nearly all of that
+//      board's display power goes. Either state ends on the first touch. Sleep
+//      is suppressed while inhibitSleep(true) is set, so a long unattended test
+//      keeps its (dimmed) screen instead of going dark mid-run.
 static const uint32_t PIXEL_SHIFT_MS = 90000;
 static const int IDLE_SLEEP_FACTOR = 5;
 static const uint8_t IDLE_DIM_LEVEL = 24;   // out of 255
 
-static bool g_pixelShift = true;
+static bool g_pixelShift = BOARD_PANEL_QSPI_AMOLED ? true : false;
 static uint16_t g_idleDimS = 0;             // 0 = never dim
 static bool g_inhibitSleep = false;
 static bool g_dimmed = false;
@@ -559,7 +657,7 @@ static void idleTick() {
     g_dimmed = true;
     // Straight to the panel: g_brightness stays the user's value so any wake
     // (or a Settings change) restores it without having to remember it here.
-    g_amoled->setBrightness(min(IDLE_DIM_LEVEL, g_brightness));
+    applyBrightness(min(IDLE_DIM_LEVEL, g_brightness));
   }
   if (g_dimmed && !g_inhibitSleep &&
       idleMs >= (uint32_t)g_idleDimS * IDLE_SLEEP_FACTOR * 1000) {
@@ -577,8 +675,10 @@ static void idleTick() {
 // smaller flush chunks — slower, fine for a settings screen). Restored, best
 // effort, the moment Wi-Fi is done (a successful NTP sync reboots to fully
 // reclaim the buffer — see onNetProgress).
-static const uint32_t SMALL_BUF_LINES = 16;   // ~11.5 KB, frees the most for Wi-Fi
 static bool g_lowMem = false;
+
+#if !BOARD_HAS_PSRAM
+static const uint32_t SMALL_BUF_LINES = 16;   // ~11.5 KB, frees the most for Wi-Fi
 
 static bool allocDrawBuf(uint32_t lines) {
   size_t bufPx = (size_t)LCD_WIDTH * lines;
@@ -589,6 +689,7 @@ static bool allocDrawBuf(uint32_t lines) {
   lv_disp_draw_buf_init(&g_drawBuf, g_buf1, nullptr, bufPx);
   return true;
 }
+#endif
 
 // Swap the draw buffer. Frees the current one FIRST so the replacement (and, in
 // low-mem mode, Wi-Fi) has room — we only have ~1.5 KB spare, nowhere near
@@ -602,6 +703,16 @@ static bool allocDrawBuf(uint32_t lines) {
 // next reboot. Entering low-mem always uses the smallest buffer to free the
 // most for Wi-Fi.
 void setLowMemMode(bool on) {
+#if BOARD_HAS_PSRAM
+  // Nothing to do on a board with PSRAM, and doing it anyway would make things
+  // WORSE: the draw buffers live in PSRAM here, so internal RAM is already free
+  // for Wi-Fi, while allocDrawBuf() allocates MALLOC_CAP_INTERNAL — the "shrink"
+  // would move the buffer OUT of PSRAM and INTO the very memory Wi-Fi wants, and
+  // drop the second bank on the way. The callers stay unchanged (the UI still
+  // announces a Wi-Fi window); this simply becomes the no-op it should be.
+  (void)on;
+  return;
+#else
   if (on == g_lowMem) return;
   heap_caps_free(g_buf1);
   g_buf1 = nullptr;
@@ -627,6 +738,7 @@ void setLowMemMode(bool on) {
   Serial.printf("[display] draw buffer -> %u lines (%s), heap now %u free\n",
                 (unsigned)got, g_lowMem ? "reduced" : "full",
                 (unsigned)ESP.getFreeHeap());
+#endif
 }
 
 bool lowMemMode() { return g_lowMem; }
