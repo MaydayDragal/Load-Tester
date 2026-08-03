@@ -331,6 +331,11 @@ void setup() {
     g_batt.ratedAh = ratedAh;   // 0 = not given; SoH is then suppressed
     g_batt.chemistry = chem;    // drives the discharge-curve time estimate
     g_batt.cells = cells;
+    // Snapshot the probe wiring for the report. Read at START, not at save
+    // time: a Settings change between the run and a (re)save must not relabel
+    // data that was recorded under the old setting.
+    g_batt.fourWire = prefs::get().fourWire;
+    g_batt.tareOhm = prefs::get().tareOhm;
     g_batt.start();
   };
   actions.stopBatt   = []() { g_batt.stop(); };

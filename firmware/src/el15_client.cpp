@@ -104,8 +104,9 @@ void El15Client::enqueueDisconnected() {
   Event e;
   e.kind = Event::DISCONNECTED;
   // Disconnect is rare and must not be lost, so allow a brief wait if the queue
-  // is momentarily full.
-  xQueueSend(evtQueue_, &e, pdMS_TO_TICKS(20));
+  // is momentarily full — and if even that fails, latch a flag the loop task
+  // checks, so the event is delayed at worst, never dropped.
+  if (xQueueSend(evtQueue_, &e, pdMS_TO_TICKS(20)) != pdTRUE) discPending_ = true;
 }
 
 void El15Client::drainEvents() {
@@ -128,6 +129,12 @@ void El15Client::drainEvents() {
         break;
       }
     }
+  }
+  // Fallback for a DISCONNECTED event that could not be queued (queue full for
+  // longer than enqueueDisconnected() was willing to wait).
+  if (discPending_) {
+    discPending_ = false;
+    handleDisconnect();
   }
 }
 
@@ -168,6 +175,21 @@ bool El15Client::connectTo(const char *address, int addrType) {
 
 bool El15Client::connectAddr(const NimBLEAddress &addr) {
   stopScan();
+  // Connecting while a link is already up used to wedge: connect() fails on an
+  // already-connected client, the failure path set state_ = IDLE, and the OLD
+  // link stayed live — telemetry kept flowing while every write (including the
+  // safety LOAD_OFF) was silently refused. Reconnecting to the same peer is a
+  // no-op; a different peer gets a clean LOAD_OFF + teardown first, and the
+  // teardown's DISCONNECTED event is consumed HERE so it cannot wipe the new
+  // connection's state from the queue later.
+  if (client_ && client_->isConnected()) {
+    if (state_ == CONNECTED && addr.toString() == lastAddr_) return true;
+    shutdownAndDisconnect();
+    uint32_t t0 = millis();
+    while (client_->isConnected() && millis() - t0 < 1000) delay(10);
+    delay(50);      // let the host task enqueue its DISCONNECTED event...
+    drainEvents();  // ...and consume it before the new attempt begins
+  }
   setState(CONNECTING, "Connecting...");
   if (!client_) {
     client_ = NimBLEDevice::createClient();
@@ -203,7 +225,14 @@ bool El15Client::connectAddr(const NimBLEAddress &addr) {
   notifyChar_ = svc->getCharacteristic(el15::NOTIFY_UUID);
   writeChar_ = svc->getCharacteristic(el15::WRITE_UUID);
   if (!notifyChar_ || !writeChar_) { disconnect(); setState(IDLE, "EL15 characteristics missing"); return false; }
-  if (notifyChar_->canNotify()) notifyChar_->subscribe(true, notifyCb);
+  // Telemetry is the whole point of the link: a characteristic that cannot
+  // notify, or a CCCD write that fails, must fail the connect loudly — carrying
+  // on used to report "Connected" with a permanently blank Monitor.
+  if (!notifyChar_->canNotify() || !notifyChar_->subscribe(true, notifyCb)) {
+    disconnect();
+    setState(IDLE, "Subscribe failed");
+    return false;
+  }
 
   // Forensic GATT dump. A real EL15 that differs from the reverse-engineered
   // reference capture — a different command characteristic, or a write char that
@@ -231,6 +260,11 @@ bool El15Client::connectAddr(const NimBLEAddress &addr) {
 
   frameLen_ = 0;
   lastPollMs_ = 0;
+  // Re-anchor the control-write poll hold. Left at its initial 0, the signed
+  // comparison in loopTick() reads (int32_t)millis() — negative once uptime
+  // passes 2^31 ms (~24.9 days), which would silently stop all polling (and
+  // with it all telemetry) until a control write re-anchored it.
+  pollHoldUntilMs_ = millis();
   snprintf(lastAddr_, sizeof(lastAddr_), "%s", addr.toString().c_str());
   lastAddrType_ = addr.getType();
   setState(CONNECTED, "Connected - FFF0");
@@ -364,6 +398,13 @@ void El15Client::poll() { writeFixed(el15::POLL, sizeof(el15::POLL)); }
 
 void El15Client::loopTick() {
   drainEvents();  // process queued BLE events on THIS (loop) task
+  // Reconcile state_ with the real link. A lost or stale DISCONNECTED event
+  // can leave the two disagreeing in either direction, and both are unsafe: a
+  // "connected" UI over a dead link never fires the link-guard chain, and a
+  // live unmanaged link refuses the safety LOAD_OFF. Trust the controller, not
+  // the bookkeeping.
+  if (state_ == CONNECTED && client_ && !client_->isConnected()) handleDisconnect();
+  else if (state_ == IDLE && client_ && client_->isConnected()) client_->disconnect();
   if (state_ != CONNECTED) return;
 
 #ifdef EL15_POLLTEST

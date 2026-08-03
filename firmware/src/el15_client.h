@@ -115,6 +115,10 @@ class El15Client : public El15Controller {
   NimBLERemoteCharacteristic *notifyChar_ = nullptr;
 
   QueueHandle_t evtQueue_ = nullptr;
+  // Latched by enqueueDisconnected() (host task) if the event queue stayed full
+  // past its wait; drained by drainEvents() (loop task). A disconnect may be
+  // delayed by this path but can never be lost.
+  volatile bool discPending_ = false;
 
   // Addresses seen during the current scan, WITH their real type (public vs
   // random). connectTo() reuses the discovered type instead of forcing public,

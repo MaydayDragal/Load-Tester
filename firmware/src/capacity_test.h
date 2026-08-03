@@ -51,6 +51,11 @@ class CapacityTest {
     // charge travelled, extrapolated to the whole 0-100 % range. Meaningful even
     // for a PARTIAL discharge, which the measured capacityAh above is not.
     float impliedFullAh = 0;
+    // Probe wiring in force during the run (snapshotted at start), so the saved
+    // report labels what its voltages mean even if Settings change before a
+    // (re)save.
+    bool fourWire = false;
+    float tareOhm = 0;
   };
 
   // Configuration — set before start().
@@ -66,6 +71,12 @@ class CapacityTest {
   // rated-capacity estimate — nothing else changes.
   int chemistry = -1;
   int cells = 0;
+  // Probe-wiring snapshot for the report, set by the caller at start time from
+  // the device-wide setting. The engine itself never uses it — compensation is
+  // applied upstream (main.cpp compensateProbe()) — it is only carried into
+  // Result so the CSV describes the run as it was actually recorded.
+  bool fourWire = false;
+  float tareOhm = 0;
 
   // Callbacks (fired on the loop task).
   // phase: 1 = discharging, 2 = resting, 3 = paused.
@@ -467,6 +478,8 @@ class CapacityTest {
     // Only claim an implied full capacity if one was actually learned. A run
     // stopped after 2 % of travel has not measured anything worth extrapolating.
     r.impliedFullAh = qLearned_;
+    r.fourWire = fourWire;
+    r.tareOhm = fourWire ? 0 : tareOhm;
     if (onComplete) onComplete(r);
   }
 

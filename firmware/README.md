@@ -100,14 +100,16 @@ recompile.
 The ESP32-C6 needs **arduino-esp32 3.x** (IDF 5.1+), which mainline PlatformIO
 doesn't ship — `platformio.ini` therefore uses the community
 [pioarduino](https://github.com/pioarduino/platform-espressif32) platform fork.
-Libraries are pinned in `lib_deps` and resolve **newer** than the `^` floors:
+Libraries are pinned **exactly** in `lib_deps` to the versions the
+hardware-verified image was bench-tested against (they used to be `^` ranges,
+which let a clean checkout resolve libraries no verified image ever ran):
 
-| Pinned | Resolves to | Used for |
-|---|---|---|
-| `lvgl/lvgl @ ^8.3.11` | 8.4.0 | UI toolkit (config in `include/lv_conf.h`) |
-| `moononournation/GFX Library for Arduino @ ^1.4.9` | 1.6.7 | SH8601 AMOLED driver |
-| `h2zero/NimBLE-Arduino @ ^2.1.0` | 2.5.0 | BLE central (2.x required — 1.x callback signatures differ) |
-| `greiman/SdFat @ ^2.2.2` | 2.x | microSD over the custom software-SPI driver |
+| Pinned | Used for |
+|---|---|
+| `lvgl/lvgl @ 8.4.0` | UI toolkit (config in `include/lv_conf.h`) |
+| `moononournation/GFX Library for Arduino @ 1.6.7` | SH8601 AMOLED driver |
+| `h2zero/NimBLE-Arduino @ 2.5.0` | BLE central (2.x required — 1.x callback signatures differ) |
+| `greiman/SdFat @ 2.3.1` | microSD over the custom software-SPI driver |
 
 Notable build flags (all with reasons in `platformio.ini`):
 `ARDUINO_LOOP_STACK_SIZE=12288`, `SPI_DRIVER_SELECT=3` (our own SdSpi driver),
@@ -126,14 +128,17 @@ Notable build flags (all with reasons in `platformio.ini`):
 PLATFORMIO_BUILD_FLAGS="-D EL15_SDTEST" "$PIO" run -d firmware -t upload --upload-port "$PORT"
 ```
 
-### Build & flash → ESP-IDF (stale)
+### Build & flash → ESP-IDF (unverified)
 
 An ESP-IDF project (`CMakeLists.txt`, `main/`, `sdkconfig.defaults`,
 `partitions.csv`) also exists in the tree, compiling the same `src/` with
-arduino-esp32 as a component. **It has not been kept current** — `main/CMakeLists.txt`
-predates the audio feature and does not list `audio.cpp` / `es8311.c`, so it
-will not link until updated. The PlatformIO/Arduino build is the one that is
-built and flashed.
+arduino-esp32 as a component. As of 2026-08-03 its file list covers all ten
+translation units, its partition table carries the `spiffs` partition the
+LittleFS datapoint log needs, and its LVGL pin matches the 8.4 the code is
+adapted to — but **no ESP-IDF build has actually been run**; only the file
+lists and versions have been reconciled. The PlatformIO/Arduino build is the
+one that is built, flashed, and hardware-verified. Vendored-library setup:
+`components/README.md`.
 
 ### Arduino IDE alternative
 

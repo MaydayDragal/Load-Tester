@@ -15,7 +15,6 @@
 
 #include "capacity_test.h"
 #include "display.h"
-#include "prefs.h"
 #include "resistance_test.h"
 #include "sample_log.h"
 #include "sd_card.h"
@@ -107,18 +106,16 @@ inline bool saveBatt(const CapacityTest::Result &r, char *msg, size_t msgLen) {
     writeStamp(f);
     fpf(f, "# Cutoff voltage (V),%.2f\n", r.cutoffV);
     fpf(f, "# Discharge current (A),%.3f\n", r.currentA);
-    // Probe wiring is a device-wide setting rather than something the engine
-    // carries, but it changes what every voltage in this file MEANS — corrected
-    // back to the pack, or measured at the load's terminals — so the file has to
-    // state it. Read live at save time, which is moments after the run.
-    {
-      const prefs::Data &p = prefs::get();
-      fpf(f, "# Probe wiring,%s\n", p.fourWire ? "4-wire (Kelvin)" : "2-wire");
-      fpf(f, "# Lead resistance corrected (ohm),%.6f\n", p.fourWire ? 0.0f : p.tareOhm);
-      fpf(f, "# Voltages,%s\n",
-          (p.fourWire || p.tareOhm <= 0) ? "as reported by the load"
-                                         : "corrected to the pack terminals (V + I*R_lead)");
-    }
+    // Probe wiring changes what every voltage in this file MEANS — corrected
+    // back to the pack, or measured at the load's terminals — so the file has
+    // to state it. Snapshotted by the engine at start(), not read live here: a
+    // Settings change between the run and a (re)save must not relabel data that
+    // was recorded under the old setting.
+    fpf(f, "# Probe wiring,%s\n", r.fourWire ? "4-wire (Kelvin)" : "2-wire");
+    fpf(f, "# Lead resistance corrected (ohm),%.6f\n", r.fourWire ? 0.0f : r.tareOhm);
+    fpf(f, "# Voltages,%s\n",
+        (r.fourWire || r.tareOhm <= 0) ? "as reported by the load"
+                                       : "corrected to the pack terminals (V + I*R_lead)");
     if (r.ratedAh > 0) {
       fpf(f, "# Rated capacity (Ah),%.3f\n", r.ratedAh);
       fpf(f, "# Rated capacity (mAh),%.0f\n", r.ratedAh * 1000.0f);
@@ -172,12 +169,17 @@ inline bool saveBatt(const CapacityTest::Result &r, char *msg, size_t msgLen) {
         (unsigned long)n, (unsigned long)samplelog::intervalS());
     fpf(f, "elapsed_s,voltage_v,current_a,power_w,capacity_ah,capacity_mah,energy_wh,temperature_c\n");
     if (n > 0) {
-      samplelog::replay([&f](const samplelog::Rec &s) {
+      bool logOk = samplelog::replay([&f](const samplelog::Rec &s) {
         fpf(f, "%lu,%.4f,%.4f,%.4f,%.5f,%.2f,%.4f,%.1f\n",
             (unsigned long)s.tS, s.v, s.i, s.v * s.i, s.ah, s.ah * 1000.0f,
             s.wh, s.temp);
         return f.getWriteError() == 0;   // stop early if the card gave up
       });
+      // replay() returning false means the flash log could not be read (or the
+      // card gave up mid-stream): the datapoint block is missing or truncated,
+      // and a file the header promised n samples for must not be reported —
+      // let alone verified — as a good save.
+      if (!logOk) return false;
     }
     return f.getWriteError() == 0;
   }, msg, msgLen);

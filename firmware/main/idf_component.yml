@@ -10,4 +10,6 @@ dependencies:
   espressif/arduino-esp32:
     version: "^3.0.0"
   lvgl/lvgl:
-    version: "~8.3.0"
+    # Same minor as the PlatformIO build resolves (8.4.0) — the code is adapted
+    # to 8.4 (QA_GUIDE §3); ~8.3.0 quietly built a different LVGL here.
+    version: "~8.4.0"

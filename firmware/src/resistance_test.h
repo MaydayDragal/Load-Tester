@@ -389,6 +389,14 @@ class ResistanceTest {
     // the whole sweep linear and every sample useful.
     startCurrent_ = constrain(startCurrent, MIN_TEST_CURRENT,
                               max(maxCurrent_ - MIN_TEST_CURRENT, MIN_TEST_CURRENT));
+    // The fit refuses a sweep whose realized current span is under 0.05 A
+    // (fitSlope's spread gate) — catch that HERE, before up to 15 minutes of
+    // real current are drawn on a sweep that cannot produce a result. 2x the
+    // gate leaves room for the realized span coming in under the commanded one.
+    if (maxCurrent_ - startCurrent_ < 2 * MIN_TEST_CURRENT) {
+      abort_("Sweep current span too small for a fit - raise the peak current or lower the start current.");
+      return;
+    }
 
     sweepMsEff_ = constrain(sweepSeconds, MIN_SWEEP_S, MAX_SWEEP_S) * 1000u;
 

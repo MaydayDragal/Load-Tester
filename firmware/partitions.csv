@@ -1,7 +1,13 @@
 # Single-app layout (no OTA) sized for a 4 MB flash. The Arduino + NimBLE +
 # LVGL image is large, so the app slot is generous. Bump offsets/sizes if you
 # switch to an 8/16 MB module.
+#
+# The spiffs partition holds the LittleFS datapoint log (sample_log.cpp), which
+# mounts the partition labelled "spiffs" — same name and layout as the builtin
+# huge_app.csv the PlatformIO build uses. Without it the log silently no-ops
+# and every capacity CSV loses its per-sample block.
 # Name,     Type, SubType,  Offset,   Size
 nvs,        data, nvs,      0x9000,   0x6000,
 phy_init,   data, phy,      0xf000,   0x1000,
 factory,    app,  factory,  0x10000,  0x300000,
+spiffs,     data, spiffs,   0x310000, 0xe0000,

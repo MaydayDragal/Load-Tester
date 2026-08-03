@@ -10,6 +10,12 @@ idf_component_register(
         "${SHARED_DIR}/display.cpp"
         "${SHARED_DIR}/el15_client.cpp"
         "${SHARED_DIR}/ui.cpp"
+        "${SHARED_DIR}/audio.cpp"
+        "${SHARED_DIR}/es8311.c"
+        "${SHARED_DIR}/netclock.cpp"
+        "${SHARED_DIR}/prefs.cpp"
+        "${SHARED_DIR}/sample_log.cpp"
+        "${SHARED_DIR}/sd_card.cpp"
     INCLUDE_DIRS
         "${SHARED_DIR}"
         "${CMAKE_CURRENT_LIST_DIR}/../include"
@@ -18,6 +24,7 @@ idf_component_register(
         lvgl
         Arduino_GFX
         NimBLE-Arduino
+        SdFat
 )
 
 # Use the checked-in include/lv_conf.h instead of menuconfig for LVGL, and make

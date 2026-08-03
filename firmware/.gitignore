@@ -13,3 +13,4 @@ dependencies.lock
 # The wrapper CMakeLists.txt is tracked; the copied library sources are not.
 components/Arduino_GFX/src/
 components/NimBLE-Arduino/src/
+components/SdFat/src/
