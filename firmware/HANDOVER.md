@@ -5,9 +5,16 @@ a Waveshare ESP32-C6-Touch-AMOLED-1.8 into an on-device controller for the
 ALIENTEK EL15 electronic load. Update this at the end of each session.
 
 **Last updated:** 2026-08-03.
-**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`), at `3bd378e`.
-`origin/main` and `origin/claude/…` are kept at the same commit, and pushing the
-branch does NOT move main — push both.
+**Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`) — the C6 board's
+branch, and the one carrying every hardware-verified result. `origin/main` and
+`origin/claude/…` are kept at the same commit, and pushing the branch does NOT
+move main — push both. (Don't record a commit hash here; it goes stale within
+the session. `git log --oneline -1` is the answer.)
+
+The ESP32-S3 port lives on `claude/esp32-s3-touch-lcd-3.5` and is deliberately
+kept off main until that hardware has actually been brought up — see
+[`S3_BRINGUP.md`](S3_BRINGUP.md). Fixes made on main should be merged into it so
+it does not drift.
 
 ---
 
