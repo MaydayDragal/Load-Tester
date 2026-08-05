@@ -484,6 +484,20 @@ void setup() {
   g_batt.onPause = [](bool paused, const char *reason) { ui::onBattPaused(paused, reason); };
   g_batt.onError = [](const char *m) {
     Serial.printf("[batt] error: %s\n", m);
+    // The guard is armed by startBatt() BEFORE the engine has proved it can even
+    // read the pack, and every path that reaches onError is pre-discharge — the
+    // engine's own start() commands LOAD OFF and never turns it on until priming
+    // succeeds. Leaving it armed after a failed start was actively harmful: the
+    // guard would treat the next state change as a lost discharge and begin its
+    // reconnect-and-kill loop, which blocks the loop task for up to 4 s per
+    // attempt, eight times over. A test that never started would spend half a
+    // minute tearing at a link that was fine, which is exactly what "it fails to
+    // start, then keeps reconnecting" looks like from the bench.
+    //
+    // Safe to disarm unconditionally: if the load really IS on (the user
+    // energised it by hand before starting), handleStatus() re-arms it as MANUAL
+    // on the very next telemetry packet.
+    if (!g_test.running() && !g_batt.running()) g_guard.disarm();
     audio::failure();
     ui::onBattError(m);
   };
