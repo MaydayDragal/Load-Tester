@@ -11,7 +11,7 @@ ESP32-S3-Touch-LCD-3.5 being transitioned to; it lives on branch
 `claude/esp32-s3-touch-lcd-3.5`, compiles, and **has never run on hardware**
 (see [`S3_BRINGUP.md`](S3_BRINGUP.md)).
 
-**Last updated:** 2026-08-03.
+**Last updated:** 2026-08-05.
 **Branch:** `claude/android-apk-load-tester-k82q4g` (= `main`) — the C6 board's
 branch, and the one carrying every hardware-verified result. `origin/main` and
 `origin/claude/…` are kept at the same commit, and pushing the branch does NOT
@@ -33,27 +33,46 @@ eject), the flash-backed datapoint log, and the **continuous R-test sweep — no
 measured, not merely compiled**: 0.5 A / 10 s, repeats agreeing to 0.18–0.9 %,
 with σ_R honest to within ~1.4× of the true run-to-run spread (§10).
 
-**Also proven 2026-08-03 — the capacity test, with real current at last:** a
-92 Ah lead-acid discharged at 4.6 A (0.05C) for 13 842 s. 17.68 Ah, 212 Wh,
-SoH 19.2 %, pack resistance 12.6 mohm, stopped on its own at the 10.50 V cutoff.
-The engine, the auto-save, the C-rate chips and the charge-state model all did
-what they were built to do. The **SD card did not** — it lost 22 KB of the
-report while reporting success (§16).
+**The capacity engine is proven end to end.** `BATT_013` (2026-08-05) is the
+run that settles it: a 92 Ah lead-acid at **10.0 A (0.109C) for 31 913 s** —
+**88.58 Ah, 928.7 Wh, SoH 96.3 %**, pack resistance 9.9 mohm, 100 % → 0 % state
+of charge, stopped on its own at the 8.00 V cutoff after 8.9 hours unattended.
+Implied full capacity 88.57 Ah, agreeing with the measured figure to 0.02 %. The
+derived safety caps armed correctly at 184 Ah / 23 h and stayed out of the way.
+Peak 69.9 °C, fan 5. An earlier run the same week (4.6 A to a 10.50 V cutoff)
+gave 17.68 Ah / SoH 19.2 % on a much shallower discharge.
 
-**Still never exercised:** pause/resume and the link guard against a genuine
-unattended drop.
+**What is still not trustworthy is the card, not the firmware.** `BATT_013`'s
+CSV came back truncated at 27 904 s with binary garbage after it — the same
+card-level fault as `BATT_007`, and the second time on the same card. Chasing it
+found four holes that let a corrupt report pass a "verified" save (§17); the
+decisive one is that the read-back was being served from SdFat's own RAM cache,
+so it compared our data against a copy of our data. **Replace the card.**
+
+**BLE is not unstable — that was two other bugs wearing its coat** (§18).
+Measured at idle: 45 s, zero disconnects, continuous telemetry. What was
+actually happening: ~2 in 9 mode commands were being silently dropped by the
+EL15 (FFF3 is write-*without*-response, so the write "succeeds" locally and the
+device just ignores it), and a capacity start would abort on a stalled loop task
+and then leave the link guard armed to fight a healthy link. Both fixed.
+
+**Still never exercised:** pause/resume, and the link guard against a *genuine*
+unattended drop (it has now fired — but only spuriously, on the failed-start
+cascade that has since been fixed).
 
 **Highest-value work next, in order:**
 
-1. **Replace the SD card, then exercise the new verified save** (§16). The old
-   card silently dropped two 16 KB regions of a 300 KB file. Saves are now
-   read back and checksummed, but that path has not yet run against a card —
-   put one in, `EL15_SDTEST` (which now goes through the verified `saveCsv`),
-   then a real R-test/battery Save. Expect `[sd] verify OK: … read back and
-   matched`, and a save that takes about twice as long as it used to.
-2. **Drill the safety layers** — link-guard hot drop, crash recovery, PWR
+1. **Put a new SD card in and do a full save.** The verification now has teeth
+   (§17) but has never run against a card that behaves. Expect `[sd] verify OK:
+   … read back and matched`; a card that lies will now fail loudly instead of
+   handing over a good-looking file.
+2. **Re-run a capacity test to confirm the start fix** (§18). Watch for
+   `[batt] priming got NO status packets` — if that appears, the loop-task stall
+   at test start is worse than 8 s and needs attacking at the source (moving the
+   NVS in-flight write off the critical path).
+3. **Drill the safety layers** — link-guard hot drop, crash recovery, PWR
    long-press. None has fired for real. `FIRST_CONTACT.md` steps 15–16b.
-3. **Finish the R-test sweep matrix** (duration 10/30/60 s × sample rate
+4. **Finish the R-test sweep matrix** (duration 10/30/60 s × sample rate
    20/10/4 Hz). Cut short when the bench source collapsed — §10.
 
 ### Session log
@@ -62,6 +81,10 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-05 | **`BATT_013`: the capacity engine proved end to end** — 92 Ah lead-acid, 10.0 A, 8.9 h unattended, 88.58 Ah / 928.7 Wh / SoH 96.3 %, stopped itself at the 8.00 V cutoff, derived caps armed at 184 Ah / 23 h and stayed out of the way. Its CSV came back corrupt anyway (see below). |
+| 2026-08-05 | **Four holes closed that let a corrupt report pass a "verified" save** (§17). The decisive one: `verifyOnCard()` re-read with SdFat's block cache warm, so it compared our data against a *cached copy of our data* — structurally blind to the one fault it exists to catch, a card that acknowledges writes it never commits. Also: a SHORT write was invisible (checksum and byte count both described the truncated file, and `fpf()` discards every write return); the verifiable ceiling was 512 KB against a 436 KB report and merely *warned* when exceeded, now 2 MB and fails; `remove()`'s return was discarded so a rejected file could survive on a bad card. Chunk table moved to `.bss` — 1 KB on the loop stack that already carries FATFS's LFN buffer was a crash waiting to happen. |
+| 2026-08-05 | **"Unstable BLE" was two other bugs** (§18). Measured 45 s at idle: zero disconnects, continuous telemetry — the link was never the problem. (a) ~2 in 9 **mode commands were silently dropped** by the EL15; FFF3 is write-without-response so the stack reports success the device never gave. `setMode()` is now closed-loop against telemetry: watch for the mode to appear, re-send up to 3×, say `REFUSED` if it never takes. Measured 2/9 wrong → 0/8. (b) A **capacity start would abort with "no values"** because priming timed a 1500 ms *stopwatch* while the readings depend on the loop task — and start-of-test is exactly when that task is blocked by a synchronous NVS write plus a screen rebuild, so zero of ~30 expected polls went out. Priming now waits for actual telemetry (8 s patience). It then **left the link guard armed**, which began its reconnect-and-kill loop against a healthy link — 4 s blocked per attempt × 8. Now disarmed on a failed start. |
+| 2026-08-05 | **BLE diagnostics.** The HCI disconnect reason was being discarded (the `onDisconnect` parameter was unnamed), which is why the earlier instability could not be diagnosed at all. Now captured, carried through the event queue and logged by name, with free heap + largest block at every connect attempt, failure and disconnect — a reconnect that fails for want of a ~30 KB contiguous block reports HCI 0x3e, which reads exactly like a peer out of range. |
 | 2026-08-03 | **Capacity safety caps now scale with the pack.** `BATT_009` stopped on its own at exactly 50 Ah — the hard-coded `maxAh` in `CapacityTest`, which `main.cpp` never overrode, so every run ever made stopped at 50 Ah regardless of pack size and called it "Capacity cap reached". The flat 12 h duration cap was the same trap behind it (0.05C is a 20 h discharge by definition — the standard rate for this bench's lead-acid packs, so such a run could never have completed). Both now derive at `finishPriming()`: capacity = 2× nameplate (floor 10 Ah, or 1000 Ah with no nameplate), duration = 2.5× the implied full-discharge time clamped to 2–72 h (48 h with no nameplate). Both are logged when armed and written into the report CSV, since a cap-stop otherwise reads exactly like a battery that finished there. |
 | 2026-08-03 | **Port to the ESP32-S3-Touch-LCD-3.5, on branch `claude/esp32-s3-touch-lcd-3.5`** (the hardware is not in hand yet, so it is deliberately NOT on main). The firmware is now dual-board: `src/board_config.h` selects between `board_c6_amoled.h` and `board_s3_lcd35.h`, and platformio.ini has an env for each. New board: 320×480 ST7796 over plain SPI (vs QSPI AMOLED), PWM backlight (vs a panel command), FT6336 touch (same FocalTech family, so the driver is unchanged), 8 MB PSRAM (so LVGL gets double buffers and low-memory mode becomes a no-op), and **hardware SDMMC instead of bit-banged SPI** — which should make a verified save sub-second instead of ~20 s. Both envs build clean; the C6 image is unchanged to within a few bytes. **Nothing is hardware-verified** — every pin came from Waveshare's demo sources, not a schematic. `S3_BRINGUP.md` is the falsify-in-order checklist for when the board arrives. |
 | 2026-08-03 | **Repo slimmed to firmware-only.** The Android control app (`app/`), the phone BLE simulator (`simulator/`), the Gradle scaffolding and the Android CI workflow were removed — last present at `1cd5607`; resurrect from git history if ever needed. Hardware-free bench testing now means checking the simulator out from history and building it, or testing against the real EL15. The app's missing command checksum is moot. |
@@ -828,3 +851,116 @@ reports no mismatch, the actual 16 KB fault is localised to bytes
 114688..122879 + 122880..131071, a single flipped bit is caught in its own chunk,
 and a one-byte truncation is caught by the length check. **The on-device path
 still needs a card in the slot to exercise** — the card was in a PC reader.
+
+---
+
+## 17. Why the "verified" save still handed over a corrupt file (2026-08-05)
+
+`BATT_013.CSV` — the 8.9 h, 88.58 Ah run — came off the card truncated at
+`elapsed_s=27904` with binary garbage after it, roughly the last 250 of its 7495
+datapoint rows. Second card-level fault on the same card after §16.
+
+The part that mattered: **the image that wrote it already had the CRC-32
+read-back.** So the read-back was not doing its job. Four reasons, in order of
+how much they mattered:
+
+1. **The read-back was reading our own cache.** `verifyOnCard()` re-opened the
+   file with SdFat's block cache still warm, so the bytes it compared could come
+   straight back out of the driver's RAM. That compares our data against a copy
+   of our data, and it is *structurally blind* to the exact failure this path
+   exists to catch — a card that ACKNOWLEDGES writes it has not committed to
+   NAND. It is how both `BATT_007` and `BATT_013` passed a "verified" save and
+   were corrupt when read later. `cacheClear()` before the read-back now forces
+   every compared byte off the card.
+2. **A short write was invisible.** The checksum was taken over what the file
+   *accepted* and the byte counter counted the same bytes, so a truncated file
+   matched its own checksum perfectly. Nothing upstream noticed either —
+   `report.h`'s `fpf()` discards the return of every write. A short write is now
+   a write error.
+3. **The verifiable ceiling was too low and too soft.** 512 KB, against a
+   436 KB report — inside 20 %. Past the ceiling the old code *printed a
+   warning and still reported the save as verified*. Now 2 MB, and exceeding it
+   fails the save.
+4. **Rejected files could survive.** `remove()`'s return was discarded, so on a
+   misbehaving card a report that failed verification could stay on the card —
+   from the outside, indistinguishable from a good save. Deletions are checked
+   and the failure is named in the user-facing message.
+
+The chunk table moved from the `VerifyingPrint` object into `.bss`. At 256
+chunks it is 1 KB, and `saveCsv()` builds that object on the loop-task stack
+which already carries FATFS's 255-char long-filename buffer — the reason that
+stack is raised to 12 KB in `platformio.ini`. Costs 1 KB of static RAM and
+removes a plausible mid-save overflow.
+
+**Still open:** none of this has run against a card that behaves. And the
+SDMMC backend on the S3 branch has `backendDropCache()` as a deliberate no-op
+(ESP-IDF's FATFS reads full sectors straight through `disk_read()` rather than
+holding SdFat-style block cache) — flagged in the source as the first assumption
+to re-test if a save there ever verifies clean and reads back corrupt.
+
+---
+
+## 18. "The BLE link is unstable" was two other bugs (2026-08-05)
+
+Reported as: a capacity test fails to start with no values from the load, then
+the controller reconnects repeatedly and the link stays unstable.
+
+**Measure before believing.** At idle: 45 s, **zero disconnects**, telemetry
+flowing continuously, pack reading 13.23 V. The link was never the problem. Two
+separate defects were wearing its coat.
+
+### (a) Mode commands were being silently dropped
+
+FFF3 is **write-WITHOUT-response**. A successful write means the local NimBLE
+stack took the bytes — the load never acknowledges anything, ever. Measured with
+the `EL15_SELFTEST` mode sweep against the real EL15: **2 of 9 mode commands
+discarded by the device**, every one of them logging `write OK`. Nothing
+detected it, so the UI showed one mode while the device sat in another — which
+from the bench is indistinguishable from a flaky connection.
+
+Worse than cosmetic: `CapacityTest::start()` commands CC before discharging, so
+a dropped mode command could run an entire battery test in whatever mode the
+load was left in.
+
+`setMode()` is now closed-loop against the telemetry that was already arriving:
+command it, watch the status packets for the mode to appear, re-send if it did
+not take (3 tries, deadline scaled to the poll rate), and log a plain `REFUSED`
+rather than leave callers acting on a mode the load is not in. **Measured 2 of 9
+wrong before, 0 of 8 after**, with two drops caught and recovered mid-sweep.
+
+> Rejected along the way: a hypothesis that control writes were colliding with
+> polls (the pacing rule was enforced in one direction only — a poll is held off
+> after a control write, never the reverse). Plausible, and the asymmetry is
+> real, but adding the symmetric guard left the drop rate unchanged at 2 of 9,
+> so it was reverted rather than kept as unjustified blocking delay in a
+> safety-relevant path.
+
+### (b) A failed start left the guard fighting a healthy link
+
+Priming timed a **stopwatch, not readings**: a flat 1500 ms, then judge whatever
+`vOc_` happened to hold. But that window is wall-clock while the readings depend
+on the loop task — and starting a test is the worst moment for it, because
+`startBatt()` writes the in-flight flag to NVS (a synchronous flash erase) and
+the UI rebuilds a whole screen. Block the loop past 1500 ms and **not one poll
+goes out**, so at 20 Hz the window collects zero of its expected ~30 packets and
+a healthy pack is declared unreadable.
+
+Then the cascade: `startBatt()` arms the link guard **before** the engine has
+proved it can read the pack, and nothing disarmed it when priming aborted. The
+guard treated the next state change as a lost discharge and began its
+reconnect-and-kill loop — which blocks the loop task for up to 4 s per attempt,
+eight attempts, 2.5 s apart. A test that never started would spend most of a
+minute tearing at a link that was fine.
+
+Both fixed: priming waits for actual telemetry (1500 ms minimum, 8 s patience
+before it calls the link dead), and `onError` disarms the guard when neither
+engine is running — safe unconditionally, because every path to `onError` is
+pre-discharge and `handleStatus()` re-arms as MANUAL on the next packet if the
+load really is on. The error message also stopped conflating two faults: "No
+telemetry from the load" and "Battery voltage below the minimum" send you to
+different places.
+
+**Note the shape of this one.** The fixes make the start *robust to* the
+loop-task stall; they do not remove the stall. If a start visibly hangs before
+the run screen goes live, that is the same blockage, no longer breaking
+anything. Moving the NVS write off the critical path is the real cure.

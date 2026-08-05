@@ -18,7 +18,7 @@ the wire protocol, safety-critical behavior, and known gaps/risks.
 > present at `1cd5607`) — check the simulator out from git history for
 > hardware-free testing, or test against the real EL15.
 
-**Last updated:** 2026-08-01, against `6adea41`. Companion docs:
+**Last updated:** 2026-08-05. Companion docs:
 [`HANDOVER.md`](HANDOVER.md) (state + gotchas), [`FIRST_CONTACT.md`](FIRST_CONTACT.md)
 (real-EL15 bench order), [`QA_REPORT.md`](QA_REPORT.md) (audit + resolutions).
 
@@ -28,7 +28,7 @@ the wire protocol, safety-critical behavior, and known gaps/risks.
 
 | Area | State |
 |---|---|
-| Build (PlatformIO, pioarduino, ESP32-C6) | ✅ clean under `-Wall -Wextra`; ~2.11 MB of the 3 MB `huge_app` slot, RAM 17.8 % static |
+| Build (PlatformIO, pioarduino, ESP32-C6) | ✅ clean under `-Wall -Wextra`; ~2.19 MB of the 3 MB `huge_app` slot, RAM 19.8 % static |
 | Boot on hardware | ✅ clean, no panic/bootloop; `[boot] reset reason:` printed every boot |
 | Display (CO5300/SH8601 AMOLED, QSPI 80 MHz) | ✅ renders the v2 UI, correct colors |
 | Touch (CST820 answering as FocalTech) | ✅ works; 10 ms sampling + touch-snap engine |
@@ -39,16 +39,22 @@ the wire protocol, safety-critical behavior, and known gaps/risks.
 | Mode / setpoint / LOAD ON-OFF on a real EL15 | ✅ verified — **after** the command-checksum fix (§7) |
 | SD card read + write, FAT timestamps, re-init after eject | ✅ verified on hardware via `EL15_SDTEST` (2026-08-01) |
 | Flash datapoint log (LittleFS mount, tier schedule, replay) | ✅ verified on hardware (2026-08-01) |
-| SD **UI Save buttons** / auto-save on completion | ⚠️ **not yet exercised** |
-| R-Test / capacity run with **real current** | ⚠️ **not yet done** — no load has been drawn on the real unit |
-| Pause/resume, rated-capacity metrics, running-test chip | ⚠️ compile-clean, needs a real run |
-| Link-guard hot drop, crash recovery, brownout auto-off | ⚠️ compile-clean, never triggered for real |
+| Mode commands actually TAKING on a real EL15 | ✅ since 2026-08-05 — measured 2 of 9 silently dropped before the confirm-and-retry, 0 of 8 after (HANDOVER §18) |
+| SD **UI Save buttons** / auto-save on completion | ⚠️ auto-save has run for real (`BATT_013`), but **both real saves produced a corrupt file** — a card-level fault, and the verification that should have caught it had four holes (HANDOVER §17). Fixed; **not yet re-run against a good card** |
+| **Verified save** (CRC-32 read-back, cache-defeating) | ⚠️ rebuilt 2026-08-05, never yet run against a card that behaves |
+| Capacity run with **real current** | ✅ **`BATT_013`, 2026-08-05** — 92 Ah lead-acid, 10.0 A, 8.9 h unattended, 88.58 Ah / SoH 96.3 %, self-stopped at the 8.00 V cutoff |
+| R-Test with **real current** | ✅ verified 2026-08-01 — continuous sweep, repeats within 0.18–0.9 % |
+| Rated-capacity metrics, C-rate, SoH, charge-state model | ✅ all exercised by `BATT_013` and agreeing with each other |
+| Derived safety caps (capacity / duration) | ✅ armed correctly at 184 Ah / 23 h and stayed out of the way |
+| Pause/resume, running-test chip | ⚠️ compile-clean, needs a real run |
+| Link-guard hot drop, crash recovery, brownout auto-off | ⚠️ the guard has now fired — but only **spuriously**, on the failed-start cascade since fixed (HANDOVER §18). Never triggered by a genuine unattended drop |
 | NVS persistence / burn-in / NTP / Kelvin+tare | ⚠️ compile-clean, not confirmed end-to-end |
 
-**Top things QA should confirm first:** (1) the SD **Save** path from the UI;
-(2) a short R-test and a short capacity run with real current on a bench PSU or
-a small protected cell; (3) the link-guard hot-drop drill. `FIRST_CONTACT.md`
-sequences all of this safely.
+**Top things QA should confirm first:** (1) a full **Save to a NEW SD card** —
+the verification was rebuilt on 2026-08-05 and has never run against a card that
+behaves; (2) **a capacity start**, to confirm the priming fix (watch for
+`[batt] priming got NO status packets`); (3) the link-guard hot-drop drill.
+`FIRST_CONTACT.md` sequences all of this safely.
 
 ---
 
@@ -71,8 +77,9 @@ bench-testing always goes over a real BLE link now):
    Advertises the EL15 GATT service as a peripheral and models either a fixed
    circuit or a full battery with a chemistry-accurate discharge curve. **Random
    address** — exercises the scan/connect path that RPA peers need.
-2. **Real ALIENTEK EL15.** Connect/telemetry/control verified; **real current
-   still pending**. See `FIRST_CONTACT.md`.
+2. **Real ALIENTEK EL15.** Connect, telemetry, control, a full R-test sweep and
+   a full 8.9 h capacity discharge are all verified against it. See
+   `FIRST_CONTACT.md` for the safe bench order.
 
 ---
 
@@ -103,9 +110,11 @@ PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
 - **If the board vanishes from USB entirely** (no COM port at all — seen once
   under a very fast poll flood), physically unplug/replug the cable.
 
-Library versions resolve **newer** than the `^` pins in `platformio.ini`:
-GFX **1.6.7**, NimBLE **2.5.0**, LVGL **8.4.0**, SdFat 2.x. Code is adapted to
-these; watch for drift on `pio update`.
+Library versions are pinned **exactly** in `platformio.ini` to what the
+hardware-verified image was bench-tested against: LVGL **8.4.0**, GFX **1.6.7**,
+NimBLE **2.5.0**, SdFat **2.3.1**. They were `^` ranges until 2026-08-03, which
+let a clean checkout resolve libraries no verified image had ever run. Bump them
+deliberately, re-verify on hardware, then update this line.
 
 **Test scaffolding** (compiled out of normal builds):
 `-D EL15_SDTEST` (boot-time SD write/readback + FAT stamp + LittleFS log check),
