@@ -5,13 +5,19 @@ controller for the ALIENTEK **EL15** electronic load — no phone required. The
 board is the BLE central, renders the instrument UI on its AMOLED touch panel,
 and runs its own resistance-sweep and battery-capacity test engines.
 
-> **Status (2026-08-01): running on real hardware.** The firmware builds clean,
-> boots clean, and has been driven against a **real ALIENTEK EL15** — connect,
-> telemetry, all six mode opcodes, setpoint and LOAD ON/OFF are verified on the
-> instrument itself, as is SD-card read/write. What has **not** been done yet is
-> a full R-test or capacity run with **real current** flowing. See
-> [`HANDOVER.md`](HANDOVER.md) §6 for the exact verified/unverified split and
-> [`FIRST_CONTACT.md`](FIRST_CONTACT.md) for the bench procedure.
+> **Status (2026-08-05): doing real work on real hardware.** Verified against a
+> **real ALIENTEK EL15**: connect, telemetry, every mode opcode, setpoint,
+> LOAD ON/OFF, a full continuous R-test sweep, and — the one that settles it —
+> an **8.9 h unattended capacity discharge** of a 92 Ah lead-acid at 10 A,
+> returning 88.58 Ah / 928.7 Wh / SoH 96.3 % and stopping itself at the cutoff.
+>
+> Two things are **not** trustworthy yet. The **SD card** has corrupted two of
+> two real reports (a card-level fault; the save verification that should have
+> caught it had four holes, since closed — [`HANDOVER.md`](HANDOVER.md) §17), so
+> a save against a known-good card is still unproven. And **pause/resume and the
+> link guard** have never been exercised against a genuine unattended drop.
+> [`HANDOVER.md`](HANDOVER.md) §0 has the exact verified/unverified split;
+> [`FIRST_CONTACT.md`](FIRST_CONTACT.md) has the bench procedure.
 
 ---
 
@@ -94,7 +100,7 @@ PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
 "$PIO" device monitor -p "$PORT" -b 115200              # serial log
 ```
 
-Current build: **~2.11 MB** of the 3 MB `huge_app` slot, **RAM 17.8 %** static.
+Current build: **~2.19 MB** of the 3 MB `huge_app` slot, **RAM 19.8 %** static.
 First build downloads ~1 GB (platform + RISC-V toolchain + arduino-esp32 + libs);
 later builds are incremental. Changing `include/lv_conf.h` forces a full LVGL
 recompile.
