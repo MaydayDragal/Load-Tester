@@ -47,7 +47,14 @@ class ClientCallbacks : public NimBLEClientCallbacks {
   // onConnect has nothing to do here (running a blocking GATT discovery from
   // this host-task callback can wedge the NimBLE host).
   void onConnect(NimBLEClient *) override {}
-  void onDisconnect(NimBLEClient *, int) override { if (g_self) g_self->enqueueDisconnected(); }
+  // The reason code is the single most useful thing the stack tells us about a
+  // dropped link — supervision timeout (an RF/timing problem) and "remote user
+  // terminated" (the EL15 hung up on us deliberately) have completely different
+  // fixes, and without this byte they are indistinguishable from the log. It
+  // used to be discarded here.
+  void onDisconnect(NimBLEClient *, int reason) override {
+    if (g_self) g_self->enqueueDisconnected(reason);
+  }
 };
 static ClientCallbacks g_clientCallbacks;
 
@@ -99,14 +106,39 @@ void El15Client::enqueueDeviceFound(const NimBLEAdvertisedDevice *dev) {
   xQueueSend(evtQueue_, &e, 0);  // dropping a duplicate advert is harmless
 }
 
-void El15Client::enqueueDisconnected() {
+// Human-readable HCI disconnect reasons. NimBLE reports some codes offset into
+// its own error space (BLE_HS_HCI_ERR adds 0x200), so mask that off first.
+const char *El15Client::disconnectReason(int code) {
+  switch (code & 0xFF) {
+    case 0x08: return "supervision timeout (link went quiet)";
+    case 0x13: return "remote terminated (the load hung up)";
+    case 0x14: return "remote terminated - low resources";
+    case 0x15: return "remote terminated - power off";
+    case 0x16: return "local host terminated (we hung up)";
+    case 0x22: return "LL response timeout";
+    case 0x28: return "instant passed";
+    case 0x3B: return "unacceptable connection parameters";
+    case 0x3E: return "connection failed to be established";
+    case 0x02: return "unknown connection identifier";
+    case 0x05: return "authentication failure";
+    case 0x06: return "PIN or key missing";
+    case 0x00: return "(none reported)";
+    default:   return "unrecognised";
+  }
+}
+
+void El15Client::enqueueDisconnected(int reason) {
   if (!evtQueue_) return;
   Event e;
   e.kind = Event::DISCONNECTED;
+  e.reason = (int16_t)reason;
   // Disconnect is rare and must not be lost, so allow a brief wait if the queue
   // is momentarily full — and if even that fails, latch a flag the loop task
   // checks, so the event is delayed at worst, never dropped.
-  if (xQueueSend(evtQueue_, &e, pdMS_TO_TICKS(20)) != pdTRUE) discPending_ = true;
+  if (xQueueSend(evtQueue_, &e, pdMS_TO_TICKS(20)) != pdTRUE) {
+    discPendingReason_ = (int16_t)reason;
+    discPending_ = true;
+  }
 }
 
 void El15Client::drainEvents() {
@@ -115,7 +147,7 @@ void El15Client::drainEvents() {
   while (xQueueReceive(evtQueue_, &e, 0) == pdTRUE) {
     switch (e.kind) {
       case Event::NOTIFY:       handleNotify(e.data, e.len); break;
-      case Event::DISCONNECTED: handleDisconnect(); break;
+      case Event::DISCONNECTED: handleDisconnect(e.reason); break;
       case Event::DEVICE_FOUND: {
         // Remember the address WITH its type, and surface each address only once
         // (advertisements repeat many times per second).
@@ -134,7 +166,7 @@ void El15Client::drainEvents() {
   // longer than enqueueDisconnected() was willing to wait).
   if (discPending_) {
     discPending_ = false;
-    handleDisconnect();
+    handleDisconnect(discPendingReason_);
   }
 }
 
@@ -207,14 +239,26 @@ bool El15Client::connectAddr(const NimBLEAddress &addr) {
   NimBLEClient::Config cfg = client_->getConfig();
   cfg.connectFailRetries = connectRetries_;
   client_->setConfig(cfg);
-  Serial.printf("[ble] connecting to %s (addr type %d)\n",
-                addr.toString().c_str(), addr.getType());
+  // Heap is printed on every attempt because a reconnect that fails for lack of
+  // a ~30 KB contiguous block reports HCI 0x3e — "connection failed to be
+  // established" — which is indistinguishable from a peer that is out of range.
+  // Having the number next to the failure is what separates "move closer" from
+  // "the heap fragmented, reboot".
+  Serial.printf("[ble] connecting to %s (addr type %d) | heap %u B free, largest %u B\n",
+                addr.toString().c_str(), addr.getType(),
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   if (!client_->connect(addr)) {
     // rc 13 = BLE_HS_ETIMEOUT / HCI 0x3e: the peer never completed the
     // handshake (out of range, rotated its address, or an Android RPA peripheral
     // not accepting). Keep the client for reuse — deleting it here races the
     // controller's late disconnect event ("client not found").
-    Serial.printf("[ble] connect() FAILED rc=%d\n", client_->getLastError());
+    int rc = client_->getLastError();
+    Serial.printf("[ble] connect() FAILED rc=%d (%s) | heap %u B free, largest %u B\n",
+                  rc, disconnectReason(rc),
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    if (ESP.getMaxAllocHeap() < 30000)
+      Serial.println("[ble] NOTE: largest free block is under the ~30 KB NimBLE needs to "
+                     "connect - this is a MEMORY failure, not a radio one. A reboot will clear it.");
     setState(IDLE, "Connect failed");
     return false;
   }
@@ -271,7 +315,15 @@ bool El15Client::connectAddr(const NimBLEAddress &addr) {
   return true;
 }
 
-void El15Client::handleDisconnect() {
+void El15Client::handleDisconnect(int reason) {
+  // Heap is logged alongside the reason because the two failure modes look
+  // identical from the outside: a link that DROPS is an RF/protocol problem,
+  // whereas a link that will not COME BACK is usually a memory one — NimBLE
+  // needs a ~30 KB contiguous block to establish a connection, and a fragmented
+  // heap presents as "Connect failed" (HCI 0x3e), not as an out-of-memory error.
+  Serial.printf("[ble] DISCONNECTED reason=0x%02X (%s) | heap %u B free, largest %u B\n",
+                reason & 0xFF, disconnectReason(reason),
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   notifyChar_ = nullptr;
   writeChar_ = nullptr;
   frameLen_ = 0;
@@ -280,7 +332,7 @@ void El15Client::handleDisconnect() {
 
 void El15Client::disconnect() {
   if (client_ && client_->isConnected()) client_->disconnect();
-  else handleDisconnect();
+  else handleDisconnect(-1);
 }
 
 void El15Client::shutdownAndDisconnect() {
@@ -403,7 +455,7 @@ void El15Client::loopTick() {
   // "connected" UI over a dead link never fires the link-guard chain, and a
   // live unmanaged link refuses the safety LOAD_OFF. Trust the controller, not
   // the bookkeeping.
-  if (state_ == CONNECTED && client_ && !client_->isConnected()) handleDisconnect();
+  if (state_ == CONNECTED && client_ && !client_->isConnected()) handleDisconnect(-1);
   else if (state_ == IDLE && client_ && client_->isConnected()) client_->disconnect();
   if (state_ != CONNECTED) return;
 

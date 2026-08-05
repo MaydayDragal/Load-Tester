@@ -85,7 +85,10 @@ class El15Client : public El15Controller {
   // Invoked by NimBLE callbacks on the HOST task — these ONLY enqueue.
   void enqueueNotify(const uint8_t *data, size_t len);
   void enqueueDeviceFound(const NimBLEAdvertisedDevice *dev);
-  void enqueueDisconnected();
+  void enqueueDisconnected(int reason);
+
+  // Human-readable HCI disconnect reason, for logs and diagnostics.
+  static const char *disconnectReason(int code);
 
  private:
   // A BLE event marshalled from the NimBLE host task to the loop task.
@@ -93,6 +96,7 @@ class El15Client : public El15Controller {
     enum Kind : uint8_t { NOTIFY, DISCONNECTED, DEVICE_FOUND } kind;
     uint8_t len;              // NOTIFY: payload length
     uint8_t addrType;         // DEVICE_FOUND: BLE address type (public/random)
+    int16_t reason;           // DISCONNECTED: HCI reason code (-1 = not from the stack)
     uint8_t data[64];         // NOTIFY: raw notification bytes
     char addr[24];            // DEVICE_FOUND
     char name[40];            // DEVICE_FOUND
@@ -100,7 +104,7 @@ class El15Client : public El15Controller {
 
   void drainEvents();                                 // loop task
   void handleNotify(const uint8_t *data, size_t len); // loop task (reassembly)
-  void handleDisconnect();                            // loop task
+  void handleDisconnect(int reason);                  // loop task
 
   bool connectAddr(const NimBLEAddress &addr);   // shared connect body
   void setState(State s, const char *info);
@@ -119,6 +123,7 @@ class El15Client : public El15Controller {
   // past its wait; drained by drainEvents() (loop task). A disconnect may be
   // delayed by this path but can never be lost.
   volatile bool discPending_ = false;
+  volatile int16_t discPendingReason_ = -1;
 
   // Addresses seen during the current scan, WITH their real type (public vs
   // random). connectTo() reuses the discovered type instead of forcing public,
