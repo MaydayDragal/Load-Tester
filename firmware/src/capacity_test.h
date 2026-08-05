@@ -190,7 +190,18 @@ class CapacityTest {
     ble_->setMode(el15::MODE_CC);
     ble_->setSetpoint(0);
     ble_->setLoad(false);
-    timerAt_ = millis() + 1500;   // a couple of samples of open-circuit voltage
+    // Priming waits for READINGS, not for a stopwatch. It used to give the load
+    // a flat 1500 ms and then judge whatever vOc_ happened to hold — but the
+    // window is wall-clock while the readings depend on the loop task, and
+    // starting a test is the worst moment for that: it writes the in-flight flag
+    // to NVS (a synchronous flash erase) and rebuilds a whole screen. Block the
+    // loop past 1500 ms and NOT ONE poll goes out, so no telemetry arrives, and
+    // a perfectly healthy pack is declared unreadable. Now the minimum window is
+    // still 1500 ms, but the test only gives up once it has actually waited
+    // PRIME_MAX_MS without a single packet — and then says so in those words.
+    primeCount_ = 0;
+    timerAt_ = millis() + PRIME_MIN_MS;
+    primeDeadlineMs_ = millis() + PRIME_MAX_MS;
     timerCb_ = PRIME_DONE;
   }
 
@@ -269,6 +280,7 @@ class CapacityTest {
     lastTemp_ = s.temperature;
     if (state_ == PRIMING) {
       vOc_ = s.voltage;
+      primeCount_++;
       return;
     }
     if (state_ == PAUSED) {
@@ -340,7 +352,16 @@ class CapacityTest {
     TimerCb cb = timerCb_;
     timerCb_ = NONE;
     switch (cb) {
-      case PRIME_DONE: finishPriming(); break;
+      case PRIME_DONE:
+        // Not one reading yet, and still inside the patience window: keep
+        // waiting rather than blaming the battery for a stalled link.
+        if (primeCount_ == 0 && (int32_t)(millis() - primeDeadlineMs_) < 0) {
+          timerAt_ = millis() + 250;
+          timerCb_ = PRIME_DONE;
+          break;
+        }
+        finishPriming();
+        break;
       case REST_DONE: complete(); break;
       default: break;
     }
@@ -354,6 +375,11 @@ class CapacityTest {
   // Window over which the switch-on sag is averaged into an internal-resistance
   // figure. It starts late enough for the load to be regulating at the commanded
   // current and ends before the pack has meaningfully discharged.
+  // Priming: the shortest settling window, and the longest we will wait for the
+  // first telemetry packet before calling the link dead.
+  static const uint32_t PRIME_MIN_MS = 1500;
+  static const uint32_t PRIME_MAX_MS = 8000;
+
   static const uint32_t IR_WINDOW_START_MS = 1500;
   static const uint32_t IR_WINDOW_END_MS = 5000;
   static const int IR_MIN_SAMPLES = 3;            // quorum before R is trusted
@@ -480,7 +506,17 @@ class CapacityTest {
 
   void finishPriming() {
     float voc = vOc_;
-    if (voc < el15::MIN_VOLTAGE_V) { abort_("No reading, or voltage below the minimum. Test aborted."); return; }
+    // "No telemetry" and "the pack is flat" are different faults with different
+    // fixes, and the old message ran them together as "No reading, or voltage
+    // below the minimum" — leaving the user to guess whether to check the BLE
+    // link or the battery. Say which one it is.
+    if (primeCount_ == 0) {
+      Serial.printf("[batt] priming got NO status packets in %lu ms - link stalled or down\n",
+                    (unsigned long)PRIME_MAX_MS);
+      abort_("No telemetry from the load - check the connection, then retry.");
+      return;
+    }
+    if (voc < el15::MIN_VOLTAGE_V) { abort_("Battery voltage below the minimum. Test aborted."); return; }
     if (voc > el15::MAX_VOLTAGE_V) { abort_("Source above the EL15's 60 V rating. Test aborted."); return; }
     if (voc <= cutoffV + 0.2f) { abort_("Battery is already at or below the cutoff voltage."); return; }
     effA_ = min(min(dischargeA, el15::MAX_CURRENT_A), el15::MAX_POWER_W / voc);
@@ -576,6 +612,8 @@ class CapacityTest {
   float vOc_ = 0, vNow_ = 0, startV_ = 0, endV_ = 0, reboundV_ = 0, effA_ = 0;
   float minT_ = 0, maxT_ = 0, lastTemp_ = 0;
   int fanMax_ = 0, below_ = 0;
+  int primeCount_ = 0;             // status packets seen during PRIMING
+  uint32_t primeDeadlineMs_ = 0;   // give up waiting for the first one at this point
   bool haveSample_ = false;
   bool logging_ = false;
   const char *stopReason_ = "";
