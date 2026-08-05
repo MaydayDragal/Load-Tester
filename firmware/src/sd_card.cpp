@@ -143,8 +143,13 @@ inline uint32_t fsSize(SdFile &f) { return f.fileSize(); }
 inline bool fsSync(SdFile &f) { return f.sync(); }
 inline bool fsClose(SdFile &f) { return f.close(); }
 inline bool fsWriteError(SdFile &f) { return f.getWriteError() != 0; }
-inline void fsRemove(const char *path) { g_sd.remove(path); }
+inline bool fsRemove(const char *path) { return g_sd.remove(path); }
+inline bool fsExists(const char *path) { return g_sd.exists(path); }
 inline void backendEnd() { g_sd.end(); }
+// SdFat keeps its own RAM cache of card blocks. Dropping it forces the
+// verification read-back to go to the physical card instead of comparing our
+// bytes against a cached copy of the same bytes — see verifyOnCard().
+inline void backendDropCache() { g_sd.cacheClear(); }
 
 #else   // ---- BOARD_SD_SDMMC: hardware SDMMC / Arduino SD_MMC ---------------
 
@@ -173,8 +178,16 @@ inline bool fsClose(SdFile &f) {
   return ok;
 }
 inline bool fsWriteError(SdFile &f) { return f.getWriteError() != 0; }
-inline void fsRemove(const char *path) { SD_MMC.remove(path); }
+inline bool fsRemove(const char *path) { return SD_MMC.remove(path); }
+inline bool fsExists(const char *path) { return SD_MMC.exists(path); }
 inline void backendEnd() { SD_MMC.end(); }
+// UNVERIFIED ON HARDWARE. Unlike SdFat, the ESP-IDF FATFS layer under SD_MMC
+// does not hold a general block cache of file DATA — full sectors are read
+// straight through disk_read() into the caller's buffer — so there is no
+// equivalent cache to drop here. If a save on this board ever verifies clean
+// and then reads back corrupt, this is the first assumption to re-test: the
+// decisive fix would be an unmount/remount around the read-back.
+inline void backendDropCache() {}
 #endif
 
 bool g_mounted = false;
@@ -346,7 +359,12 @@ namespace {
 // alternative is silently losing 7 % of a four-hour discharge, which is what
 // happened.
 const size_t VCHUNK = 8192;      // verification granularity
-const int VMAX_CHUNKS = 64;      // 8 KB x 64 = 512 KB, far past any report we write
+// 8 KB x 256 = 2 MB of coverage, for 1 KB of RAM. It was 64 chunks (512 KB),
+// which sounded generous and was not: BATT_013 — a 8.9 h discharge at 2 s
+// logging — came to ~436 KB, inside 20 % of the ceiling. A longer run at a
+// finer sample rate goes straight past it, and past it the old code only
+// PRINTED a warning and still reported the save as verified.
+const int VMAX_CHUNKS = 256;
 
 // CRC-32, reflected, polynomial 0xEDB88320 — the same one zip/PNG use, so a
 // value logged here can be checked against any desktop tool. Bitwise rather than
@@ -364,16 +382,36 @@ uint32_t crc32(uint32_t crc, const uint8_t *d, size_t n) {
 // fixed-size chunks. Chunked rather than one whole-file CRC so a mismatch says
 // WHERE the card lost data — the 2026-08-03 fault would have printed "chunk 14
 // and chunk 38 differ", which took a byte-level analysis to establish by hand.
+// The chunk table lives in .bss, NOT inside the object. saveCsv() builds a
+// VerifyingPrint on the Arduino loop task's stack, and that stack already hosts
+// FATFS's 255-char long-filename buffer and work area — the reason it is raised
+// to 12 KB in platformio.ini. Putting a 1 KB table there too is exactly the kind
+// of quiet overflow that would present as a random crash mid-save. saveCsv is
+// loop-task-only and non-reentrant, so one shared table is safe.
+static uint32_t g_chunkCrc[VMAX_CHUNKS];
+
 class VerifyingPrint : public Print {
  public:
   explicit VerifyingPrint(Print &sink) : sink_(sink) {
-    for (int i = 0; i < VMAX_CHUNKS; i++) crc_[i] = 0xFFFFFFFFu;
+    for (int i = 0; i < VMAX_CHUNKS; i++) g_chunkCrc[i] = 0xFFFFFFFFu;
   }
   using Print::write;
   size_t write(uint8_t b) override { return write(&b, 1); }
   size_t write(const uint8_t *buf, size_t len) override {
     size_t w = sink_.write(buf, len);
     accumulate(buf, w);
+    // A SHORT write is silent data loss that verification is structurally blind
+    // to: the checksum is taken over what the file ACCEPTED, and total_ counts
+    // the same bytes, so the read-back describes the truncated file perfectly
+    // and matches. The rows that never made it are simply not part of what we
+    // claim to have written. Callers cannot catch it either — report.h's fpf()
+    // discards the return of every write. So it has to be caught here, and it
+    // has to be an error rather than a count.
+    if (w != len) {
+      Serial.printf("[sd] SHORT WRITE: %u of %u bytes accepted at offset %lu\n",
+                    (unsigned)w, (unsigned)len, (unsigned long)total_);
+      setWriteError(1);
+    }
     // report.h aborts its row loop on getWriteError(), and it is handed THIS
     // object rather than the file — so the file's error state has to surface here
     // or a mid-write failure would go unnoticed.
@@ -384,7 +422,7 @@ class VerifyingPrint : public Print {
 
   uint32_t total() const { return total_; }
   bool overflowed() const { return overflow_; }
-  uint32_t chunk(int i) const { return crc_[i]; }
+  uint32_t chunk(int i) const { return g_chunkCrc[i]; }
 
  private:
   void accumulate(const uint8_t *b, size_t n) {
@@ -392,7 +430,7 @@ class VerifyingPrint : public Print {
       size_t idx = total_ / VCHUNK;
       size_t room = VCHUNK - (total_ % VCHUNK);
       size_t take = n < room ? n : room;
-      if (idx < (size_t)VMAX_CHUNKS) crc_[idx] = crc32(crc_[idx], b, take);
+      if (idx < (size_t)VMAX_CHUNKS) g_chunkCrc[idx] = crc32(g_chunkCrc[idx], b, take);
       else overflow_ = true;
       total_ += take;
       b += take;
@@ -400,7 +438,6 @@ class VerifyingPrint : public Print {
     }
   }
   Print &sink_;
-  uint32_t crc_[VMAX_CHUNKS];
   uint32_t total_ = 0;
   bool overflow_ = false;
 };
@@ -408,6 +445,14 @@ class VerifyingPrint : public Print {
 // Read the file back off the card and compare it, chunk by chunk, with what we
 // believe we wrote. Logs the byte range of every chunk that differs.
 bool verifyOnCard(const char *name, const VerifyingPrint &vp) {
+  // Drop the driver's block cache FIRST. This is what makes the read-back mean
+  // anything: without it, the bytes we just wrote can still be sitting in the
+  // driver's own RAM, and re-reading them compares our data against a copy of
+  // our data. The whole failure mode this guards — a card that acknowledges
+  // writes it has not committed to NAND — is invisible to a cached read, which
+  // is how BATT_007 and BATT_013 both passed a "verified" save and came back
+  // corrupt afterwards. Every byte compared below now has to come off the card.
+  backendDropCache();
   SdFile f;
   char pbuf[32];
   if (!fsOpenRead(f, fsPath(name, pbuf, sizeof(pbuf)))) {
@@ -462,6 +507,21 @@ bool verifyOnCard(const char *name, const VerifyingPrint &vp) {
   if (ok) Serial.printf("[sd] verify OK: %s, %lu B read back and matched\n",
                         name, (unsigned long)onCard);
   return ok;
+}
+
+// Delete a file we have REJECTED, and say so if the card will not let us. This
+// is the last line of the contract: a report that failed verification must not
+// be left behind looking like a result. remove()'s return used to be discarded,
+// so on a card that was already misbehaving the rejected file could quietly
+// survive — which is indistinguishable, from the outside, from a good save.
+bool fsRemoveChecked(const char *name) {
+  char pbuf[32];
+  const char *path = fsPath(name, pbuf, sizeof(pbuf));
+  if (!fsExists(path)) return true;
+  if (fsRemove(path)) return true;
+  Serial.printf("[sd] WARNING: could not delete rejected file %s - it is STILL ON THE CARD "
+                "and its contents are NOT trustworthy\n", name);
+  return false;
 }
 
 int nextIndex(const char *prefix) {
@@ -519,9 +579,10 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
   const int MAX_ATTEMPTS = 2;
   char suspect[MAX_ATTEMPTS][24];
   int nSuspect = 0;
+  bool sweepFailed = false;
   auto sweep = [&]() {
-    char pbuf[32];
-    for (int k = 0; k < nSuspect; k++) fsRemove(fsPath(suspect[k], pbuf, sizeof(pbuf)));
+    for (int k = 0; k < nSuspect; k++)
+      if (!fsRemoveChecked(suspect[k])) sweepFailed = true;
   };
 
   for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -556,16 +617,24 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
     if (!fsClose(f)) ok = false;
 
     if (!ok) {
-      fsRemove(fsPath(name, pbuf, sizeof(pbuf)));
+      fsRemoveChecked(name);
       sweep();
       invalidate();   // a mid-write failure usually means the card went away
       snprintf(msg, msgLen, "Write failed - card removed or full?");
       return false;
     }
     if (vp.overflowed()) {
-      // Only reachable past 512 KB, which nothing here writes; verifying part of
-      // a file and calling it verified would be worse than saying so.
-      Serial.println("[sd] report exceeded the verifiable size - NOT verified");
+      // Past the checksummed ceiling only part of the file can be compared, and
+      // a partly-checked file reported as verified is exactly the false comfort
+      // this whole path exists to remove. Fail instead — loudly, and with the
+      // number, so the ceiling can be raised deliberately rather than guessed.
+      Serial.printf("[sd] report is %lu B, past the %d KB verifiable ceiling - REFUSING to "
+                    "call it verified\n",
+                    (unsigned long)vp.total(), (int)(VCHUNK * VMAX_CHUNKS / 1024));
+      fsRemoveChecked(name);
+      sweep();
+      snprintf(msg, msgLen, "Report too large to verify - raise VMAX_CHUNKS");
+      return false;
     }
 
     if (verifyOnCard(name, vp)) {
@@ -583,7 +652,13 @@ bool saveCsv(const char *prefix, const std::function<bool(Print &)> &body,
 
   sweep();
   invalidate();
-  snprintf(msg, msgLen, "Card lost data twice - replace the card");
+  // Name the leftover explicitly when the card would not even let us delete the
+  // bad files: "replace the card" and "replace the card AND ignore the files it
+  // is still showing you" are different instructions.
+  if (sweepFailed)
+    snprintf(msg, msgLen, "Card lost data twice AND kept the bad files - replace it");
+  else
+    snprintf(msg, msgLen, "Card lost data twice - replace the card");
   return false;
 }
 
