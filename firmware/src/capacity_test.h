@@ -185,7 +185,7 @@ class CapacityTest {
     ahAtSocStart_ = 0; qLearned_ = 0; lastSocMs_ = 0;
     // Open the flash-backed datapoint log. A failure here is non-fatal: the
     // test still runs and reports, the CSV just carries no per-sample block.
-    logging_ = samplelog::start();
+    logging_ = samplelog::batt.start();
     state_ = PRIMING;
     ble_->setMode(el15::MODE_CC);
     ble_->setSetpoint(0);
@@ -249,7 +249,7 @@ class CapacityTest {
     pauseReason_ = reason;
     state_ = PAUSED;
     finishSafely();   // LOAD OFF + setpoint 0 — the whole point of pausing
-    samplelog::flush();
+    samplelog::batt.flush();
     Serial.printf("[batt] PAUSED: %s (%.3f Ah so far)\n", reason, ah_);
     if (onPause) onPause(true, reason);
     if (onProgress) onProgress(vNow_, 0, ah_, wh_, lastTemp_, elapsedS(), 3);
@@ -317,7 +317,7 @@ class CapacityTest {
     uint32_t el = elapsedS();
     // Offer every reading to the flash log; its tier schedule decides which are
     // actually stored, so this stays cheap at a 20 Hz poll rate.
-    if (logging_) samplelog::add(el, s.voltage, s.current, s.temperature, ah_, wh_);
+    if (logging_) samplelog::batt.add(el * 1000u, s.voltage, s.current, s.temperature, ah_, wh_);
 
     if (onProgress) onProgress(s.voltage, s.current, ah_, wh_, s.temperature,
                                el, 1);
@@ -549,7 +549,7 @@ class CapacityTest {
     uint32_t activeS = elapsedS();
     uint32_t pausedS = pausedMs_ / 1000;
     state_ = IDLE;
-    samplelog::flush();   // the last partial batch belongs in the report
+    samplelog::batt.flush();   // the last partial batch belongs in the report
     Result r;
     r.capacityAh = ah_;
     r.energyWh = wh_;

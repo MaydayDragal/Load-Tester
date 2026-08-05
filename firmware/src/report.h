@@ -96,6 +96,32 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     fpf(f, "temperature_max,%.1f,C\n", r.tempMax);
     fpf(f, "max_fan,%d,\n", r.maxFan);
     fpf(f, "reliable,%s,\n", r.reliable ? "yes" : "no");
+
+    // ---- Per-sample datapoints ----------------------------------------------
+    // Streamed straight out of the flash log written during the sweep, exactly
+    // like the capacity report's block — at the rtest log's 25 ms base interval
+    // that is every status packet for any ordinary sweep. Includes the samples
+    // the fit EXCLUDED (load-off dropouts, settle transients): the banded curve
+    // above is what was fitted, this block is what happened. target_a is the
+    // commanded setpoint at that instant, so current_a vs target_a shows the
+    // load's regulation lag; a dropout reads as current_a ~ 0 under a nonzero
+    // target.
+    uint32_t n = samplelog::rtest.count();
+    fpf(f, "\n# Datapoints (%lu samples, %lu ms resolution at the end of the sweep)\n",
+        (unsigned long)n, (unsigned long)samplelog::rtest.intervalMs());
+    fpf(f, "elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,fan\n");
+    if (n > 0) {
+      bool logOk = samplelog::rtest.replay([&f](const samplelog::Rec &s) {
+        fpf(f, "%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d\n",
+            s.tMs / 1000.0f, s.aux0, s.v, s.i, s.v * s.i, s.temp, (int)s.aux1);
+        return f.getWriteError() == 0;   // stop early if the card gave up
+      });
+      // replay() returning false means the flash log could not be read (or the
+      // card gave up mid-stream): the datapoint block is missing or truncated,
+      // and a file the header promised n samples for must not be reported —
+      // let alone verified — as a good save.
+      if (!logOk) return false;
+    }
     return f.getWriteError() == 0;
   }, msg, msgLen);
 }
@@ -171,15 +197,15 @@ inline bool saveBatt(const CapacityTest::Result &r, char *msg, size_t msgLen) {
     // at a time — nothing large is ever assembled in RAM. Rows carry their own
     // elapsed time because the log coarsens its sample interval on long runs
     // (see sample_log.h), so the spacing is not necessarily uniform.
-    uint32_t n = samplelog::count();
+    uint32_t n = samplelog::batt.count();
     fpf(f, "\n# Datapoints (%lu samples, %lu s resolution at the end of the run)\n",
-        (unsigned long)n, (unsigned long)samplelog::intervalS());
+        (unsigned long)n, (unsigned long)(samplelog::batt.intervalMs() / 1000));
     fpf(f, "elapsed_s,voltage_v,current_a,power_w,capacity_ah,capacity_mah,energy_wh,temperature_c\n");
     if (n > 0) {
-      bool logOk = samplelog::replay([&f](const samplelog::Rec &s) {
+      bool logOk = samplelog::batt.replay([&f](const samplelog::Rec &s) {
         fpf(f, "%lu,%.4f,%.4f,%.4f,%.5f,%.2f,%.4f,%.1f\n",
-            (unsigned long)s.tS, s.v, s.i, s.v * s.i, s.ah, s.ah * 1000.0f,
-            s.wh, s.temp);
+            (unsigned long)(s.tMs / 1000), s.v, s.i, s.v * s.i, s.aux0,
+            s.aux0 * 1000.0f, s.aux1, s.temp);
         return f.getWriteError() == 0;   // stop early if the card gave up
       });
       // replay() returning false means the flash log could not be read (or the

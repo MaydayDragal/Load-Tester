@@ -31,7 +31,7 @@ the wire protocol, safety-critical behavior, and known gaps/risks.
 | Live telemetry from a real EL15 | ✅ verified — poll-driven, ~17–19 fresh samples/s |
 | Mode / setpoint / LOAD ON-OFF on a real EL15 | ✅ verified — **after** the command-checksum fix (§7) |
 | SD card read + write, FAT timestamps, re-init after eject | ✅ verified on hardware via `EL15_SDTEST` (2026-08-01) |
-| Flash datapoint log (LittleFS mount, tier schedule, replay) | ✅ verified on hardware (2026-08-01) |
+| Flash datapoint log (LittleFS mount, tier schedule, replay) | ⚠️ verified on hardware 2026-08-01, then **reworked 2026-08-05** — ms timestamps and a second `rtest` instance so every sweep packet is logged (`sample_log.h`). `EL15_SDTEST` exercises both logs; needs a re-run |
 | Mode commands actually TAKING on a real EL15 | ✅ since 2026-08-05 — measured 2 of 9 silently dropped before the confirm-and-retry, 0 of 8 after (HANDOVER §18) |
 | SD **UI Save buttons** / auto-save on completion | ⚠️ auto-save has run for real (`BATT_013`), but **both real saves produced a corrupt file** — a card-level fault, and the verification that should have caught it had four holes (HANDOVER §17). Fixed; **not yet re-run against a good card** |
 | **Verified save** (CRC-32 read-back, cache-defeating) | ⚠️ rebuilt 2026-08-05, never yet run against a card that behaves |
@@ -365,6 +365,12 @@ window and no collect window.
 - *Test the datapoint log:* after a run of a few minutes, open `BATT_NNN.CSV`
   and confirm the `# Datapoints` block has one row per ~2 s with sane
   voltage/current/power/mAh/temperature columns.
+- *Test the R-test datapoint log (new 2026-08-05):* after a sweep, open
+  `RTEST_NNN.CSV` and confirm the `# Datapoints` block holds roughly one row
+  per status packet (~20/s at the default poll rate — a 30 s sweep is ~600
+  rows), that `current_a` tracks `target_a` with a small visible lag, and that
+  a load-off dropout (if one occurred) reads as `current_a` ≈ 0 under a nonzero
+  target rather than a missing row.
 - *Test:* priming holds the load off ~1.5 s and reads Voc; sanity aborts fire
   (source < 0.1 V, > 60 V, or already at/below cutoff); discharge starts at the
   clamped current `min(request, 12 A, 150 W ÷ Voc)`; Ah/Wh integrate; the

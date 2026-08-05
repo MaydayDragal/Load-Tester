@@ -74,6 +74,7 @@ Detail is in `git log`; this is just the shape of things.
 
 | Date | What happened |
 |---|---|
+| 2026-08-05 | **The R-test now logs every status packet to the SD report, capacity-style.** `sample_log` generalised from one seconds-granularity `/batt.log` into two independent tiered flash logs (`samplelog::batt` 2 s base unchanged; `samplelog::rtest` 25 ms base — below the 50 ms poll period, so tier 0 keeps literally every packet for sweeps up to ~3 min). Separate files so a quick sweep can never wipe the datapoints of a capacity run whose save is still pending. The sweep logs from `finishPriming()` (a run that dies priming never truncates the previous log) and includes the samples the fit excludes — dropouts and settle transients — with the commanded target and fan riding along, so `RTEST_NNN.CSV` now shows regulation lag and dropout shape, not just the banded curve. Same replay-failure-fails-the-save rule as BATT (§17). |
 | 2026-08-05 | **`BATT_013`: the capacity engine proved end to end** — 92 Ah lead-acid, 10.0 A, 8.9 h unattended, 88.58 Ah / 928.7 Wh / SoH 96.3 %, stopped itself at the 8.00 V cutoff, derived caps armed at 184 Ah / 23 h and stayed out of the way. Its CSV came back corrupt anyway (see below). |
 | 2026-08-05 | **Four holes closed that let a corrupt report pass a "verified" save** (§17). The decisive one: `verifyOnCard()` re-read with SdFat's block cache warm, so it compared our data against a *cached copy of our data* — structurally blind to the one fault it exists to catch, a card that acknowledges writes it never commits. Also: a SHORT write was invisible (checksum and byte count both described the truncated file, and `fpf()` discards every write return); the verifiable ceiling was 512 KB against a 436 KB report and merely *warned* when exceeded, now 2 MB and fails; `remove()`'s return was discarded so a rejected file could survive on a bad card. Chunk table moved to `.bss` — 1 KB on the loop stack that already carries FATFS's LFN buffer was a crash waiting to happen. |
 | 2026-08-05 | **"Unstable BLE" was two other bugs** (§18). Measured 45 s at idle: zero disconnects, continuous telemetry — the link was never the problem. (a) ~2 in 9 **mode commands were silently dropped** by the EL15; FFF3 is write-without-response so the stack reports success the device never gave. `setMode()` is now closed-loop against telemetry: watch for the mode to appear, re-send up to 3×, say `REFUSED` if it never takes. Measured 2/9 wrong → 0/8. (b) A **capacity start would abort with "no values"** because priming timed a 1500 ms *stopwatch* while the readings depend on the loop task — and start-of-test is exactly when that task is blocked by a synchronous NVS write plus a screen rebuild, so zero of ~30 expected polls went out. Priming now waits for actual telemetry (8 s patience). It then **left the link guard armed**, which began its reconnect-and-kill loop against a healthy link — 4 s blocked per attempt × 8. Now disarmed on a failed start. |
@@ -184,7 +185,8 @@ audio.{h,cpp}       ES8311 codec feedback (continuous-stream I2S tone synth)
 es8311.{c,h},        vendored Espressif/Waveshare ES8311 driver (Arduino I²C HAL)
   es8311_reg.h
 sd_card.{h,cpp}     microSD on bit-banged software SPI (SdFat); own driver (§12)
-sample_log.{h,cpp}  per-datapoint capacity log buffered in flash (LittleFS),
+sample_log.{h,cpp}  per-datapoint test logs buffered in flash (LittleFS), one
+                    per engine (batt: 2 s base; rtest: 25 ms = every packet),
                     tier-scheduled so a long run stays inside a fixed budget
 report.h            CSV test reports (RTEST_/BATT_) written via sd_card
 prefs.{h,cpp}       NVS persistence (debounced) + synchronous in-flight/creds flags
@@ -282,7 +284,7 @@ Waveshare ESP32-C6-Touch-AMOLED-1.8. 368×448 portrait AMOLED.
 | **SD card:** mount, write ×2 with auto-increment, byte-correct readback | ✅ 2026-07-24 (via `EL15_SDTEST`) |
 | R-test V-I chart full-width, battery graph time axis smooth | ✅ |
 | **SD write path incl. FAT timestamps + re-init after eject** | ✅ 2026-08-01 (via `EL15_SDTEST`) |
-| **Flash datapoint log** — mount, tier schedule, replay | ✅ 2026-08-01 |
+| **Flash datapoint log** — mount, tier schedule, replay | ⚠️ ✅ 2026-08-01, reworked 2026-08-05 (per-engine instances, ms timestamps) — `EL15_SDTEST` re-run pending |
 | **R-test continuous sweep with real current** | ✅ 2026-08-01 — 0.5 A, 0.18–0.9 % run-to-run (§10) |
 | **SD Save from the UI buttons** (automatic on completion) | ✅ 2026-08-03 — wrote BATT_007.CSV (the CARD then lost 22 KB of it, §16) |
 | **Capacity test with real current** | ✅ 2026-08-03 — 92 Ah lead-acid, 4.6 A, 17.68 Ah, SoH 19.2 % |
