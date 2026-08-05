@@ -327,6 +327,9 @@ void El15Client::handleDisconnect(int reason) {
   notifyChar_ = nullptr;
   writeChar_ = nullptr;
   frameLen_ = 0;
+  wantMode_ = -1;   // nothing outstanding survives the link
+  modeTries_ = 0;
+  lastMode_ = -1;
   setState(IDLE, "Disconnected");
 }
 
@@ -440,10 +443,72 @@ void El15Client::handleNotify(const uint8_t *data, size_t len) {
       pt_havePrev = true;
     }
 #endif
+    if (s.valid) checkModeConfirm(s);
     if (onStatus) onStatus(s);
     memmove(frameBuf_, frameBuf_ + 28, frameLen_ - 28);
     frameLen_ -= 28;
   }
+}
+
+// ---- Mode commands, confirmed ----------------------------------------------
+// Measured on a real EL15 (2026-08-05, back-to-back mode sweep): 2 of 9 mode
+// commands were silently discarded by the device even though every write
+// returned OK. They have to be, because FFF3 is write-WITHOUT-response — the
+// "OK" is the local stack accepting the bytes, and the load never acknowledges
+// anything. Nothing detected the loss, so the UI showed one mode while the
+// device sat in another, which reads exactly like a flaky connection.
+//
+// It matters well beyond cosmetics: CapacityTest::start() commands CC before
+// discharging, and a dropped CC would have run an entire battery test in
+// whatever mode the load happened to be left in.
+//
+// So the mode is now driven closed-loop against the telemetry that was already
+// arriving: command it, watch the status packets, re-send if it did not take,
+// and say so plainly if the device refuses it outright.
+void El15Client::sendModeNow(int mode) {
+  write(el15::modeCommand(mode));
+  // Allow two poll periods plus a margin for the change to show up in telemetry:
+  // at a 500 ms poll that is ~1.2 s, at a 20 Hz poll ~0.3 s. A fixed number
+  // would either thrash at slow poll rates or crawl at fast ones.
+  modeDeadlineMs_ = millis() + 2 * pollIntervalMs + 200;
+}
+
+void El15Client::setMode(int mode) {
+  wantMode_ = (int16_t)mode;
+  modeTries_ = 1;
+  sendModeNow(mode);
+}
+
+void El15Client::checkModeConfirm(const el15::Status &s) {
+  lastMode_ = (int16_t)s.mode;
+  if (wantMode_ < 0) return;
+  if (s.mode == wantMode_) {
+    if (modeTries_ > 1)
+      Serial.printf("[ble] mode 0x%02X confirmed after %u tries\n",
+                    (unsigned)wantMode_, (unsigned)modeTries_);
+    wantMode_ = -1;
+    modeTries_ = 0;
+  }
+}
+
+void El15Client::modeRetryTick() {
+  if (wantMode_ < 0) return;
+  if ((int32_t)(millis() - modeDeadlineMs_) < 0) return;
+  if (modeTries_ >= MODE_MAX_TRIES) {
+    // Out of retries. This is the honest end of the road: the device is not
+    // taking this mode, and pretending otherwise would leave every downstream
+    // consumer acting on a mode the load is not in.
+    Serial.printf("[ble] mode 0x%02X REFUSED after %u tries - the load is still in 0x%02X\n",
+                  (unsigned)wantMode_, (unsigned)modeTries_, (unsigned)(lastMode_ & 0xFF));
+    wantMode_ = -1;
+    modeTries_ = 0;
+    return;
+  }
+  modeTries_++;
+  Serial.printf("[ble] mode 0x%02X not taken (device in 0x%02X) - resend %u/%u\n",
+                (unsigned)wantMode_, (unsigned)(lastMode_ & 0xFF),
+                (unsigned)modeTries_, (unsigned)MODE_MAX_TRIES);
+  sendModeNow(wantMode_);
 }
 
 void El15Client::poll() { writeFixed(el15::POLL, sizeof(el15::POLL)); }
@@ -458,6 +523,8 @@ void El15Client::loopTick() {
   if (state_ == CONNECTED && client_ && !client_->isConnected()) handleDisconnect(-1);
   else if (state_ == IDLE && client_ && client_->isConnected()) client_->disconnect();
   if (state_ != CONNECTED) return;
+
+  modeRetryTick();   // re-send a mode command the device did not take
 
 #ifdef EL15_POLLTEST
   if (!pt_done) {
@@ -506,8 +573,11 @@ void El15Client::loopTick() {
     // LOAD_ON-after-setpoint land too. Load stays OFF throughout.
     Serial.printf("[selftest] back-to-back setpoint(0) + MODE -> %s (0x%02X)\n",
                   SWEEP[want].name, SWEEP[want].id);
-    write(el15::setpointCommand(0.0f));
-    write(el15::modeCommand(SWEEP[want].id));
+    // Go through the PUBLIC entry points, not writeRaw directly: setMode() is
+    // where the confirm-and-retry lives, and a self-test that bypassed it was
+    // measuring a code path no caller actually uses.
+    setSetpoint(0.0f);
+    setMode(SWEEP[want].id);
   }
 #endif
 

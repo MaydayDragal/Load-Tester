@@ -73,7 +73,15 @@ class El15Client : public El15Controller {
   uint8_t connectRetries() const { return connectRetries_; }
 
   // El15Controller — command frames identical to the Android app.
-  void setMode(int mode) override { write(el15::modeCommand(mode)); }
+  //
+  // setMode is CONFIRMED, not fire-and-forget: see el15_client.cpp. FFF3 is
+  // write-without-response, so a successful write means the local stack took the
+  // bytes, NOT that the load acted on them — and measurement on real hardware
+  // (2026-08-05) showed roughly a fifth of mode commands being silently
+  // discarded by the device. Everything downstream assumed the mode it asked for
+  // was the mode it got, which is how this presented as "the BLE link is
+  // unstable" when the link had never dropped at all.
+  void setMode(int mode) override;
   void setSetpoint(float v) override { write(el15::setpointCommand(v)); }
   void setLoad(bool on) override { writeFixed(on ? el15::LOAD_ON : el15::LOAD_OFF,
                                               on ? sizeof(el15::LOAD_ON) : sizeof(el15::LOAD_OFF)); }
@@ -142,6 +150,20 @@ class El15Client : public El15Controller {
   // a short fixed gap instead keeps commands from being crowded without
   // sacrificing the poll cadence the user asked for.
   uint32_t pollHoldUntilMs_ = 0;
+
+  // ---- Mode-command confirmation -------------------------------------------
+  // wantMode_ >= 0 means a mode command is outstanding and unconfirmed. It is
+  // cleared the moment a status packet reports that mode, re-sent if the
+  // deadline passes, and given up on (loudly) after MODE_MAX_TRIES so a device
+  // that genuinely refuses a mode cannot spin here forever.
+  static const uint8_t MODE_MAX_TRIES = 3;
+  int16_t wantMode_ = -1;
+  uint32_t modeDeadlineMs_ = 0;
+  uint8_t modeTries_ = 0;
+  int16_t lastMode_ = -1;        // most recent mode the device reported
+  void sendModeNow(int mode);
+  void checkModeConfirm(const el15::Status &s);   // called per valid status
+  void modeRetryTick();                           // called from loopTick
 
   char lastAddr_[24] = "";
   int lastAddrType_ = 0;
