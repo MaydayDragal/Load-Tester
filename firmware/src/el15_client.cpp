@@ -47,7 +47,14 @@ class ClientCallbacks : public NimBLEClientCallbacks {
   // onConnect has nothing to do here (running a blocking GATT discovery from
   // this host-task callback can wedge the NimBLE host).
   void onConnect(NimBLEClient *) override {}
-  void onDisconnect(NimBLEClient *, int) override { if (g_self) g_self->enqueueDisconnected(); }
+  // The reason code is the single most useful thing the stack tells us about a
+  // dropped link — supervision timeout (an RF/timing problem) and "remote user
+  // terminated" (the EL15 hung up on us deliberately) have completely different
+  // fixes, and without this byte they are indistinguishable from the log. It
+  // used to be discarded here.
+  void onDisconnect(NimBLEClient *, int reason) override {
+    if (g_self) g_self->enqueueDisconnected(reason);
+  }
 };
 static ClientCallbacks g_clientCallbacks;
 
@@ -99,14 +106,39 @@ void El15Client::enqueueDeviceFound(const NimBLEAdvertisedDevice *dev) {
   xQueueSend(evtQueue_, &e, 0);  // dropping a duplicate advert is harmless
 }
 
-void El15Client::enqueueDisconnected() {
+// Human-readable HCI disconnect reasons. NimBLE reports some codes offset into
+// its own error space (BLE_HS_HCI_ERR adds 0x200), so mask that off first.
+const char *El15Client::disconnectReason(int code) {
+  switch (code & 0xFF) {
+    case 0x08: return "supervision timeout (link went quiet)";
+    case 0x13: return "remote terminated (the load hung up)";
+    case 0x14: return "remote terminated - low resources";
+    case 0x15: return "remote terminated - power off";
+    case 0x16: return "local host terminated (we hung up)";
+    case 0x22: return "LL response timeout";
+    case 0x28: return "instant passed";
+    case 0x3B: return "unacceptable connection parameters";
+    case 0x3E: return "connection failed to be established";
+    case 0x02: return "unknown connection identifier";
+    case 0x05: return "authentication failure";
+    case 0x06: return "PIN or key missing";
+    case 0x00: return "(none reported)";
+    default:   return "unrecognised";
+  }
+}
+
+void El15Client::enqueueDisconnected(int reason) {
   if (!evtQueue_) return;
   Event e;
   e.kind = Event::DISCONNECTED;
+  e.reason = (int16_t)reason;
   // Disconnect is rare and must not be lost, so allow a brief wait if the queue
   // is momentarily full — and if even that fails, latch a flag the loop task
   // checks, so the event is delayed at worst, never dropped.
-  if (xQueueSend(evtQueue_, &e, pdMS_TO_TICKS(20)) != pdTRUE) discPending_ = true;
+  if (xQueueSend(evtQueue_, &e, pdMS_TO_TICKS(20)) != pdTRUE) {
+    discPendingReason_ = (int16_t)reason;
+    discPending_ = true;
+  }
 }
 
 void El15Client::drainEvents() {
@@ -115,7 +147,7 @@ void El15Client::drainEvents() {
   while (xQueueReceive(evtQueue_, &e, 0) == pdTRUE) {
     switch (e.kind) {
       case Event::NOTIFY:       handleNotify(e.data, e.len); break;
-      case Event::DISCONNECTED: handleDisconnect(); break;
+      case Event::DISCONNECTED: handleDisconnect(e.reason); break;
       case Event::DEVICE_FOUND: {
         // Remember the address WITH its type, and surface each address only once
         // (advertisements repeat many times per second).
@@ -134,7 +166,7 @@ void El15Client::drainEvents() {
   // longer than enqueueDisconnected() was willing to wait).
   if (discPending_) {
     discPending_ = false;
-    handleDisconnect();
+    handleDisconnect(discPendingReason_);
   }
 }
 
@@ -207,14 +239,26 @@ bool El15Client::connectAddr(const NimBLEAddress &addr) {
   NimBLEClient::Config cfg = client_->getConfig();
   cfg.connectFailRetries = connectRetries_;
   client_->setConfig(cfg);
-  Serial.printf("[ble] connecting to %s (addr type %d)\n",
-                addr.toString().c_str(), addr.getType());
+  // Heap is printed on every attempt because a reconnect that fails for lack of
+  // a ~30 KB contiguous block reports HCI 0x3e — "connection failed to be
+  // established" — which is indistinguishable from a peer that is out of range.
+  // Having the number next to the failure is what separates "move closer" from
+  // "the heap fragmented, reboot".
+  Serial.printf("[ble] connecting to %s (addr type %d) | heap %u B free, largest %u B\n",
+                addr.toString().c_str(), addr.getType(),
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   if (!client_->connect(addr)) {
     // rc 13 = BLE_HS_ETIMEOUT / HCI 0x3e: the peer never completed the
     // handshake (out of range, rotated its address, or an Android RPA peripheral
     // not accepting). Keep the client for reuse — deleting it here races the
     // controller's late disconnect event ("client not found").
-    Serial.printf("[ble] connect() FAILED rc=%d\n", client_->getLastError());
+    int rc = client_->getLastError();
+    Serial.printf("[ble] connect() FAILED rc=%d (%s) | heap %u B free, largest %u B\n",
+                  rc, disconnectReason(rc),
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    if (ESP.getMaxAllocHeap() < 30000)
+      Serial.println("[ble] NOTE: largest free block is under the ~30 KB NimBLE needs to "
+                     "connect - this is a MEMORY failure, not a radio one. A reboot will clear it.");
     setState(IDLE, "Connect failed");
     return false;
   }
@@ -271,16 +315,27 @@ bool El15Client::connectAddr(const NimBLEAddress &addr) {
   return true;
 }
 
-void El15Client::handleDisconnect() {
+void El15Client::handleDisconnect(int reason) {
+  // Heap is logged alongside the reason because the two failure modes look
+  // identical from the outside: a link that DROPS is an RF/protocol problem,
+  // whereas a link that will not COME BACK is usually a memory one — NimBLE
+  // needs a ~30 KB contiguous block to establish a connection, and a fragmented
+  // heap presents as "Connect failed" (HCI 0x3e), not as an out-of-memory error.
+  Serial.printf("[ble] DISCONNECTED reason=0x%02X (%s) | heap %u B free, largest %u B\n",
+                reason & 0xFF, disconnectReason(reason),
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   notifyChar_ = nullptr;
   writeChar_ = nullptr;
   frameLen_ = 0;
+  wantMode_ = -1;   // nothing outstanding survives the link
+  modeTries_ = 0;
+  lastMode_ = -1;
   setState(IDLE, "Disconnected");
 }
 
 void El15Client::disconnect() {
   if (client_ && client_->isConnected()) client_->disconnect();
-  else handleDisconnect();
+  else handleDisconnect(-1);
 }
 
 void El15Client::shutdownAndDisconnect() {
@@ -388,10 +443,72 @@ void El15Client::handleNotify(const uint8_t *data, size_t len) {
       pt_havePrev = true;
     }
 #endif
+    if (s.valid) checkModeConfirm(s);
     if (onStatus) onStatus(s);
     memmove(frameBuf_, frameBuf_ + 28, frameLen_ - 28);
     frameLen_ -= 28;
   }
+}
+
+// ---- Mode commands, confirmed ----------------------------------------------
+// Measured on a real EL15 (2026-08-05, back-to-back mode sweep): 2 of 9 mode
+// commands were silently discarded by the device even though every write
+// returned OK. They have to be, because FFF3 is write-WITHOUT-response — the
+// "OK" is the local stack accepting the bytes, and the load never acknowledges
+// anything. Nothing detected the loss, so the UI showed one mode while the
+// device sat in another, which reads exactly like a flaky connection.
+//
+// It matters well beyond cosmetics: CapacityTest::start() commands CC before
+// discharging, and a dropped CC would have run an entire battery test in
+// whatever mode the load happened to be left in.
+//
+// So the mode is now driven closed-loop against the telemetry that was already
+// arriving: command it, watch the status packets, re-send if it did not take,
+// and say so plainly if the device refuses it outright.
+void El15Client::sendModeNow(int mode) {
+  write(el15::modeCommand(mode));
+  // Allow two poll periods plus a margin for the change to show up in telemetry:
+  // at a 500 ms poll that is ~1.2 s, at a 20 Hz poll ~0.3 s. A fixed number
+  // would either thrash at slow poll rates or crawl at fast ones.
+  modeDeadlineMs_ = millis() + 2 * pollIntervalMs + 200;
+}
+
+void El15Client::setMode(int mode) {
+  wantMode_ = (int16_t)mode;
+  modeTries_ = 1;
+  sendModeNow(mode);
+}
+
+void El15Client::checkModeConfirm(const el15::Status &s) {
+  lastMode_ = (int16_t)s.mode;
+  if (wantMode_ < 0) return;
+  if (s.mode == wantMode_) {
+    if (modeTries_ > 1)
+      Serial.printf("[ble] mode 0x%02X confirmed after %u tries\n",
+                    (unsigned)wantMode_, (unsigned)modeTries_);
+    wantMode_ = -1;
+    modeTries_ = 0;
+  }
+}
+
+void El15Client::modeRetryTick() {
+  if (wantMode_ < 0) return;
+  if ((int32_t)(millis() - modeDeadlineMs_) < 0) return;
+  if (modeTries_ >= MODE_MAX_TRIES) {
+    // Out of retries. This is the honest end of the road: the device is not
+    // taking this mode, and pretending otherwise would leave every downstream
+    // consumer acting on a mode the load is not in.
+    Serial.printf("[ble] mode 0x%02X REFUSED after %u tries - the load is still in 0x%02X\n",
+                  (unsigned)wantMode_, (unsigned)modeTries_, (unsigned)(lastMode_ & 0xFF));
+    wantMode_ = -1;
+    modeTries_ = 0;
+    return;
+  }
+  modeTries_++;
+  Serial.printf("[ble] mode 0x%02X not taken (device in 0x%02X) - resend %u/%u\n",
+                (unsigned)wantMode_, (unsigned)(lastMode_ & 0xFF),
+                (unsigned)modeTries_, (unsigned)MODE_MAX_TRIES);
+  sendModeNow(wantMode_);
 }
 
 void El15Client::poll() { writeFixed(el15::POLL, sizeof(el15::POLL)); }
@@ -403,9 +520,11 @@ void El15Client::loopTick() {
   // "connected" UI over a dead link never fires the link-guard chain, and a
   // live unmanaged link refuses the safety LOAD_OFF. Trust the controller, not
   // the bookkeeping.
-  if (state_ == CONNECTED && client_ && !client_->isConnected()) handleDisconnect();
+  if (state_ == CONNECTED && client_ && !client_->isConnected()) handleDisconnect(-1);
   else if (state_ == IDLE && client_ && client_->isConnected()) client_->disconnect();
   if (state_ != CONNECTED) return;
+
+  modeRetryTick();   // re-send a mode command the device did not take
 
 #ifdef EL15_POLLTEST
   if (!pt_done) {
@@ -454,8 +573,11 @@ void El15Client::loopTick() {
     // LOAD_ON-after-setpoint land too. Load stays OFF throughout.
     Serial.printf("[selftest] back-to-back setpoint(0) + MODE -> %s (0x%02X)\n",
                   SWEEP[want].name, SWEEP[want].id);
-    write(el15::setpointCommand(0.0f));
-    write(el15::modeCommand(SWEEP[want].id));
+    // Go through the PUBLIC entry points, not writeRaw directly: setMode() is
+    // where the confirm-and-retry lives, and a self-test that bypassed it was
+    // measuring a code path no caller actually uses.
+    setSetpoint(0.0f);
+    setMode(SWEEP[want].id);
   }
 #endif
 
