@@ -6,6 +6,8 @@
 > what is still open as of `6adea41`. Sections above that point are preserved
 > verbatim as the historical record — several of them describe code (the demo
 > simulator, the SD stub, the R²-based reliability rule) that no longer exists.
+> A second, stability-focused audit was run on 2026-08-05 — see
+> **[§ Stability audit (2026-08-05)](#stability-audit-2026-08-05)** at the end.
 
 Date: 2026-07-21 · Branch `claude/android-apk-load-tester-k82q4g` (HEAD `d65d430`)
 Scope: full static audit of `firmware/src/*` + build verification, driven section-by-section
@@ -264,3 +266,75 @@ flash 2,113,255 B of the 3 MB `huge_app` slot, RAM 17.8 % static.
 | **N4** | **Any non-CONNECTED BLE state was treated as a link drop** (`main.cpp` `onState`), so the user's own SCANNING/CONNECTING transitions tore down a running test — opening Connect and tapping Scan mid-discharge ended it, and mid-priming it died as "Cancelled" leaving nothing to save. Now latches `g_wasConnected` and acts only on a real drop from a live link. | **H** — fixed 2026-08-01 |
 | **N5** | **SdFat was never given a clock**, so every file it created carried the card's default date and a PC's file listing showed the wrong date even though the CSV body and Settings clock were correct. `FsDateTime::setCallback` now reads the PCF85063. | **M** — fixed 2026-08-01 |
 | **N6** | **The card was mounted once and never re-probed**, so an eject left SdFat serving a cached FAT and a re-inserted card was ignored until reboot. Entry points now probe with CMD10 and re-init on failure. | **M** — fixed 2026-08-01 |
+
+---
+
+## Stability audit (2026-08-05)
+
+Date: 2026-08-05 · HEAD `1d4a21e` · Build: **PASS** (`pio run` 11.4 s, RAM 19.8 %
+static / 65,028 B, flash 69.7 % of the 3 MB `huge_app` slot, no warnings).
+
+Method: six independent review passes over `firmware/src/*` (heap/memory,
+concurrency+task contexts, blocking/watchdog, safety state machines,
+arithmetic/time, peripheral robustness), findings then adversarially re-traced.
+**CONFIRMED** = the full code path was independently re-traced end-to-end (or
+directly re-read during report assembly) and the scenario holds. **PLAUSIBLE** =
+found and internally consistent, but not independently re-verified — treat as a
+credible lead, not a proven defect. 27 raw findings deduplicated to 19.
+
+The dominant theme: **mode commands got the closed-loop confirm-and-retry
+treatment (HANDOVER §18) but LOAD ON/OFF transitions did not** — every
+`setLoad()` in the engines, the power-off path, and the test-exit path is still
+a single fire-and-forget write-no-response, on hardware measured to silently
+drop ~2 of 9 such writes. S3/S4/S12/S13 are all instances. The second theme:
+the link guard's protection can be dismantled by ordinary code paths (S2/S6)
+while the load is unconfirmed.
+
+### Findings table
+
+| # | Sev | Status | Where | Finding |
+|---|---|---|---|---|
+| **S1** | **H** | CONFIRMED | `ui.cpp:3744-3755` | NTP-sync DONE path runs `delay(1600); ESP.restart()` unconditionally. The sync *button* is gated on `engineBusy() \|\| lastLoadOn`, but nothing stops a test start / manual LOAD ON *during* the 5–27 s sync window (`startBatt`, `ui.cpp:2780`; manual toggle, `ui.cpp:879`; none check `net::busy()`). Sync lands → reboot mid-discharge, no LOAD_OFF pushed, recovery reduced to the tap-to-act boot banner. |
+| **S2** | **H** | CONFIRMED | `main.cpp:500` | `onBattError` disarms the link guard (and wipes the NVS in-flight flag, `link_guard.h:51-56`) whenever both engines are idle, *before* `onConnState` runs at `main.cpp:441`. On a BLE drop during PRIMING, `pause()` fails → `stop("Connection lost")` → `onError` → disarm; the guard's reconnect-and-kill never starts and the boot recovery flag is gone. The justifying comment ("handleStatus re-arms on the next packet") is false exactly when the link is dead. |
+| **S3** | **H** | CONFIRMED | `capacity_test.h:591-595` | Every test exit ends in `finishSafely()`: one unconfirmed `setLoad(false)` + `setSetpoint(0)` pair. No caller confirms against `s.loadOn` or retries — unlike the guard's `forceOff()` (3×, `link_guard.h:174-180`) and unlike mode commands. `powerOffSafely()` (`main.cpp:231-248`) is the worst case: it clears the NVS recovery flag on the assumption the write landed, then cuts its own power. Same pattern in `resistance_test.h:477-481`, `emergencyStop()`, `stopAll()`. |
+| **S4** | M | CONFIRMED | `capacity_test.h:533, 270` | The capacity engine never verifies the load turned ON: `finishPriming()` and `resume()` fire one `setLoad(true)` and never read `s.loadOn` (the R-test re-asserts at 400 ms, `resistance_test.h:191-199`; hardware-measured drops make this a several-percent event). Dropped LOAD_ON → phantom "discharge" at 0 A that only the 2.5×-duration cap ends, up to 48–72 h later, with a garbage 0 Ah result. |
+| **S5** | M | CONFIRMED | `capacity_test.h:327-345` | No telemetry-staleness watchdog while DISCHARGING: cutoff, protection-trip and Ah-cap all live in `onStatus()`; `tick()` checks only the duration cap; the client reconciles only `isConnected()` (`el15_client.cpp:523`) and the guard fires only on a disconnect *event*. A mute-but-connected peer (wedge, lost CCCD, persistent checksum-failing corruption) leaves the load sinking, blind to cutoff, until the multi-hour cap. PRIMING has exactly this deadline (`PRIME_MAX_MS`); DISCHARGING does not. |
+| **S6** | M | CONFIRMED | `link_guard.h:66-73` | `standDown()` — invoked by the UI's Scan/Connect actions (`main.cpp:307-308`), reachable mid-recovery by design — unconditionally runs `prefs::clearInFlight()`, erasing the crash-recovery flag while the load may still be ON. After a failed rescue scan, a brownout/power-off boots with `inFlight==NONE` and no recovery offer. The comment two lines above ("the crash/reboot flag still covers a power loss") is contradicted by line 72. |
+| **S7** | M | CONFIRMED | `ui.cpp:2931, 1464, 2246` | SD saves are reachable while the *other* engine drives the load: save buttons gate only on `battSaved`/`rtSaved`, `engineBusy()` excludes RESULT phases, and Settings' "Check card" has no gate at all. A BATT save blocks the loop task synchronously for ~20–80 s (soft-SPI write + CRC verify ×2 attempts) — BOOT e-stop, guard tick, BLE drain, both engines and LVGL all frozen with current flowing; TWDT stays fed so it is a silent supervision outage. |
+| **S8** | M | CONFIRMED | `ui.cpp:3869, 1719` | Scan results are unbounded on a heap with ~35 KB headroom: ~1–2 KB of LVGL objects per named advertiser plus an unchecked `new std::string`, rows freed only on the *next* scan, and NimBLE's own scan cache grows too (`setMaxResults(0)` never called). A BLE-dense environment fragments or exhausts the heap exactly before the connect attempt (HCI 0x3e), including the post-link-loss rescue scan; dense enough → `lv_obj_create` NULL / abort panic. |
+| **S9** | L | CONFIRMED (mechanism) | `capacity_test.h:305, 327` | No `isfinite()` anywhere on the telemetry path (raw float32 memcpy in `el15_protocol.h`). One NaN current sample makes `ah_`/`wh_` NaN **permanently** — the Ah safety cap (`ah_ >= capAh_`) is dead for the rest of the run; a NaN voltage defeats both cutoff comparisons while present and resets the debounce. Trigger needs the peer to emit NaN through a valid checksum (unconfirmed on real hardware) — but the fix is a one-line gate in `onStatus()`. |
+| **S10** | M | PLAUSIBLE | `ui.cpp:2172, 3204` | The Wi-Fi gates test `engineBusy() \|\| lastLoadOn`, but `onConnState` force-clears `lastLoadOn` on any disconnect (`ui.cpp:3854`) — so sync/scan pass exactly when the load state is *unknown and possibly ON* (guard RECOVERING/FAILED). esp_wifi then holds ~50 KB heap + the shared C6 antenna, so every guard reconnect attempt fails while current flows; a successful sync reboots on top (S1). |
+| **S11** | M | PLAUSIBLE | `display.cpp:604-630, 465-468` | `setLowMemMode()` frees the active draw buffer *before* allocating the replacement; if every ladder rung fails it returns with the dangling buffer still registered — LVGL keeps rendering into freed heap (the "next flush would deref null" comment is wrong: it's dangling, not null). Boot variant: if the initial 47 KB alloc fails, `display::begin()` returns without registering a display and `ui::begin()` derefs `lv_scr_act()==NULL` → deterministic bootloop (latent until the RAM budget shrinks). |
+| **S12** | L | PLAUSIBLE | `link_guard.h:126-134` | On reconnect the guard fires `forceOff()` (3 blind pairs), then immediately disarms, clears NVS and announces "Reconnected and shut the load down" — without ever confirming `s.loadOn==false` from telemetry on a link that "has only just come back". `handleStatus` re-arms if loadOn persists, but nothing re-commands OFF and the green resolution banner stands. |
+| **S13** | L | PLAUSIBLE | `main.cpp:161-204` | Controller-battery pause (≤8 %) and auto-resume use the same threshold with no hysteresis: gauge dither at the boundary toggles LOAD_OFF/LOAD_ON every few seconds for hours (relay/FET chatter, alarm spam) — and every resume is an unconfirmed LOAD_ON (S4). |
+| **S14** | L | PLAUSIBLE | `display.cpp:251` + `main.cpp:189` | A NACKed fuel-gauge percent read maps to 0 % while the function still returns true → after the 3-sample debounce, a healthy discharge is force-paused (and stays paused while the reads stay bad). The mV path has a validity guard; the percent path doesn't. |
+| **S15** | L | PLAUSIBLE | `sd_card.cpp:367-383` | `nextIndex()` walks *every* root-directory entry over ~250 kHz soft SPI with no `delay(1)` — the module's other long loops feed the idle-task TWDT explicitly. A card with thousands of root files can starve the idle task past 5 s → reset mid-save. |
+| **S16** | L | PLAUSIBLE | `audio.cpp:40` | TCA9554 read-modify-write falls back to `v=0x00` when the read-back returns no data, then writes it — dropping the AMOLED panel-enable/reset bits set moments earlier. One glitched I2C read at boot → black screen with the firmware fully alive (indistinguishable from a hang to the operator). |
+| **S17** | L | PLAUSIBLE | `capacity_test.h:328` | The single-sample instant cutoff (`voltage < cutoffV-0.3`) trusts one frame guarded only by the 8-bit additive checksum (~1/256 corrupt frames pass). Over ~1.7 M frames of a 23 h run, one passing corruption ends the test with a plausible-looking wrong result. Fail-safe direction, but a multi-day run is silently lost. |
+| **S18** | L | PLAUSIBLE | `netclock.cpp:148` | `startScan()` anchors `g_scanNextTryMs=0`, so `(int32_t)(millis()-0) < 0` wedges the scan for the entire uptime window ~day 24.9–49.7: `net::busy()` stuck true, no more clock syncs, Wi-Fi radio left up beside BLE. |
+| **S19** | L | PLAUSIBLE | `el15_client.cpp:586-587` | `pollHoldUntilMs_` is re-anchored only at connect and on control writes; ~24.85 days connected with no command and the signed-wrap gate goes negative — polling (hence all telemetry) silently stops while the UI shows Connected. Mirror of the initial-anchor bug already fixed at `el15_client.cpp:306-311`. |
+
+### Suggested fix order
+
+1. **Close the LOAD-transition loop** (S3, S4, S12, S13-resume): confirm every
+   `setLoad()` against the next status packet's `s.loadOn` and re-assert on
+   mismatch — the exact pattern the mode commands already got in HANDOVER §18,
+   and the R-test's 400 ms re-assert already proves out. This single change
+   retires the worst halves of four findings.
+2. **Stop dismantling the guard while the load is unconfirmed** (S2, S6):
+   don't `disarm()`/`clearInFlight()` unless telemetry has confirmed loadOn
+   false or the guard itself completed; in `onBattError`, skip the disarm when
+   the link is down (or run it after `onConnState`).
+3. **Gate the restart and the blockers on load state** (S1, S7, S10): make the
+   NTP DONE path refuse to reboot while `engineBusy() || loadHot()` (finish the
+   sync, skip the restart); gate SD save/check on the same predicate; gate test
+   starts on `net::busy()`.
+4. **One-line hardening**: `isfinite()` on V/I in `onStatus()` (S9); cap scan
+   rows + `setMaxResults(0)` (S8); `delay(1)` in `nextIndex()` (S15); resume
+   hysteresis at e.g. 12 % (S13); anchor fixes for the two 24.9-day wraps
+   (S18, S19).
+5. **Staleness watchdog while DISCHARGING** (S5): pause + guard-style recovery
+   after N seconds without a valid frame — PRIMING already has the template.
+
+On-device items (S4's drop rate, S5's mute-link plausibility, S16's I2C glitch)
+stay on the QA_GUIDE hardware checklist; nothing here is verified on hardware.
