@@ -122,10 +122,12 @@ class LeastSquares {
  *  3. SAMPLE DENSITY — every packet counts, so a faster poll rate directly
  *     tightens the fit. The regression runs incrementally, so the live R
  *     estimate costs nothing and no sample buffer grows.
- *  4. OFF-TARGET REJECTION — the load regulates current, so a frame reporting a
- *     current far from the commanded one is a bad reading rather than an
- *     operating point. Those are kept out of the fit and counted; the load
- *     emits one or two per sweep at a fixed current. See [offTargetLimit].
+ *  4. CORRUPTION REJECTION — the load mangles its own current reading once or
+ *     twice a sweep. Two tests catch it: the reading sits far from the current
+ *     the load was TOLD to hold ([offTargetLimit]), or it sticks out past both
+ *     of its neighbours on a monotonic ramp ([sticksOut]). The second exists
+ *     because the first alone misses 4 of 15, its window being wide to allow
+ *     for regulation lag.
  *  5. REPAIR — the load's corruption is invertible, so a held-back reading whose
  *     true current the surrounding ramp identifies unambiguously is recovered
  *     rather than lost. Only when it is unambiguous; see [repairOffTarget].
@@ -303,12 +305,12 @@ class ResistanceTest(
     }
 
     /** A reading held back one packet while its fate is decided. */
-    private class Pending(
+    private class Held(
         val nowMs: Long, val voltage: Float, val current: Float,
-        val temperature: Float, val fanSpeed: Int,
+        val temperature: Float, val fanSpeed: Int, val target: Float,
     )
 
-    private var pending: Pending? = null
+    private var held: Held? = null
     private var lastAcceptedI = 0f
     private var lastAcceptedMs = 0L
     private var haveAccepted = false
@@ -324,7 +326,7 @@ class ResistanceTest(
         loadDropouts = 0
         offTargetSamples = 0
         state = State.PRIMING
-        pending = null
+        held = null
         primeStartMs = now()
         lastClearPushMs = 0
         ble.setMode(El15Protocol.MODE_CC)
@@ -431,32 +433,17 @@ class ResistanceTest(
             return
         }
 
-        // A reading whose current is nowhere near the commanded one is not a
-        // measurement of this circuit — see [offTargetLimit]. Rather than drop it
-        // on the spot it is HELD: the fault is a one-sample excursion, so the
-        // next good reading closes it out and may be able to recover it (see
-        // [resolvePending]). It is already in the datapoint log above either way,
-        // so the CSV shows the raw frame whatever happens to it.
-        if (abs(status.current - currentTarget) > offTargetLimit(currentTarget, rampStepA())) {
-            // Two suspects in a row leave nothing to interpolate across, so the
-            // older one goes. The load re-serves a stale frame when polled faster
-            // than it refreshes, which is exactly how that happens.
-            if (pending != null) offTargetSamples++
-            pending = Pending(
-                nowMs = now() - tStart, voltage = status.voltage, current = status.current,
-                temperature = status.temperature, fanSpeed = status.fanSpeed,
-            )
-            callback.onTestProgress(
-                elapsedS(), sweepMsEff / 1000f, currentTarget,
-                status.voltage, status.current, 0f, false,
-            )
-            return
-        }
-
-        // This reading is good, which is what a held one was waiting for.
-        resolvePending(now() - tStart, status.current)
-        accept(status.current, status.voltage, status.temperature, status.fanSpeed,
-               now() - tStart)
+        // EVERY reading is held one packet before it reaches the fit, because the
+        // sharpest test for the load's fault needs a reading on each side of the
+        // suspect one — see [resolveHeld]. The live readout below still uses this
+        // packet as it arrives, so nothing the user sees is delayed; only entry
+        // into the fit is, by one poll interval.
+        resolveHeld(status)
+        held = Held(
+            nowMs = now() - tStart, voltage = status.voltage, current = status.current,
+            temperature = status.temperature, fanSpeed = status.fanSpeed,
+            target = currentTarget,
+        )
 
         val f = lsq.fit()
         callback.onTestProgress(
@@ -490,6 +477,42 @@ class ResistanceTest(
     }
 
     /**
+     * Is the held reading suspect, given a reading either side of it?
+     *
+     * TWO tests, because they see different things:
+     *
+     *  - It sits too far from the CURRENT THE LOAD WAS TOLD TO HOLD
+     *    ([offTargetLimit]). Cheap and needs no successor, but the command lags
+     *    the reading by design, so its window has to be wide — 0.25 A — and the
+     *    load's mildest corruption at 1.20 A only moves the reading 0.20 A.
+     *    Measured on 12 R-test sweeps: this test alone misses 4 of 15.
+     *
+     *  - It STICKS OUT BEYOND BOTH NEIGHBOURS. A ramp is monotonic, so an honest
+     *    reading lies between the ones either side of it however far the command
+     *    has run ahead — lag and the load's stale repeats both keep that
+     *    property, and corruption does not. Over 3 511 samples the honest
+     *    excursion is 0.0000 A at the median and 0.0002 A at the 99th
+     *    percentile, against 0.55 A for corrupted ones: a gap of three orders of
+     *    magnitude, which is why [SPIKE_A] can sit so low.
+     *
+     * The exception is the ramp's own turning point, where the peak reading
+     * genuinely is above both its neighbours — that alone is not corruption, so
+     * the second test stands down there and the first carries it.
+     */
+    private fun isSuspect(h: Held, nextCurrent: Float): Boolean {
+        if (abs(h.current - h.target) > offTargetLimit(h.target, rampStepA())) return true
+        if (!haveAccepted || nearTurnaround(h.nowMs)) return false
+        return sticksOut(h.current, lastAcceptedI, nextCurrent) > SPIKE_A
+    }
+
+    /** Within a couple of setpoint steps of the apex, where the ramp reverses. */
+    private fun nearTurnaround(atMs: Long): Boolean {
+        val guard = 3 * setpointStepMs()
+        return atMs <= guard || atMs >= sweepMsEff - guard ||
+            abs(atMs - sweepMsEff / 2) <= guard
+    }
+
+    /**
      * Decide what becomes of a held reading, now that a good one has arrived
      * after it.
      *
@@ -511,13 +534,20 @@ class ResistanceTest(
      * wrong current at the right voltage is indistinguishable from a
      * measurement ever after.
      */
-    private fun resolvePending(nextMs: Long, nextCurrent: Float) {
-        val p = pending ?: return
-        pending = null
+    private fun resolveHeld(next: El15Status) {
+        val h = held ?: return
+        held = null
+        val nextMs = now() - tStart
+        if (!isSuspect(h, next.current)) {
+            accept(h.current, h.voltage, h.temperature, h.fanSpeed, h.nowMs)
+            return
+        }
+        // Suspect. Recover it if the ramp identifies the corruption; otherwise
+        // it goes, which is what happened to all of them before repair existed.
         val repaired = if (!haveAccepted) null else repairOffTarget(
-            reported = p.current,
+            reported = h.current,
             predicted = interpolate(
-                lastAcceptedMs, lastAcceptedI, nextMs, nextCurrent, p.nowMs,
+                lastAcceptedMs, lastAcceptedI, nextMs, next.current, h.nowMs,
             ),
         )
         if (repaired == null) {
@@ -525,7 +555,7 @@ class ResistanceTest(
             return
         }
         repairedSamples++
-        accept(repaired, p.voltage, p.temperature, p.fanSpeed, p.nowMs)
+        accept(repaired, h.voltage, h.temperature, h.fanSpeed, h.nowMs)
     }
 
     // ---- Ticker --------------------------------------------------------------
@@ -602,7 +632,7 @@ class ResistanceTest(
         tempMin = 0f; tempMax = 0f; haveTemp = false
         fanMax = 0; peakW = 0f
         lastSetMs = 0; currentTarget = 0f
-        pending = null
+        held = null
         lastAcceptedI = 0f; lastAcceptedMs = 0L; haveAccepted = false
         repairedSamples = 0
     }
@@ -704,11 +734,16 @@ class ResistanceTest(
     }
 
     private fun complete() {
-        // A reading still held when the sweep ends has no successor to resolve
-        // it, so it goes the way it would have gone before repair existed.
-        if (pending != null) {
-            offTargetSamples++
-            pending = null
+        // The last reading has no successor, so it cannot be spike-tested. Judge
+        // it on the command alone — the test that never needed one — and take it
+        // if it passes, rather than losing a sample to the sweep simply ending.
+        held?.let { h ->
+            held = null
+            if (abs(h.current - h.target) > offTargetLimit(h.target, rampStepA())) {
+                offTargetSamples++
+            } else {
+                accept(h.current, h.voltage, h.temperature, h.fanSpeed, h.nowMs)
+            }
         }
         val f = lsq.fit()
         finishSafely()
@@ -864,6 +899,35 @@ class ResistanceTest(
             OFF_TARGET_FLOOR_A,
             OFF_TARGET_FRACTION * target,
             OFF_TARGET_STEPS * rampStepA,
+        )
+
+        // ---- Spike test ----------------------------------------------------
+        /**
+         * How far a reading may stick out past BOTH of its neighbours before it
+         * is treated as corrupt.
+         *
+         * A ramp is monotonic, so an honest reading lies between the ones either
+         * side of it — and it keeps doing so however far the command has run
+         * ahead, which is what makes this immune to the regulation lag that
+         * forces [OFF_TARGET_FLOOR_A] to be wide. The load's stale repeats are
+         * equal to a neighbour, so they cannot stick out either.
+         *
+         * Measured over 3 511 samples of real sweeps: the honest excursion is
+         * 0.0000 A at the median, 0.0002 A at the 99th percentile. Corrupted
+         * readings sit at 0.55 A. Three orders of magnitude of daylight, so this
+         * threshold is nowhere near either edge — anything from 0.03 to 0.08
+         * flags the same 14-17 samples.
+         */
+        private const val SPIKE_A = 0.05f
+
+        /**
+         * How far [value] lies outside the interval its neighbours span; 0 when
+         * it sits between them, which is where a reading on a ramp belongs.
+         */
+        fun sticksOut(value: Float, before: Float, after: Float): Float = maxOf(
+            value - max(before, after),
+            min(before, after) - value,
+            0f,
         )
 
         // ---- Repair --------------------------------------------------------

@@ -422,6 +422,35 @@ Judged against the bench captures the gate holds up, with one known limit:
 - **8 of 11 corrupted samples caught.** The three that slip through are the mild
   `2v-1` mode, whose error at 1.20 A is only 0.2 A — under the floor.
 
+### Catching the ones the command test cannot see
+
+The `|I − target|` window has to be wide — 0.25 A — because the commanded
+current leads the measured one by design. The load's mildest corruption at
+1.20 A moves the reading only 0.20 A, so it fits inside that window and reaches
+the fit as data. Measured over 12 real R-test sweeps (3 698 conducting samples,
+15 one-sample corruptions): **the command test alone misses 4 of the 15**, one
+of them a textbook `2v-1` — 1.4024 A reported where the ramp was at 1.1967.
+
+A second test closes it, and needs nothing from the command. A ramp is
+monotonic, so an honest reading lies **between** the readings either side of it
+— and keeps doing so no matter how far the command has run ahead. Lag preserves
+that ordering; the load's stale repeats are *equal* to a neighbour, so they
+preserve it too. Corruption does not. Over 3 511 samples:
+
+| how far a reading sticks out past BOTH neighbours | |
+|---|---|
+| median | 0.0000 A |
+| 99th percentile | 0.0002 A |
+| corrupted readings | ~0.55 A |
+
+Three orders of magnitude of daylight, so the 0.05 A trigger is nowhere near
+either edge — anything from 0.03 to 0.08 A flags the same 14–17 samples. Adding
+it to the engine (every reading is now held one packet, so both neighbours are
+in hand) caught 3 more corruptions across those sweeps: one recovered, two kept
+out of the fit, and **no honest sample dragged in**. The ramp's own turning
+point is the one place a genuine reading does stand above both neighbours, so
+the test stands down within three setpoint steps of the apex and the ends.
+
 ### Recovering the reading instead of dropping it
 
 The corruption is invertible — `2r`, `(r+1)/2`, `(r+3)/4` — so a dropped sample

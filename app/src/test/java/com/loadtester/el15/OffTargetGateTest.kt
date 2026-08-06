@@ -1,5 +1,6 @@
 package com.loadtester.el15
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -69,5 +70,59 @@ class OffTargetGateTest {
     fun `the limit is never smaller than the floor`() {
         assertTrue(ResistanceTest.offTargetLimit(0f, 0f) >= 0.25f)
         assertTrue(ResistanceTest.offTargetLimit(0.05f, 0f) >= 0.25f)
+    }
+
+    // ---- the second trigger: sticking out past both neighbours -------------
+    // The command comparison alone misses 4 of 15 corrupted readings, measured
+    // over 12 real sweeps, because the load's mildest corruption at 1.20 A moves
+    // the reading only 0.20 A against a 0.25 A window. A ramp is monotonic, so
+    // this test catches what that one cannot without depending on the command.
+
+    private fun out(v: Float, before: Float, after: Float) =
+        ResistanceTest.sticksOut(v, before, after)
+
+    @Test
+    fun `a reading between its neighbours sticks out by nothing`() {
+        assertEquals(0f, out(1.20f, 1.15f, 1.25f), 1e-6f)   // rising
+        assertEquals(0f, out(1.20f, 1.25f, 1.15f), 1e-6f)   // falling
+        assertEquals(0f, out(1.15f, 1.15f, 1.25f), 1e-6f)   // on a neighbour
+    }
+
+    @Test
+    fun `a stale repeat sticks out by nothing`() {
+        // The load re-serves the previous reading when polled faster than it
+        // refreshes. That is not corruption and must never be treated as it.
+        assertEquals(0f, out(1.1936f, 1.1936f, 1.3318f), 1e-6f)
+        assertEquals(0f, out(0.6371f, 0.6371f, 0.4046f), 1e-6f)
+    }
+
+    @Test
+    fun `lag however large does not stick out`() {
+        // The command can run far ahead of the reading on a fast sweep; as long
+        // as the readings themselves are ordered, none of them sticks out.
+        assertEquals(0f, out(2.0f, 1.0f, 3.0f), 1e-6f)
+    }
+
+    @Test
+    fun `the corrupted reading the command test misses is caught here`() {
+        // Captured: 1.4024 A reported where the ramp was at ~1.19 - only 0.173 A
+        // off the 1.230 A command, so the gate lets it through. It stands 0.20 A
+        // clear of both neighbours.
+        val e = out(1.4024f, 1.1900f, 1.2000f)
+        assertTrue("should stand well clear of both neighbours, was $e", e > 0.15f)
+    }
+
+    @Test
+    fun `the loud corruptions stick out by a mile`() {
+        assertTrue(out(1.7849f, 1.1898f, 1.2090f) > 0.5f)    // 4v-3
+        assertTrue(out(0.6022f, 1.2169f, 1.1965f) > 0.5f)    // v/2
+    }
+
+    @Test
+    fun `honest scatter stays far below the threshold`() {
+        // The 99th percentile of the honest excursion over 3511 real samples was
+        // 0.0002 A. Even a hundred times that is nowhere near the 0.05 A trigger.
+        assertTrue(out(1.2002f, 1.2000f, 1.2000f) < 0.05f)
+        assertTrue(out(1.2200f, 1.2000f, 1.2000f) < 0.05f)
     }
 }
