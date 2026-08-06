@@ -716,31 +716,38 @@ class ResistanceTest(
         private const val FAULT_CLEAR_MS = 4000L
 
         // ---- Off-target rejection ------------------------------------------
-        // Measured on a real EL15 (2026-08-06, RTEST_003): as the current crosses
-        // ~1.2 A the load emits one or two status frames whose CURRENT field is
-        // wrong while the voltage field stays exactly on the fitted V-I line —
-        // once on the way up, once on the way down, in every sweep. It is a
-        // measurement artifact inside the load, not current the circuit drew: a
-        // real 0.55 A excursion would have pulled the terminal voltage down
-        // 0.19 V, and it instead rose 0.03 V. One of the four events read exactly
-        // HALF the true current (0.6226 A against 1.2452 A) — a single bit of the
-        // float's exponent, which is what a scaling or range change looks like,
-        // not what noise looks like. The frames pass the device's own checksum, so
-        // nothing on the phone corrupted them.
+        // The EL15 corrupts its own current reading as the current crosses
+        // ~1.2 A. Confirmed on the bench by driving a real unit from a PC rather
+        // than from this app (tools/el15_bench, RTEST_ACCURACY.md section 7):
+        // across ~3500 samples every corrupted reading — 11 of them — had a TRUE
+        // current between 1.175 A and 1.207 A, and nothing outside that 32 mA
+        // window ever glitched. It fires on about one crossing in three, only
+        // while the current is MOVING through the window (462 samples held still
+        // on the threshold produced none), and only in the current field: the
+        // voltage series has 0 outliers over the same samples.
         //
-        // Three such samples in 250 cost more than they look: they take R-squared
-        // from 0.99942 to 0.99601 and inflate the reported uncertainty from
-        // 0.53 mOhm to 1.39 mOhm, so the sweep reports itself 2.6x less certain
-        // than it measured. R itself moves 0.35 mOhm.
+        // The reported value is the true one with its float significand shifted
+        // one or two places against the exponent — v/2, 2v-1 or 4v-3, exact to
+        // the bit. So it is a firmware fault inside the load, not noise, not a
+        // real excursion, and nothing this end can prevent — only refuse.
+        //
+        // Refusing matters: three such samples in 250 take R-squared from 0.99942
+        // to 0.99601 and inflate the reported uncertainty from 0.53 mOhm to
+        // 1.39 mOhm, so the sweep reports itself 2.6x less certain than it
+        // measured. R itself moves only 0.35 mOhm.
         //
         // The load REGULATES current, so a reading far from the commanded
-        // setpoint cannot be an operating point of this circuit. In that data the
-        // worst honest regulation lag was 0.135 A against glitches of 0.49-0.55 A,
-        // so the window below clears both by about 2x. It is the maximum of three
-        // terms because lag scales differently in each regime: a floor for slow
-        // sweeps, a fraction for high currents, and the ramp's own step size for a
-        // short sweep over a wide span, where the command genuinely outruns the
-        // load. Rejections are COUNTED and reported, never silently dropped.
+        // setpoint cannot be an operating point of this circuit. The window is
+        // the maximum of three terms because honest regulation lag scales
+        // differently in each regime: a floor for slow sweeps, a fraction for
+        // high currents, and the ramp's own step for a short sweep over a wide
+        // span, where the command genuinely outruns the load. Measured against
+        // the bench captures: 0 false rejections, worst honest lag 0.183 A
+        // against the 0.25 A floor, 8 of 11 corrupted samples caught. The three
+        // it misses are the mild 2v-1 mode, worth +0.105 mOhm on R — deliberately
+        // left, since catching them means either a floor inside the range of real
+        // regulation lag or a second mechanism. Rejections are COUNTED and
+        // reported, never silently dropped.
         private const val OFF_TARGET_FLOOR_A = 0.25f
         private const val OFF_TARGET_FRACTION = 0.20f
         private const val OFF_TARGET_STEPS = 4f

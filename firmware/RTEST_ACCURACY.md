@@ -324,10 +324,60 @@ Three things make it a measurement artifact rather than a real excursion:
 3. **The frames pass the device's own sum-to-zero checksum**, so the load built
    them that way — nothing in the BLE path corrupted them.
 
-The most likely mechanism is a current-sense range/gain change inside the EL15
-at ~1.2 A, with one status refresh served using the wrong constant. The
-duplicate at 2.458/2.502 s is just the poll running faster than the device's
+The duplicate at 2.458/2.502 s is just the poll running faster than the device's
 refresh, so the bad frame is served twice.
+
+### Confirmed on the bench, from a PC (2026-08-06)
+
+The above was inference from app-side logs. It was then tested directly by
+driving the load over BLE from a laptop — no phone, no app — with
+`tools/el15_bench`, which keeps the raw 28 bytes of every frame. Five profiles,
+~3 500 conducting samples. Findings, in order of how much they pin down:
+
+1. **It reproduces with a completely different controller.** The app's own
+   0.05→4→0.05 A sweep, driven from the PC, glitched twice — once each way,
+   both at ~1.2 A. Nothing on the phone is involved.
+
+2. **Every event happens in a 32 mA window.** Across all captures, 11 spikes,
+   and the true current at every one of them lies between **1.175 A and
+   1.207 A**. Nothing anywhere else in 0.02–4.0 A.
+
+3. **It needs the current to be MOVING through that window.** 45 s held at
+   1.15 A, 1.25 A and 1.20 A — 462 samples, including 15 s sitting *on* the
+   threshold — produced **zero** events. So it is not a hunting comparator; it
+   fires on the crossing.
+
+4. **About one crossing in three.** 24 crossings of 1.10↔1.30 A produced 8
+   events. A slow 140 s full-range ramp crossed twice and produced none, which
+   is why a single sweep can look clean.
+
+5. **Only the current field.** The same spike test run over the voltage series
+   of every capture: **0 outliers in ~3 500 samples**. Whatever goes wrong,
+   goes wrong after the two channels have parted company.
+
+6. **There is no second threshold.** A slow 0.05→5 A scan and 20 crossings of
+   0.08↔0.20 A both produced nothing. The low end of an R-test sweep is clean.
+
+7. **The corruption is a one-bit shift of the significand against the
+   exponent.** With the true value known from the neighbours, each reported
+   value is one of:
+
+   | | reported | at 1.20 A | seen |
+   |---|---|---|---|
+   | exponent LSB dropped | `v/2` | 0.600 A | down-crossings |
+   | significand shifted left 1 | `2v-1` | 1.400 A | either |
+   | significand shifted left 2 | `4v-3` | 1.800 A | up-crossings |
+
+   These are exact, not approximate: the halved samples carry a mantissa
+   *bit-identical* to the true value's with the exponent one lower. A wrong
+   scale factor would give a clean ×2 or ×4; `4v-3` is what you get when the
+   significand moves and the exponent does not.
+
+So: a current-range change at 1.20 A, where the rescale between ranges is done
+by shifting the float's fields, and on the crossing sample the shift lands in
+the wrong field or by the wrong amount. It is a firmware fault inside the load.
+Nothing the controller sends changes it, and nothing the controller does can
+prevent it — only refuse the sample.
 
 ### What it costs
 
@@ -346,11 +396,27 @@ number (§2.2).
 
 **The Android app** rejects a reading whose current sits further from the
 commanded setpoint than `max(0.25 A, 20 %, 4 ramp steps)` — see
-`ResistanceTest.offTargetLimit`. In the run above the worst honest regulation
-lag was 0.135 A and the glitches were 0.49–0.55 A, so the window clears both by
-about 2×. Rejected frames are counted, reported (`off_target_samples` in the
-CSV, a row in the PDF and the result screen) and still written to the datapoint
-log, so the raw sweep remains auditable.
+`ResistanceTest.offTargetLimit`. Rejected frames are counted, reported
+(`off_target_samples` in the CSV, a row in the PDF and the result screen) and
+still written to the datapoint log, so the raw sweep remains auditable.
+
+Judged against the bench captures the gate holds up, with one known limit:
+
+- **0 false rejections** in ~3 500 samples across all five profiles. The worst
+  honest regulation lag measured anywhere was 0.183 A, against a floor of
+  0.25 A — a 1.37× margin, narrower than the 2× the phone data alone suggested,
+  which is why the ramp-step term matters: it is what widens the window on a
+  fast sweep instead of leaving that margin to be eaten.
+- **8 of 11 corrupted samples caught.** The three that slip through are the mild
+  `2v-1` mode, whose error at 1.20 A is only 0.2 A — under the floor.
+
+That last one was left alone deliberately. A missed `2v-1` sample is worth
+**+0.105 mΩ on R (0.03 %) and 8 % on σ_R**, measured by injecting it into the
+clean RTEST_003 data; the modes the gate does catch were worth 2.6× on σ_R.
+Chasing the remainder means either dropping the floor into the range of honest
+regulation lag, which trades a real error for a fabricated one, or adding a
+second mechanism — a one-sample spike test — to an engine whose value is that
+it is a faithful port of a hardware-verified design. Not worth 0.1 mΩ.
 
 **The firmware deliberately does not have this gate yet.** It is the same class
 of change reverted on 2026-08-06 for being unproven, and it stays unproven on
