@@ -12,7 +12,7 @@
     <string name="cd_wave_export">Export waveform as CSV</string>
     <string name="waveform_legend">● Voltage   ● Current</string>
     <string name="packet_inspector">Packet inspector</string>
-    <string name="rt_fuse_helper" formatted="false">Sweep peaks at 80% of this, capped to the EL15\'s 12 A / 150 W.</string>
+    <string name="rt_fuse_helper" formatted="false">Sweep peaks at 80% of this, capped to the EL15\’s 12 A / 150 W.</string>
     <string name="scan_connect">Scan &amp; Connect</string>
     <string name="disconnect">Disconnect</string>
     <string name="cancel">Cancel</string>
@@ -66,7 +66,7 @@
     <string name="demo_device">🧪 EL15 Demo (Simulator)\nTap to set up a virtual circuit</string>
     <string name="demo_connected_fmt">Demo — %1$.1f V, %2$.3f Ω · tap to edit circuit</string>
     <string name="demo_cfg_title">Demo circuit</string>
-    <string name="demo_cfg_explain">Set the virtual circuit the demo load sees. A resistance test will recover these values. Try a higher voltage (e.g. 48 V) to see the sweep power-limit to the EL15\'s 150 W.</string>
+    <string name="demo_cfg_explain">Set the virtual circuit the demo load sees. A resistance test will recover these values. Try a higher voltage (e.g. 48 V) to see the sweep power-limit to the EL15\’s 150 W.</string>
     <string name="demo_cfg_connect">Connect</string>
     <string name="demo_cfg_apply">Apply</string>
     <string name="demo_source">Source voltage</string>
@@ -126,7 +126,7 @@ Raise it only if the circuit misbehaves at low current; a wider current span giv
     <string name="rt_peak_a">Peak (A)</string>
     <string name="rt_peak_a_info">Where the ramp turns around. 0 means "use the whole safe headroom the fuse rating allows".
 
-Whatever you enter is still clamped to the fuse limit, the EL15's 12 A / 150 W ratings, and the power available at the measured voltage — so asking for too much gives you a safe sweep, not an error.</string>
+Whatever you enter is still clamped to the fuse limit, the EL15’s 12 A / 150 W ratings, and the power available at the measured voltage — so asking for too much gives you a safe sweep, not an error.</string>
     <string name="rt_tare">Measure lead resistance (tare)</string>
     <string name="rt_tare_confirm">Short the probes together — clip them to each other, not to a circuit — then run this sweep.
 
@@ -135,7 +135,7 @@ It measures the resistance of your leads and contacts and stores it as the tare.
 At the milliohm scale this correction is often larger than what you are trying to measure.</string>
     <string name="rt_graph">Voltage vs current</string>
     <string name="rt_report">Report</string>
-    <string name="rt_reliable">✓ Reliable — the fit's uncertainty is within tolerance</string>
+    <string name="rt_reliable">✓ Reliable — the fit’s uncertainty is within tolerance</string>
     <string name="rt_unreliable">⚠ Low confidence — widen the current span, lengthen the sweep, or raise the sample rate</string>
     <string name="rt_save_failed">Save failed</string>
     <string name="cd_sweep_info">About the sweep duration</string>
@@ -158,7 +158,7 @@ At the milliohm scale this correction is often larger than what you are trying t
     <string name="batt_current">Current</string>
     <string name="batt_cutoff">Cutoff</string>
     <string name="batt_enter_hint">Enter a rated capacity and a discharge current for an estimate.</string>
-    <string name="batt_need_rated">Enter the pack's rated capacity first — the C-rate is a multiple of it.</string>
+    <string name="batt_need_rated">Enter the pack’s rated capacity first — the C-rate is a multiple of it.</string>
     <string name="batt_start">Start discharge</string>
     <string name="batt_stop">Stop discharge</string>
     <string name="batt_stop_confirm">Stop now and report what has been measured so far? The load is switched off either way.</string>
@@ -172,7 +172,7 @@ At the milliohm scale this correction is often larger than what you are trying t
     <string name="batt_confirm_title">Start the discharge?</string>
     <string name="batt_confirm_msg">This draws %1$.3f A from the pack until it falls to %2$.2f V.%3$s
 
-Set the EL15's own hardware UVP as a backstop first, keep the phone charged for a long run, and stay clear of the setup while it runs.</string>
+Set the EL15’s own hardware UVP as a backstop first, keep the phone charged for a long run, and stay clear of the setup while it runs.</string>
     <string name="batt_results_title">Capacity test result</string>
     <string name="batt_capacity">Measured capacity</string>
     <string name="batt_curve">Discharge curve</string>
