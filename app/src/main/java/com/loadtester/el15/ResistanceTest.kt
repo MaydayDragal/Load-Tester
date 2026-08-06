@@ -436,8 +436,16 @@ class ResistanceTest(
             // Re-command the setpoint on a fixed cadence, slower than the poll.
             val step = setpointStepMs()
             if (lastSetMs == 0L || now() - lastSetMs >= step) {
+                val since = if (lastSetMs != 0L) now() - lastSetMs else step
                 lastSetMs = now()
-                currentTarget = clampToRatings(commandable(targetAt(el)))
+                var want = clampToRatings(commandable(targetAt(el)))
+                // Slew-limit against what we last COMMANDED, so a dropped write
+                // becomes a short catch-up instead of a step change at the load.
+                val limit = slewLimit(since)
+                if (currentTarget > 0f && limit > 0f) {
+                    want = currentTarget + (want - currentTarget).coerceIn(-limit, limit)
+                }
+                currentTarget = want
                 ble.setSetpoint(currentTarget)
             }
             return
@@ -462,14 +470,44 @@ class ResistanceTest(
         if (state == State.SWEEPING) (now() - tStart) / 1000f else 0f
 
     /**
-     * Symmetric triangle: start -> max over the first half, back to start over
-     * the second. Returns the commanded current at [elMs] into the sweep.
+     * Symmetric eased triangle: start -> max over the first half, back to start
+     * over the second. Returns the commanded current at [elMs] into the sweep.
+     *
+     * The easing is applied to the TRIANGLE PARAMETER, so each current is still
+     * visited once going up and once coming down, at times symmetric about the
+     * sweep midpoint. That symmetry is what cancels first-order time drift in
+     * the fit, and it survives unchanged — the samples just sit at slightly
+     * different instants than they did.
      */
     private fun targetAt(elMs: Long): Float {
         val half = sweepMsEff / 2.0f
         if (half <= 0f) return startCurrentEff
-        val frac = (if (elMs < half) elMs / half else 2.0f - elMs / half).coerceIn(0f, 1f)
-        return startCurrentEff + (maxCurrentEff - startCurrentEff) * frac
+        val frac = if (elMs < half) elMs / half else 2.0f - elMs / half
+        return startCurrentEff + (maxCurrentEff - startCurrentEff) * easeTriangle(frac)
+    }
+
+    /**
+     * Largest setpoint change a single command may make, given how long it has
+     * actually been since the last one.
+     *
+     * Without this, a command the device DROPS (it silently discards a
+     * no-response write landing too close behind another) leaves the load
+     * holding a stale setpoint, and the next command that does land asks for the
+     * whole accumulated jump at once. That is a current spike, and it is the one
+     * the ramp shape cannot smooth away.
+     *
+     * Capping the per-command delta turns that jump into a short catch-up over
+     * the following commands. It costs a little regulation lag and NOTHING in
+     * accuracy: V and I inside one status frame are simultaneous, so lag changes
+     * which current a packet reports, never the voltage paired with it. The fit
+     * never sees the commanded value at all.
+     */
+    private fun slewLimit(sinceMs: Long): Float {
+        val span = maxCurrentEff - startCurrentEff
+        val half = sweepMsEff / 2.0f
+        if (span <= 0f || half <= 0f) return span
+        val ratePerMs = (span / half) / (1f - EASE_FRAC)
+        return ratePerMs * sinceMs * SLEW_CATCHUP
     }
 
     private fun resetAccumulators() {
@@ -663,6 +701,48 @@ class ResistanceTest(
         /** 10 Hz setpoint updates. */
         private const val RAMP_STEP_MS = 100L
         private const val TICK_MS = 25L
+
+        /**
+         * Fraction of each half-ramp spent easing the rate in and out.
+         *
+         * The raw shape is a symmetric triangle, which has a step change in
+         * slope at three places: switch-on, the turnaround at the peak, and the
+         * end. At each one the commanded current changes direction instantly,
+         * and the load's CC regulator answers that with an overshoot — a visible
+         * current spike.
+         *
+         * [easeTriangle] maps the triangle's position through a TRAPEZOIDAL
+         * VELOCITY profile instead: the ramp rate rises from zero over the first
+         * EASE_FRAC of each half, holds constant, then falls back to zero. Slope
+         * is continuous everywhere, including across the peak.
+         *
+         * The cost is small and bounded: holding the same span in the same time
+         * with two eased ends needs a plateau rate of 1/(1 - EASE_FRAC), about
+         * 9 % above the linear rate here. That matters because a LINEAR ramp
+         * already minimises the peak rate of change for a given span and
+         * duration — any smoothing has to buy its soft corners somewhere, and
+         * 9 % is the whole bill. (A raised cosine, the obvious alternative,
+         * costs 57 %.)
+         */
+        const val EASE_FRAC = 0.08f
+
+        /**
+         * How much faster than the nominal ramp rate a single command may move,
+         * so a gap left by a dropped write closes over a few commands rather
+         * than in one.
+         */
+        private const val SLEW_CATCHUP = 1.5f
+
+        /** The eased triangle parameter. Pure, so the profile is unit-testable. */
+        fun easeTriangle(tRaw: Float): Float {
+            val t = tRaw.coerceIn(0f, 1f)
+            val e = EASE_FRAC
+            val v = 1f / (1f - e)   // plateau rate that still covers 0..1
+            if (t < e) return v * t * t / (2f * e)
+            if (t <= 1f - e) return v * (t - e / 2f)
+            val d = 1f - t
+            return 1f - v * d * d / (2f * e)
+        }
 
         /**
          * How soon a load reported off is re-asserted. Measured on hardware: the

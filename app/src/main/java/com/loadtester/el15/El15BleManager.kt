@@ -52,8 +52,24 @@ class El15BleManager(private val context: Context) : El15Controller {
     private var notifyChar: BluetoothGattCharacteristic? = null
     private var servicesRequested = false
 
-    private val opQueue = ArrayDeque<() -> Unit>()
+    /**
+     * A queued GATT operation. [isCtrl] marks a CONTROL frame (mode, setpoint,
+     * load, lock) as opposed to a poll or a descriptor write — control writes
+     * are the ones that have to be paced apart. See [runNext].
+     */
+    private class Op(val isCtrl: Boolean, val isPoll: Boolean, val run: () -> Unit)
+
+    private val opQueue = ArrayDeque<Op>()
     private var opInFlight = false
+
+    /** When the last control write went out, for CTRL_GAP_MS pacing. */
+    private var lastCtrlMs = 0L
+
+    /** Polls are held off briefly after a control write so they don't collide. */
+    private var pollHoldUntilMs = 0L
+
+    /** True while a pacing retry is already pending, so timers can't stack up. */
+    private var pacingScheduled = false
 
     /** Generation counter: each op gets a token so stale timeouts can't unblock a later op. */
     private var opGen = 0L
@@ -458,8 +474,22 @@ class El15BleManager(private val context: Context) : El15Controller {
         }
     }
 
+    /**
+     * Is this a CONTROL frame rather than a poll? Frame byte 3 is the opcode and
+     * the poll is 0x08 — the same discrimination the firmware's
+     * `el15_client.cpp writeRaw()` makes.
+     */
+    private fun isControlFrame(frame: ByteArray): Boolean =
+        frame.size >= 4 && frame[3] != 0x08.toByte()
+
     fun sendCommand(frame: ByteArray) {
-        enqueue {
+        val ctrl = isControlFrame(frame)
+        // Never let polls pile up. A poll is worthless the moment a newer one
+        // could be sent, and an unbounded queue is what turns a busy link into a
+        // burst of stale writes later — exactly the thing that makes a swept
+        // setpoint arrive in clumps.
+        if (!ctrl && opQueue.any { it.isPoll }) return
+        enqueue(isCtrl = ctrl, isPoll = !ctrl) {
             val g = gatt
             val c = writeChar
             if (g == null || c == null) {
@@ -479,20 +509,67 @@ class El15BleManager(private val context: Context) : El15Controller {
     override fun setSetpoint(value: Float) = sendCommand(El15Protocol.setpointCommand(value))
 
     // ---- Op queue ---------------------------------------------------------
-    private fun enqueue(op: () -> Unit) {
+    private fun enqueue(isCtrl: Boolean = false, isPoll: Boolean = false, op: () -> Unit) {
         main.post {
             if (shuttingDown) return@post
-            opQueue.add(op)
+            opQueue.add(Op(isCtrl, isPoll, op))
             if (!opInFlight) runNext()
         }
     }
 
+    /**
+     * Dequeue and run the next operation, pacing control writes.
+     *
+     * FFF3 is write-no-response only, and the device silently DROPS a
+     * no-response write that arrives too close behind another one — proven on
+     * hardware for the firmware, where mode changes and the sweep's
+     * LOAD_ON-after-setpoint were being lost. The queue here drains as fast as
+     * the stack will take it, so without this every sweep setpoint was a
+     * candidate to be discarded: the load then held a stale value and the next
+     * write that landed asked for the whole accumulated jump, which shows up as
+     * a periodic current spike.
+     *
+     * So: a control write waits until CTRL_GAP_MS after the previous one, and a
+     * poll waits until CTRL_POLL_GAP_MS after a control write (a poll is a
+     * different opcode, so it does not collide the way two control writes do,
+     * and needs only the shorter gap). Nothing blocks the main thread — the op
+     * simply stays queued and is retried when its gap expires.
+     */
     private fun runNext() {
-        val op = opQueue.poll() ?: return
+        val op = opQueue.peek() ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+
+        val waitMs = when {
+            op.isCtrl && lastCtrlMs != 0L -> CTRL_GAP_MS - (now - lastCtrlMs)
+            op.isPoll -> pollHoldUntilMs - now
+            else -> 0L
+        }
+        if (waitMs > 0) {
+            // One pending retry at a time, or every opFinished() would stack
+            // another timer on top of the same waiting op.
+            if (!pacingScheduled) {
+                pacingScheduled = true
+                main.postDelayed({
+                    pacingScheduled = false
+                    if (!opInFlight) runNext()
+                }, waitMs)
+            }
+            return
+        }
+
+        opQueue.poll()
+        if (op.isCtrl) {
+            lastCtrlMs = now
+            // Keep the next poll clear of this command, but only by a short gap —
+            // NOT by a whole poll interval, which would starve telemetry during
+            // a sweep just when it is sampling hardest.
+            pollHoldUntilMs = now + CTRL_POLL_GAP_MS
+        }
+
         opInFlight = true
         val gen = ++opGen
         try {
-            op()
+            op.run()
         } catch (e: Exception) {
             listener?.onLog("Op error: ${e.message}")
             opFinished()
@@ -536,6 +613,15 @@ class El15BleManager(private val context: Context) : El15Controller {
     companion object {
         private const val SCAN_TIMEOUT_MS = 12_000L
         private const val OP_TIMEOUT_MS = 2_000L
+
+        /**
+         * Minimum separation between two CONTROL writes. Longer than one BLE
+         * connection interval; matches the firmware's hardware-proven value.
+         */
+        private const val CTRL_GAP_MS = 50L
+
+        /** Shorter separation a poll needs from a preceding control write. */
+        private const val CTRL_POLL_GAP_MS = 20L
         private const val SHUTDOWN_TIMEOUT_MS = 500L
         private const val FRAME_LEN = 28
         private const val MAX_BUF = 128

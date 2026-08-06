@@ -269,8 +269,17 @@ class ResistanceTest {
       // starve telemetry entirely and the sweep would collect nothing.
       uint32_t step = setpointStepMs();
       if (lastSetMs_ == 0 || millis() - lastSetMs_ >= step) {
+        uint32_t since = lastSetMs_ ? millis() - lastSetMs_ : step;
         lastSetMs_ = millis();
-        currentTarget_ = clampToRatings(commandable(targetAt(el)));
+        float want = clampToRatings(commandable(targetAt(el)));
+        // Slew-limit against what we last COMMANDED, so a dropped write becomes
+        // a short catch-up instead of a step change at the load.
+        float limit = slewLimit(since);
+        if (currentTarget_ > 0 && limit > 0) {
+          float delta = constrain(want - currentTarget_, -limit, limit);
+          want = currentTarget_ + delta;
+        }
+        currentTarget_ = want;
         ble_->setSetpoint(currentTarget_);
       }
       return;
@@ -319,14 +328,75 @@ class ResistanceTest {
 
   float elapsedS() const { return state_ == SWEEPING ? (millis() - tStart_) / 1000.0f : 0; }
 
-  // Symmetric triangle: start -> max over the first half, back to start over the
-  // second. Returns the commanded current at `elMs` into the sweep.
+  // Ease the corners of the ramp.
+  //
+  // The raw shape is a symmetric triangle, which has a step change in slope at
+  // three places: switch-on, the turnaround at the peak, and the end. At each
+  // one the commanded current changes direction instantly, and the load's CC
+  // regulator answers that with an overshoot — a visible current spike.
+  //
+  // This maps the triangle's position through a TRAPEZOIDAL VELOCITY profile:
+  // the ramp rate rises from zero over the first EASE_FRAC of each half, holds
+  // constant, then falls back to zero. Slope is therefore continuous everywhere,
+  // including across the peak.
+  //
+  // The cost is small and bounded: holding the same span in the same time with
+  // two eased ends needs a plateau rate of 1/(1 - EASE_FRAC), i.e. about 9 %
+  // above the linear rate at EASE_FRAC 0.08. That matters because a LINEAR ramp
+  // already minimises the peak rate of change for a given span and duration —
+  // any smoothing has to buy its soft corners somewhere, and 9 % is the whole
+  // bill. (A raised cosine, the obvious alternative, costs 57 %.)
+  static constexpr float EASE_FRAC = 0.08f;
+
+  static float easeTriangle(float t) {
+    t = constrain(t, 0.0f, 1.0f);
+    const float e = EASE_FRAC;
+    const float v = 1.0f / (1.0f - e);   // plateau rate that still covers 0..1
+    if (t < e) return v * t * t / (2.0f * e);
+    if (t <= 1.0f - e) return v * (t - e / 2.0f);
+    float d = 1.0f - t;
+    return 1.0f - v * d * d / (2.0f * e);
+  }
+
+  // Symmetric eased triangle: start -> max over the first half, back to start
+  // over the second. Returns the commanded current at `elMs` into the sweep.
+  //
+  // The easing is applied to the TRIANGLE PARAMETER, so each current is still
+  // visited once going up and once coming down, at times symmetric about the
+  // sweep midpoint. That symmetry is what cancels first-order time drift in the
+  // fit, and it survives unchanged — the samples just sit at slightly different
+  // instants than they did.
   float targetAt(uint32_t elMs) const {
     float half = sweepMsEff_ / 2.0f;
     if (half <= 0) return startCurrent_;
     float frac = elMs < half ? elMs / half : 2.0f - elMs / half;
-    frac = constrain(frac, 0.0f, 1.0f);
-    return startCurrent_ + (maxCurrent_ - startCurrent_) * frac;
+    return startCurrent_ + (maxCurrent_ - startCurrent_) * easeTriangle(frac);
+  }
+
+  // Largest setpoint change a single command may make, given how long it has
+  // actually been since the last one.
+  //
+  // Without this, a command that the device DROPS (it silently discards a
+  // no-response write landing too close behind another — see el15_client.cpp
+  // writeRaw) leaves the load holding a stale setpoint, and the next command
+  // that does land asks for the whole accumulated jump at once. That is a
+  // current spike, and it is the one the ramp shape cannot smooth away.
+  //
+  // Capping the per-command delta turns that jump into a short catch-up over the
+  // following commands. It costs a little regulation lag and NOTHING in
+  // accuracy: V and I inside one status frame are simultaneous, so lag changes
+  // which current a packet reports, never the voltage paired with it. The fit
+  // never sees the commanded value at all.
+  //
+  // CATCHUP > 1 so the ramp can still close a gap rather than falling
+  // permanently behind after one dropped write.
+  float slewLimit(uint32_t sinceMs) const {
+    float span = maxCurrent_ - startCurrent_;
+    float half = sweepMsEff_ / 2.0f;
+    if (span <= 0 || half <= 0) return span;
+    // Nominal rate, inflated by the easing plateau, times how long we waited.
+    float ratePerMs = (span / half) / (1.0f - EASE_FRAC);
+    return ratePerMs * (float)sinceMs * SLEW_CATCHUP;
   }
 
   void resetAccumulators() {
@@ -505,6 +575,9 @@ class ResistanceTest {
   State state_ = IDLE;
   TimerCb timerCb_ = NONE;
   static const uint32_t RAMP_STEP_MS = 100;      // 10 Hz setpoint updates
+  // How much faster than the nominal ramp rate a single command may move, so a
+  // gap left by a dropped write closes over a few commands rather than in one.
+  static constexpr float SLEW_CATCHUP = 1.5f;
   // How soon a load reported off is re-asserted. Measured on hardware: the
   // INITIAL LOAD_ON does not always land, and at the old 1 s interval that lost
   // the first second of the sweep — the whole low-current end of the ramp, which
