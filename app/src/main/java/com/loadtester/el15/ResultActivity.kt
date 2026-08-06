@@ -129,6 +129,12 @@ class ResultActivity : BaseActivity() {
                 Locale.US, r.startCurrent, r.maxTestCurrent, r.sweepSeconds))
             row("Current measured", "%.4f → %.4f A".format(Locale.US, r.minCurrent, r.maxCurrentSeen))
             row("Samples fitted", "${r.rawSamples} (${r.samples.size} bands)")
+            if (r.excludedTransient > 0) {
+                row("  skipped: step transient", r.excludedTransient.toString())
+            }
+            if (r.excludedDuplicate > 0) {
+                row("  skipped: repeat frame", r.excludedDuplicate.toString())
+            }
             row("Temperature", "%.1f → %.1f °C".format(Locale.US, r.tempMin, r.tempMax))
             row("Max fan", "${r.maxFan}/${El15Protocol.FAN_SPEED_MAX}")
             if (r.loadDropouts > 0) row("Load dropouts", r.loadDropouts.toString())

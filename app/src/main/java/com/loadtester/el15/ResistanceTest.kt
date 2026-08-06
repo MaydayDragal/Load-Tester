@@ -174,6 +174,10 @@ class ResistanceTest(
         val maxFan: Int,
         /** Times the load had to be re-asserted mid-sweep. */
         val loadDropouts: Int,
+        /** Samples dropped for arriving inside a setpoint step's response. */
+        val excludedTransient: Int,
+        /** Samples dropped as repeats of the previous measurement. */
+        val excludedDuplicate: Int,
         /**
          * What the slope actually measured, before the lead tare was taken off.
          * This is also what a tare run itself records.
@@ -240,6 +244,13 @@ class ResistanceTest(
      */
     var settleMs: Long = 0
 
+    /**
+     * Ignore samples for this long after each SETPOINT change, to skip the CC
+     * loop's step response. 0 = use everything. See the blanking block in
+     * [onStatus] for why this exists and why it is safe.
+     */
+    var stepBlankMs: Long = DEFAULT_STEP_BLANK_MS
+
     val running: Boolean get() = state != State.IDLE
 
     private enum class State { IDLE, PRIMING, ARMING, SWEEPING }
@@ -273,6 +284,11 @@ class ResistanceTest(
     private var sweepMsEff = 30_000L
     private var loadDropouts = 0
     private var logging = false
+    private var excludedTransient = 0
+    private var excludedDuplicate = 0
+    private var lastFitV = 0f
+    private var lastFitI = 0f
+    private var haveLastFit = false
 
     private class Bin {
         var sumI = 0.0; var sumV = 0.0; var sumT = 0.0; var count = 0; var fanMax = 0
@@ -414,6 +430,45 @@ class ResistanceTest(
             return
         }
 
+        // STEP-RESPONSE BLANKING. When the CC reference steps, the load's control
+        // loop overshoots for a few milliseconds before settling. If the device's
+        // current ADC happens to land inside that window it reports the peak —
+        // but its voltage reading is averaged over a longer window and never saw
+        // it, so the pair is physically inconsistent and does not lie on the V-I
+        // line at all.
+        //
+        // Observed on real sweeps: a step to 1.308 A read 1.6119 A (+29 %) while
+        // the terminal voltage stayed at the value belonging to ~1.24 A. Both
+        // spikes in those runs landed within one sample of a setpoint change,
+        // which is what identifies the mechanism.
+        //
+        // This is a TIME-domain exclusion, not outlier rejection: samples are
+        // dropped for when they arrived, never for their value, so it cannot
+        // quietly pull the fit toward the line it is trying to measure. They are
+        // still logged — the CSV shows what happened, the fit uses what settled.
+        if (stepBlankMs > 0 && now() - lastSetMs < stepBlankMs) {
+            excludedTransient++
+            callback.onTestProgress(
+                elapsedS(), sweepMsEff / 1000f, currentTarget,
+                status.voltage, status.current, 0f, false,
+            )
+            return
+        }
+
+        // REPEATED FRAMES. The device re-reports its last measurement when polled
+        // faster than it refreshes, so identical V AND I to float precision means
+        // one measurement seen twice, not two independent samples. Counting them
+        // as independent inflates n and makes the reported uncertainty tighter
+        // than the data earns — on one real sweep roughly half the frames were
+        // repeats, which understates the ± by about 40 %.
+        if (haveLastFit && status.voltage == lastFitV && status.current == lastFitI) {
+            excludedDuplicate++
+            return
+        }
+        lastFitV = status.voltage
+        lastFitI = status.current
+        haveLastFit = true
+
         lsq.add(status.current, status.voltage)
         // Seed both bounds from the first sample rather than from zero — a
         // below-zero ambient would otherwise never move tempMax off 0.
@@ -548,6 +603,8 @@ class ResistanceTest(
         tempMin = 0f; tempMax = 0f; haveTemp = false
         fanMax = 0; peakW = 0f
         lastSetMs = 0; currentTarget = 0f
+        excludedTransient = 0; excludedDuplicate = 0
+        lastFitV = 0f; lastFitI = 0f; haveLastFit = false
     }
 
     /**
@@ -712,6 +769,8 @@ class ResistanceTest(
                 tempMax = if (haveTemp) tempMax else 0f,
                 maxFan = fanMax,
                 loadDropouts = loadDropouts,
+                excludedTransient = excludedTransient,
+                excludedDuplicate = excludedDuplicate,
                 rawResistanceOhm = f.resistanceOhm,
                 tareOhm = if (fourWire) 0f else tareOhm,
                 fourWire = fourWire,
@@ -820,6 +879,13 @@ class ResistanceTest(
          * still trips it, but clear of a zero reading with noise on it.
          */
         private const val ARM_MIN_CURRENT = 0.02f
+
+        /**
+         * Default step-response blanking. Long enough to cover the CC loop's
+         * settling after a reference step, short enough to keep most of the
+         * samples between commands at the 100 ms ramp cadence.
+         */
+        const val DEFAULT_STEP_BLANK_MS = 30L
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same

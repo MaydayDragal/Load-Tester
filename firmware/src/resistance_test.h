@@ -65,6 +65,8 @@ class ResistanceTest {
     float tempMin = 0, tempMax = 0;
     int maxFan = 0;
     int loadDropouts = 0;   // times the load had to be re-asserted mid-sweep
+    int excludedTransient = 0;  // samples dropped inside a setpoint step response
+    int excludedDuplicate = 0;  // samples dropped as repeats of the previous one
     // What the slope actually measured, before the lead tare was taken off.
     // rawResistanceOhm is also what a tare run itself records.
     float rawResistanceOhm = 0;
@@ -108,6 +110,10 @@ class ResistanceTest {
   // Ignore samples for this long after the load is switched on, to skip the
   // regulator's start-up transient. 0 = use everything.
   uint32_t settleMs = 0;
+  // Ignore samples for this long after each SETPOINT change, to skip the CC
+  // loop's step response. 0 = use everything. See the blanking block in
+  // onStatus() for why this exists and why it is safe.
+  uint32_t stepBlankMs = 30;
 
   static const uint32_t MIN_SWEEP_S = 5;
   static const uint32_t MAX_SWEEP_S = 900;
@@ -246,6 +252,42 @@ class ResistanceTest {
                    s.voltage, s.current, 0, false);
       return;
     }
+
+    // STEP-RESPONSE BLANKING. When the CC reference steps, the load's control
+    // loop overshoots for a few milliseconds before settling. If the device's
+    // current ADC happens to land inside that window it reports the peak — but
+    // its voltage reading is averaged over a longer window and never saw it, so
+    // the pair is physically inconsistent and does not lie on the V-I line.
+    //
+    // Observed on real sweeps: a step to 1.308 A read 1.6119 A (+29 %) while the
+    // terminal voltage stayed at the value belonging to ~1.24 A. Both spikes in
+    // those runs landed within one sample of a setpoint change, which is what
+    // identifies the mechanism.
+    //
+    // This is a TIME-domain exclusion, not outlier rejection: samples are
+    // dropped for when they arrived, never for their value, so it cannot quietly
+    // pull the fit toward the line it is trying to measure. They are still
+    // logged — the CSV shows what happened, the fit uses what settled.
+    if (stepBlankMs > 0 && millis() - lastSetMs_ < stepBlankMs) {
+      excludedTransient_++;
+      if (onProgress)
+        onProgress(elapsedS(), (float)sweepMsEff_ / 1000.0f, currentTarget_,
+                   s.voltage, s.current, 0, false);
+      return;
+    }
+
+    // REPEATED FRAMES. The device re-reports its last measurement when polled
+    // faster than it refreshes, so identical V AND I to float precision means one
+    // measurement seen twice, not two independent samples. Counting them as
+    // independent inflates n and makes the reported uncertainty tighter than the
+    // data earns.
+    if (haveLastFit_ && s.voltage == lastFitV_ && s.current == lastFitI_) {
+      excludedDuplicate_++;
+      return;
+    }
+    lastFitV_ = s.voltage;
+    lastFitI_ = s.current;
+    haveLastFit_ = true;
 
     // Running least squares. Keeping the six sums rather than the samples means
     // the fit is available at any instant and nothing grows during the sweep —
@@ -435,6 +477,8 @@ class ResistanceTest {
     fanMax_ = 0; peakW_ = 0;
     for (int k = 0; k < NBINS; k++) bins_[k] = Bin{};
     lastSetMs_ = 0; currentTarget_ = 0;
+    excludedTransient_ = 0; excludedDuplicate_ = 0;
+    lastFitV_ = 0; lastFitI_ = 0; haveLastFit_ = false;
   }
 
   void binSample(const el15::Status &s) {
@@ -586,6 +630,8 @@ class ResistanceTest {
     res.tempMax = haveTemp_ ? tempMax_ : 0;
     res.maxFan = fanMax_;
     res.loadDropouts = loadDropouts_;
+    res.excludedTransient = excludedTransient_;
+    res.excludedDuplicate = excludedDuplicate_;
 
     res.samples.reserve(NBINS);
     for (int k = 0; k < NBINS; k++) {
@@ -646,6 +692,9 @@ class ResistanceTest {
   uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0, armStartMs_ = 0;
   uint32_t sweepMsEff_ = 30000;
   int loadDropouts_ = 0;   // how often the load had to be re-asserted
+  int excludedTransient_ = 0, excludedDuplicate_ = 0;
+  float lastFitV_ = 0, lastFitI_ = 0;
+  bool haveLastFit_ = false;
   bool logging_ = false;   // flash datapoint log opened for this sweep
 
   // Running regression sums — the whole sample history in six doubles.
