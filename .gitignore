@@ -1,3 +1,11 @@
 .DS_Store
 /.idea/
 *.iml
+
+# Desktop app build output (the executable is produced by build_exe.py or CI,
+# not carried in the repo).
+tools/el15_desktop/build/
+tools/el15_desktop/dist/
+tools/el15_desktop/*.log
+tools/el15_desktop/out.txt
+tools/el15_desktop/err.txt

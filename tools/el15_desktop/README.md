@@ -4,6 +4,21 @@ A PC front end for the ALIENTEK EL15 electronic load, over the same BLE protocol
 the phone app speaks. Live monitoring, manual control, and the
 circuit-resistance sweep.
 
+## Just run it
+
+Download **`EL15 Load Control.exe`** from the `el15-load-control-windows`
+artifact of the *Build desktop app* workflow, or build it yourself with
+`python build_exe.py`. Then double-click it. One file, nothing to install — no
+Python, no libraries.
+
+The first launch may show *"Windows protected your PC"*, because the executable
+is not code-signed. **More info → Run anyway.** Signing it needs a certificate;
+until there is one, that prompt is expected.
+
+Then: **Scan** → **Connect**. Bluetooth must be on.
+
+## Or run it from source
+
 ```
 pip install bleak
 python el15_desktop.py
@@ -44,7 +59,18 @@ python el15_desktop.py --rtest-check   # run the app's own sweep on hardware - D
 
 `--check` is the useful one when something is wrong: it exercises the
 asyncio-thread bridge, the session lifecycle and the teardown, and tells you
-whether the link works without touching the UI or the load.
+whether the link works without touching the UI or the load. All three also write
+`el15_check.log` beside the program, because a windowed build has no console to
+print to.
+
+Two things about the packaged build that will waste your time otherwise:
+
+- **onefile runs the app as a CHILD of the bootloader process.** Killing "the"
+  process in Task Manager can leave the real app running, and inspecting the
+  parent's windows finds only `PyInstaller Onefile Hidden Window` — which looks
+  exactly like a GUI that failed to open, and is not.
+- **Force-killing it skips the load-off teardown.** Closing the window runs it;
+  `taskkill` does not. Use the window, or the emergency stop.
 
 ## Not included
 

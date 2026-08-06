@@ -1,0 +1,37 @@
+name: Build desktop app
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install bleak pyinstaller
+
+      # Catches the mistakes that do not need a load attached: imports resolving,
+      # the whole UI building and laying out, a result rendering.
+      - name: UI selftest
+        run: python tools/el15_desktop/el15_desktop.py --selftest
+
+      - name: Build executable
+        run: python tools/el15_desktop/build_exe.py
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: el15-load-control-windows
+          path: tools/el15_desktop/dist/EL15 Load Control.exe
+          if-no-files-found: error

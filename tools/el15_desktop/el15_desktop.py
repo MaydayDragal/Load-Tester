@@ -885,7 +885,23 @@ def selftest():
     app.update()
     app.worker.loop.call_soon_threadsafe(app.worker.loop.stop)
     app.destroy()
-    print("selftest OK")
+    _say("selftest OK")
+
+
+def _say(line):
+    """Report a check result.
+
+    A windowed PyInstaller build has no console — `print` there goes nowhere —
+    so checks also append to a log beside the executable. Without this a frozen
+    build can only be tested by looking at it, which is no test at all.
+    """
+    print(line)
+    try:
+        base = Path(sys.executable if getattr(sys, "frozen", False) else __file__)
+        with open(base.parent / "el15_check.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def link_check():
@@ -903,14 +919,14 @@ def link_check():
             if payload.valid:
                 seen.append(payload)
             return
-        print("  %-13s %s" % (kind, payload if kind != "found" else payload))
+        _say("  %-13s %s" % (kind, payload if kind != "found" else payload))
         if kind == "disconnected":
             done.set()
 
     w = Worker(emit)
     w.start()
     addr = DEFAULT_ADDR
-    print("connecting to %s" % addr)
+    _say("connecting to %s" % addr)
     w.connect(addr)
     # A BLE connect on this stack takes the better part of ten seconds; wait for
     # telemetry rather than for a stopwatch.
@@ -918,16 +934,16 @@ def link_check():
     while time.time() < deadline and len(seen) < 20:
         time.sleep(0.25)
     if not seen:
-        print("FAIL: no telemetry"); return 1
+        _say("FAIL: no telemetry"); return 1
     st = seen[-1]
-    print("  %d valid packets, last: %.4f V  %.4f A  %.1f C  load %s  mode %s"
-          % (len(seen), st.voltage, st.current, st.temperature,
-             "ON" if st.load_on else "off", st.mode_name))
+    _say("  %d valid packets, last: %.4f V  %.4f A  %.1f C  load %s  mode %s"
+         % (len(seen), st.voltage, st.current, st.temperature,
+            "ON" if st.load_on else "off", st.mode_name))
     w.disconnect()
     done.wait(timeout=6.0)
     w.loop.call_soon_threadsafe(w.loop.stop)
     ok = bool(seen) and not seen[-1].load_on
-    print("link check %s" % ("OK" if ok else "FAILED"))
+    _say("link check %s" % ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 
 
