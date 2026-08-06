@@ -36,12 +36,23 @@ class SampleLogTest {
         assertTrue("count ${log.count} exceeded the 200 budget", log.count <= 200)
     }
 
+    /**
+     * The span a tiered log covers is not unbounded: each tier holds half the
+     * remaining budget at twice the interval, so every tier covers the same wall
+     * clock and the total is about (budget/2 x base) x tiers. What matters is
+     * that the SHIPPED configurations cover the longest run their engine can
+     * produce — so these two tests use the real instances, not invented ones.
+     */
     @Test
-    fun `an over-long run still spans the whole test`() {
-        val log = SampleLog(baseIntervalMs = 100, maxRecords = 200)
+    fun `the capacity log covers a 12 hour discharge end to end`() {
+        val log = SampleLog.batt
         log.start()
-        val lastT = 99_999 * 100L
-        fill(log, 100_000, 100)
+        val runMs = 12 * 3600 * 1000L
+        var t = 0L
+        while (t <= runMs) {
+            log.add(t, 12f, 1f, 25f, 0f, 0f)
+            t += 1000
+        }
         var first = -1L
         var last = -1L
         log.replay { r ->
@@ -49,11 +60,42 @@ class SampleLogTest {
             last = r.tMs
             true
         }
-        assertEquals("the run must start at the beginning", 0L, first)
+        assertEquals("must start at the beginning of the run", 0L, first)
         assertTrue(
-            "the log should reach near the end of the run (got $last of $lastT)",
-            last > lastT * 0.5,
+            "must reach the end of a 12 h run (got ${last / 3600000.0} h)",
+            last >= runMs - 60_000,
         )
+    }
+
+    @Test
+    fun `the sweep log covers the longest allowed sweep end to end`() {
+        val log = SampleLog.rtest
+        log.start()
+        val runMs = ResistanceTest.MAX_SWEEP_S * 1000L
+        var t = 0L
+        while (t <= runMs) {
+            log.add(t, 12f, 1f, 25f, 0f, 0f)
+            t += 50   // a 20 Hz poll, the firmware's default
+        }
+        var last = -1L
+        log.replay { r -> last = r.tMs; true }
+        assertTrue(
+            "must reach the end of a ${ResistanceTest.MAX_SWEEP_S}s sweep (got ${last / 1000}s)",
+            last >= runMs - 5_000,
+        )
+    }
+
+    @Test
+    fun `an over-long run is bounded rather than truncating the start`() {
+        // Far past what the schedule can span. The early curve is what the later
+        // part is measured against, so the log stops growing rather than evicting.
+        val log = SampleLog(baseIntervalMs = 100, maxRecords = 200)
+        log.start()
+        fill(log, 100_000, 100)
+        var first = -1L
+        log.replay { r -> if (first < 0) first = r.tMs; true }
+        assertEquals("the start of the run must survive", 0L, first)
+        assertTrue(log.count <= 200)
     }
 
     @Test
