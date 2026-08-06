@@ -181,6 +181,27 @@ class ResistanceTest {
 
     // Mid-sweep a protection trip is real and immediate: current is flowing.
     if (s.warning[0] != '\0') { abort_("Load protection tripped. Test stopped."); return; }
+
+    // Waiting for the load to pick up. Re-assert on the same cadence the sweep
+    // uses, and only start the ramp once current is genuinely flowing — the
+    // loadOn bit alone is not enough, since the device can report the load on
+    // while still regulating in from zero.
+    if (state_ == ARMING) {
+      if (s.loadOn && s.current > ARM_MIN_CURRENT) { beginSweep(); return; }
+      if (millis() - lastOnPushMs_ > LOAD_REASSERT_MS) {
+        lastOnPushMs_ = millis();
+        loadDropouts_++;
+        Serial.printf("[rtest] load not sinking yet (target %.3f A) - re-asserting\n",
+                      currentTarget_);
+        ble_->setSetpoint(currentTarget_);
+        ble_->setLoad(true);
+      }
+      if (onProgress)
+        onProgress(0, (float)sweepMsEff_ / 1000.0f, currentTarget_,
+                   s.voltage, s.current, 0, false);
+      return;
+    }
+
     if (state_ != SWEEPING) return;
 
     // Offer every packet to the flash log — the same per-sample record the
@@ -284,6 +305,14 @@ class ResistanceTest {
       }
       return;
     }
+    // The load never picked up. Say so plainly — a sweep that runs with no
+    // current produces no fit anyway, and "not enough usable samples" would send
+    // the user looking at the sample rate instead of at their connections.
+    if (state_ == ARMING && millis() - armStartMs_ > ARM_MAX_MS) {
+      abort_("The load never started sinking current. Check the connections and "
+             "that the source is above the minimum voltage, then retry.");
+      return;
+    }
     if (state_ == IDLE || timerCb_ == NONE) return;
     if ((int32_t)(millis() - timerAt_) < 0) return;
     TimerCb cb = timerCb_;
@@ -292,7 +321,7 @@ class ResistanceTest {
   }
 
  private:
-  enum State { IDLE, PRIMING, SWEEPING };
+  enum State { IDLE, PRIMING, ARMING, SWEEPING };
   enum TimerCb { NONE, PRIME_DONE };
 
   static const uint32_t PRIME_MS = 900;
@@ -482,21 +511,6 @@ class ResistanceTest {
 
     sweepMsEff_ = constrain(sweepSeconds, MIN_SWEEP_S, MAX_SWEEP_S) * 1000u;
 
-    // Open the flash-backed datapoint log. Started HERE, not in start(), so a
-    // run that dies in priming never truncates the previous sweep's log — its
-    // report may still be waiting for a card. A failure is non-fatal: the sweep
-    // still runs and reports, the CSV just carries no per-sample block. (Note a
-    // tare sweep records too, replacing the previous sweep's datapoints — by
-    // then its result screen, the only save path, has been left anyway.)
-    logging_ = samplelog::rtest.start();
-
-    state_ = SWEEPING;
-    tStart_ = millis();
-    lastSetMs_ = millis();
-    // Arm the re-assert timer so the FIRST check happens one interval into the
-    // sweep, not one interval after some later event — a LOAD_ON that never
-    // landed has to be caught at the start, where it costs the most.
-    lastOnPushMs_ = millis();
     // Command a real current BEFORE switching the load on. Verified on hardware
     // 2026-08-01: the EL15 accepts LOAD_ON at a 0.000 A CC setpoint and then
     // simply reports the load off — the whole sweep ran with I=0 and the fit had
@@ -505,6 +519,40 @@ class ResistanceTest {
     currentTarget_ = clampToRatings(commandable(startCurrent_));
     ble_->setSetpoint(currentTarget_);
     ble_->setLoad(true);
+
+    // ARM, don't sweep: the ramp clock must not start until the load is actually
+    // sinking current.
+    //
+    // These two writes go out back to back, and the device DROPS a no-response
+    // write that lands too close behind another (el15_client.cpp writeRaw), so
+    // the LOAD_ON is the one most likely to be lost. Pacing makes that rare, not
+    // impossible — the load can also just be slow to pick up.
+    //
+    // Starting the clock here anyway spends the opening of the ramp commanding
+    // currents nothing draws, and since the ramp starts at the BOTTOM that costs
+    // exactly the low-current end the fit most needs span at. Seen on a real
+    // sweep: LOAD_ON lost, re-asserted twice, conduction at 1.07 s, and a run
+    // that commanded 0.05 A reported a measured minimum of 0.169 A.
+    state_ = ARMING;
+    armStartMs_ = millis();
+    // Arm the re-assert timer so the FIRST check happens one interval in, not
+    // one interval after some later event — a LOAD_ON that never landed has to
+    // be caught here, where it costs the most.
+    lastOnPushMs_ = millis();
+  }
+
+  // The load is conducting: start the ramp for real.
+  void beginSweep() {
+    // Open the flash-backed datapoint log HERE, so elapsed_s in the report is
+    // measured from the first current the sweep actually drew. Not in start(),
+    // so a run that dies before this never truncates the previous sweep's log —
+    // its report may still be waiting for a card. A failure is non-fatal: the
+    // sweep still runs and reports, the CSV just carries no per-sample block.
+    logging_ = samplelog::rtest.start();
+    state_ = SWEEPING;
+    tStart_ = millis();
+    lastSetMs_ = millis();
+    lastOnPushMs_ = millis();
   }
 
   void complete() {
@@ -586,9 +634,16 @@ class ResistanceTest {
   // still being far longer than the 50 ms the device needs between commands.
   static const uint32_t LOAD_REASSERT_MS = 400;
   static const uint32_t FAULT_CLEAR_MS = 4000;   // grace period to shed a stale trip
+  // How long to wait for the load to start conducting before calling it a
+  // wiring fault. Comfortably longer than several LOAD_REASSERT_MS retries.
+  static const uint32_t ARM_MAX_MS = 3000;
+  // Current that counts as "actually sinking". Well below the 50 mA floor the
+  // ramp commands, so a load regulating in at the bottom of its range still
+  // trips it, but clear of a zero reading with noise on it.
+  static constexpr float ARM_MIN_CURRENT = 0.02f;
 
   uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0, lastOnPushMs_ = 0;
-  uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0;
+  uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0, armStartMs_ = 0;
   uint32_t sweepMsEff_ = 30000;
   int loadDropouts_ = 0;   // how often the load had to be re-asserted
   bool logging_ = false;   // flash datapoint log opened for this sweep

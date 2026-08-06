@@ -242,7 +242,7 @@ class ResistanceTest(
 
     val running: Boolean get() = state != State.IDLE
 
-    private enum class State { IDLE, PRIMING, SWEEPING }
+    private enum class State { IDLE, PRIMING, ARMING, SWEEPING }
 
     private val main = Handler(Looper.getMainLooper())
     private var state = State.IDLE
@@ -269,6 +269,7 @@ class ResistanceTest(
     private var primeStartMs = 0L
     private var lastClearPushMs = 0L
     private var primeDoneAtMs = 0L
+    private var armStartMs = 0L
     private var sweepMsEff = 30_000L
     private var loadDropouts = 0
     private var logging = false
@@ -347,6 +348,26 @@ class ResistanceTest(
             abort("Load protection tripped (${status.warning}). Test stopped.")
             return
         }
+
+        // Waiting for the load to pick up. Re-assert on the same cadence the
+        // sweep uses, and only start the ramp once current is genuinely flowing
+        // — the loadOn bit alone is not enough, since the device can report the
+        // load on while still regulating in from zero.
+        if (state == State.ARMING) {
+            if (status.loadOn && status.current > ARM_MIN_CURRENT) { beginSweep(); return }
+            if (now() - lastOnPushMs > LOAD_REASSERT_MS) {
+                lastOnPushMs = now()
+                loadDropouts++
+                ble.setSetpoint(currentTarget)
+                ble.setLoad(true)
+            }
+            callback.onTestProgress(
+                0f, sweepMsEff / 1000f, currentTarget,
+                status.voltage, status.current, 0f, false,
+            )
+            return
+        }
+
         if (state != State.SWEEPING) return
 
         // Offer every packet to the datapoint log. Logged BEFORE the load-on and
@@ -448,6 +469,17 @@ class ResistanceTest(
                 currentTarget = want
                 ble.setSetpoint(currentTarget)
             }
+            return
+        }
+        // The load never picked up. Say so plainly — a sweep that runs with no
+        // current produces no fit anyway, and "not enough usable samples" would
+        // send the user looking at the sample rate instead of at their
+        // connections.
+        if (state == State.ARMING && now() - armStartMs > ARM_MAX_MS) {
+            abort(
+                "The load never started sinking current. Check the connections " +
+                    "and that the source is above the minimum voltage, then retry."
+            )
             return
         }
         if (state == State.PRIMING && now() >= primeDoneAtMs) finishPriming()
@@ -586,18 +618,6 @@ class ResistanceTest(
 
         sweepMsEff = sweepSeconds.coerceIn(MIN_SWEEP_S, MAX_SWEEP_S) * 1000L
 
-        // Open the datapoint log HERE, not in start(), so a run that dies in
-        // priming never truncates the previous sweep's log — its report may still
-        // be waiting to be saved.
-        logging = SampleLog.rtest.start()
-
-        state = State.SWEEPING
-        tStart = now()
-        lastSetMs = now()
-        // Arm the re-assert timer so the FIRST check happens one interval into
-        // the sweep, not one interval after some later event — a LOAD_ON that
-        // never landed has to be caught at the start, where it costs the most.
-        lastOnPushMs = now()
         // Command a real current BEFORE switching the load on. Verified on
         // hardware 2026-08-01: the EL15 accepts LOAD_ON at a 0.000 A CC setpoint
         // and then simply reports the load off — the whole sweep ran with I=0 and
@@ -605,6 +625,37 @@ class ResistanceTest(
         currentTarget = clampToRatings(commandable(startCurrentEff))
         ble.setSetpoint(currentTarget)
         ble.setLoad(true)
+
+        // ARM, don't sweep: the ramp clock must not start until the load is
+        // actually sinking current.
+        //
+        // These two writes go out back to back, and the device DROPS a
+        // no-response write that lands too close behind another, so the LOAD_ON
+        // is the one most likely to be lost. Pacing makes that rare, not
+        // impossible — the load can also just be slow to pick up.
+        //
+        // Starting the clock here anyway spends the opening of the ramp
+        // commanding currents nothing draws, and since the ramp starts at the
+        // BOTTOM that costs exactly the low-current end the fit most needs span
+        // at. Seen on a real sweep (RTEST_003): LOAD_ON lost, re-asserted twice,
+        // conduction at 1.07 s, and a run that commanded 0.05 A reported a
+        // measured minimum of 0.169 A.
+        state = State.ARMING
+        armStartMs = now()
+        // Arm the re-assert timer so the FIRST check happens one interval in,
+        // not one interval after some later event.
+        lastOnPushMs = now()
+    }
+
+    /** The load is conducting: start the ramp for real. */
+    private fun beginSweep() {
+        // Open the datapoint log HERE, so elapsed_s in the report is measured
+        // from the first current the sweep actually drew.
+        logging = SampleLog.rtest.start()
+        state = State.SWEEPING
+        tStart = now()
+        lastSetMs = now()
+        lastOnPushMs = now()
     }
 
     private fun complete() {
@@ -755,6 +806,20 @@ class ResistanceTest(
 
         /** Grace period to shed a stale protection trip during priming. */
         private const val FAULT_CLEAR_MS = 4000L
+
+        /**
+         * How long to wait for the load to start conducting before calling it a
+         * wiring fault. Comfortably longer than several [LOAD_REASSERT_MS]
+         * retries.
+         */
+        private const val ARM_MAX_MS = 3000L
+
+        /**
+         * Current that counts as "actually sinking". Well below the 50 mA floor
+         * the ramp commands, so a load regulating in at the bottom of its range
+         * still trips it, but clear of a zero reading with noise on it.
+         */
+        private const val ARM_MIN_CURRENT = 0.02f
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same
