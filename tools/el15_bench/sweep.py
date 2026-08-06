@@ -89,8 +89,23 @@ def lowcycle(t, total=40.0, lo=0.08, hi=0.20, period=4.0):
     return lo + (hi - lo) * (2 * f if f < 0.5 else 2 * (1 - f))
 
 
+def fastcross(t, total=240.0, lo=0.90, hi=1.50, period=2.4):
+    """Cross the threshold ~200 times at the R-test's OWN slew rate (~0.5 A/s).
+
+    The gentle `cycle` profile is not the regime the app runs in: at R-test speed
+    the load's telemetry goes stale between packets, and a repair rule that leans
+    on recent samples is misled by exactly that. This is the held-out set any
+    such rule has to survive.
+    """
+    if t >= total:
+        return None
+    f = (t % period) / period
+    return lo + (hi - lo) * (2 * f if f < 0.5 else 2 * (1 - f))
+
+
 PROFILES = {"triangle": triangle, "fine": fine, "stairs": stairs, "cycle": cycle,
-            "hold": hold, "scan": scan, "lowcycle": lowcycle}
+            "hold": hold, "scan": scan, "lowcycle": lowcycle,
+            "fastcross": fastcross}
 
 
 async def main():

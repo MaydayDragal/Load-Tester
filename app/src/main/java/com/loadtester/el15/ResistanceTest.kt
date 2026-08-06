@@ -126,6 +126,9 @@ class LeastSquares {
  *     current far from the commanded one is a bad reading rather than an
  *     operating point. Those are kept out of the fit and counted; the load
  *     emits one or two per sweep at a fixed current. See [offTargetLimit].
+ *  5. REPAIR — the load's corruption is invertible, so a held-back reading whose
+ *     true current the surrounding ramp identifies unambiguously is recovered
+ *     rather than lost. Only when it is unambiguous; see [repairOffTarget].
  *
  * V and I inside one status frame are simultaneous, which is what makes a moving
  * setpoint safe to fit: the load's regulation lag shifts WHICH current a packet
@@ -186,6 +189,14 @@ class ResistanceTest(
          * anything has to say so.
          */
         val offTargetSamples: Int,
+        /**
+         * Readings the load corrupted that were RECOVERED — the corruption
+         * inverted and the true current put back — rather than discarded. See
+         * [repairOffTarget]. Counted separately from [offTargetSamples] because
+         * a recovered value is a reconstruction, and a report that leans on
+         * reconstructions should say how many.
+         */
+        val repairedSamples: Int,
         /**
          * What the slope actually measured, before the lead tare was taken off.
          * This is also what a tare run itself records.
@@ -291,6 +302,18 @@ class ResistanceTest(
         fun reset() { sumI = 0.0; sumV = 0.0; sumT = 0.0; count = 0; fanMax = 0 }
     }
 
+    /** A reading held back one packet while its fate is decided. */
+    private class Pending(
+        val nowMs: Long, val voltage: Float, val current: Float,
+        val temperature: Float, val fanSpeed: Int,
+    )
+
+    private var pending: Pending? = null
+    private var lastAcceptedI = 0f
+    private var lastAcceptedMs = 0L
+    private var haveAccepted = false
+    private var repairedSamples = 0
+
     // ---- Lifecycle -----------------------------------------------------------
     fun start(fuseRatingAmps: Float) {
         if (running) return
@@ -301,6 +324,7 @@ class ResistanceTest(
         loadDropouts = 0
         offTargetSamples = 0
         state = State.PRIMING
+        pending = null
         primeStartMs = now()
         lastClearPushMs = 0
         ble.setMode(El15Protocol.MODE_CC)
@@ -408,11 +432,20 @@ class ResistanceTest(
         }
 
         // A reading whose current is nowhere near the commanded one is not a
-        // measurement of this circuit — see [offTargetLimit]. It has already gone
-        // into the datapoint log above, so the CSV still shows it; what it must
-        // not do is enter the fit, the bins, or the run statistics.
+        // measurement of this circuit — see [offTargetLimit]. Rather than drop it
+        // on the spot it is HELD: the fault is a one-sample excursion, so the
+        // next good reading closes it out and may be able to recover it (see
+        // [resolvePending]). It is already in the datapoint log above either way,
+        // so the CSV shows the raw frame whatever happens to it.
         if (abs(status.current - currentTarget) > offTargetLimit(currentTarget, rampStepA())) {
-            offTargetSamples++
+            // Two suspects in a row leave nothing to interpolate across, so the
+            // older one goes. The load re-serves a stale frame when polled faster
+            // than it refreshes, which is exactly how that happens.
+            if (pending != null) offTargetSamples++
+            pending = Pending(
+                nowMs = now() - tStart, voltage = status.voltage, current = status.current,
+                temperature = status.temperature, fanSpeed = status.fanSpeed,
+            )
             callback.onTestProgress(
                 elapsedS(), sweepMsEff / 1000f, currentTarget,
                 status.voltage, status.current, 0f, false,
@@ -420,19 +453,10 @@ class ResistanceTest(
             return
         }
 
-        lsq.add(status.current, status.voltage)
-        // Seed both bounds from the first sample rather than from zero — a
-        // below-zero ambient would otherwise never move tempMax off 0.
-        if (!haveTemp) {
-            tempMin = status.temperature; tempMax = status.temperature; haveTemp = true
-        } else {
-            tempMin = min(tempMin, status.temperature)
-            tempMax = max(tempMax, status.temperature)
-        }
-        fanMax = max(fanMax, status.fanSpeed)
-        peakW = max(peakW, status.voltage * status.current)
-
-        binSample(status)
+        // This reading is good, which is what a held one was waiting for.
+        resolvePending(now() - tStart, status.current)
+        accept(status.current, status.voltage, status.temperature, status.fanSpeed,
+               now() - tStart)
 
         val f = lsq.fit()
         callback.onTestProgress(
@@ -440,6 +464,68 @@ class ResistanceTest(
             status.voltage, status.current,
             if (f != null) correct(f.resistanceOhm) else 0f, f != null,
         )
+    }
+
+    /**
+     * Take a reading into the fit, the bins and the run statistics. The only
+     * path by which anything reaches the result, so a repaired sample goes
+     * through here exactly as a raw one does.
+     */
+    private fun accept(current: Float, voltage: Float, temperature: Float, fan: Int, tMs: Long) {
+        lsq.add(current, voltage)
+        // Seed both bounds from the first sample rather than from zero — a
+        // below-zero ambient would otherwise never move tempMax off 0.
+        if (!haveTemp) {
+            tempMin = temperature; tempMax = temperature; haveTemp = true
+        } else {
+            tempMin = min(tempMin, temperature)
+            tempMax = max(tempMax, temperature)
+        }
+        fanMax = max(fanMax, fan)
+        peakW = max(peakW, voltage * current)
+        binSample(current, voltage, temperature, fan)
+        lastAcceptedI = current
+        lastAcceptedMs = tMs
+        haveAccepted = true
+    }
+
+    /**
+     * Decide what becomes of a held reading, now that a good one has arrived
+     * after it.
+     *
+     * The load's fault corrupts the current field and leaves the voltage alone,
+     * by shifting the value's significand against its exponent — so the true
+     * current is one of a few exact inversions of what was reported. Which one
+     * is not recoverable from the frame (the bit pattern does not say; measured
+     * on 79 events, a trailing-zero test agrees with the truth 14 times and
+     * disagrees 13). It IS recoverable from the ramp: the sample sits between
+     * two good ones, and interpolating across it says where the current was.
+     *
+     * So: take the candidate nearest that interpolation, and accept it only if
+     * it lands within [REPAIR_TOL_A] with no rival nearby. Anything else is
+     * dropped and counted, exactly as before this existed. Validated on 166
+     * events over two independent 200-crossing runs at the sweep's own slew
+     * rate: 104 repaired with a median error of 13 mA, 62 dropped, and NOTHING
+     * repaired wrongly. The tolerance is what buys that — at 0.06 A the same
+     * data fabricates 8 values, which is the failure that matters here, since a
+     * wrong current at the right voltage is indistinguishable from a
+     * measurement ever after.
+     */
+    private fun resolvePending(nextMs: Long, nextCurrent: Float) {
+        val p = pending ?: return
+        pending = null
+        val repaired = if (!haveAccepted) null else repairOffTarget(
+            reported = p.current,
+            predicted = interpolate(
+                lastAcceptedMs, lastAcceptedI, nextMs, nextCurrent, p.nowMs,
+            ),
+        )
+        if (repaired == null) {
+            offTargetSamples++
+            return
+        }
+        repairedSamples++
+        accept(repaired, p.voltage, p.temperature, p.fanSpeed, p.nowMs)
     }
 
     // ---- Ticker --------------------------------------------------------------
@@ -516,6 +602,9 @@ class ResistanceTest(
         tempMin = 0f; tempMax = 0f; haveTemp = false
         fanMax = 0; peakW = 0f
         lastSetMs = 0; currentTarget = 0f
+        pending = null
+        lastAcceptedI = 0f; lastAcceptedMs = 0L; haveAccepted = false
+        repairedSamples = 0
     }
 
     /**
@@ -523,14 +612,21 @@ class ResistanceTest(
      * visits each bin once going up and once coming down, the two visits average
      * together in the bin, which is where the drift cancellation actually lands.
      */
-    private fun binSample(s: El15Status) {
+    private fun binSample(current: Float, voltage: Float, temperature: Float, fan: Int) {
         val span = maxCurrentEff - startCurrentEff
         if (span <= 1e-6f) return
-        val k = (((s.current - startCurrentEff) / span) * NBINS).toInt().coerceIn(0, NBINS - 1)
+        val k = (((current - startCurrentEff) / span) * NBINS).toInt().coerceIn(0, NBINS - 1)
         val b = bins[k]
-        b.sumI += s.current; b.sumV += s.voltage; b.sumT += s.temperature
+        b.sumI += current; b.sumV += voltage; b.sumT += temperature
         b.count++
-        b.fanMax = max(b.fanMax, s.fanSpeed)
+        b.fanMax = max(b.fanMax, fan)
+    }
+
+    /** Where the ramp was at [atMs], given a good reading either side of it. */
+    private fun interpolate(t0: Long, i0: Float, t1: Long, i1: Float, atMs: Long): Float {
+        val dt = (t1 - t0).toFloat()
+        if (dt <= 0f) return i0
+        return i0 + (i1 - i0) * ((atMs - t0).toFloat() / dt)
     }
 
     /**
@@ -608,6 +704,12 @@ class ResistanceTest(
     }
 
     private fun complete() {
+        // A reading still held when the sweep ends has no successor to resolve
+        // it, so it goes the way it would have gone before repair existed.
+        if (pending != null) {
+            offTargetSamples++
+            pending = null
+        }
         val f = lsq.fit()
         finishSafely()
         state = State.IDLE
@@ -662,6 +764,7 @@ class ResistanceTest(
                 maxFan = fanMax,
                 loadDropouts = loadDropouts,
                 offTargetSamples = offTargetSamples,
+                repairedSamples = repairedSamples,
                 rawResistanceOhm = f.resistanceOhm,
                 tareOhm = if (fourWire) 0f else tareOhm,
                 fourWire = fourWire,
@@ -762,6 +865,52 @@ class ResistanceTest(
             OFF_TARGET_FRACTION * target,
             OFF_TARGET_STEPS * rampStepA,
         )
+
+        // ---- Repair --------------------------------------------------------
+        /**
+         * How close the winning candidate must sit to where the ramp says the
+         * current was. Not a comfort margin — it is the whole safety mechanism.
+         * On 166 bench events this value repaired 104 and got NONE wrong; at
+         * 0.06 A the same data fabricated 8 plausible-looking wrong currents.
+         */
+        private const val REPAIR_TOL_A = 0.03f
+
+        /** ...and the runner-up must be this many times further out. */
+        private const val REPAIR_UNIQUE = 2.5f
+
+        /**
+         * Invert the load's corruption of a current reading, or return null when
+         * which corruption it was cannot be told.
+         *
+         * The fault shifts the reading's significand against its exponent, so
+         * for a value in [1,2) the true current is one of exactly three things:
+         * twice it (the exponent lost its low bit), or (v+1)/2 or (v+3)/4 (the
+         * significand moved one or two places). Nothing in the frame says which,
+         * so [predicted] — where the ramp was, interpolated across the sample —
+         * decides, and only when it decides cleanly.
+         */
+        fun repairOffTarget(reported: Float, predicted: Float): Float? {
+            if (reported <= 0f || predicted <= 0f) return null
+            val candidates = floatArrayOf(
+                2f * reported,           // exponent's low bit dropped
+                (reported + 1f) / 2f,    // significand shifted left one
+                (reported + 3f) / 4f,    // ...or two
+            )
+            var best = Float.MAX_VALUE
+            var bestValue = 0f
+            var runnerUp = Float.MAX_VALUE
+            for (c in candidates) {
+                val d = abs(c - predicted)
+                if (d < best) {
+                    runnerUp = best; best = d; bestValue = c
+                } else if (d < runnerUp) {
+                    runnerUp = d
+                }
+            }
+            if (best > REPAIR_TOL_A) return null
+            if (runnerUp < REPAIR_UNIQUE * max(best, 1e-6f)) return null
+            return bestValue
+        }
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same

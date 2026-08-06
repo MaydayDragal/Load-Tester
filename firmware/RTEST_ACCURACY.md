@@ -368,10 +368,22 @@ driving the load over BLE from a laptop — no phone, no app — with
    | significand shifted left 1 | `2v-1` | 1.400 A | either |
    | significand shifted left 2 | `4v-3` | 1.800 A | up-crossings |
 
-   These are exact, not approximate: the halved samples carry a mantissa
-   *bit-identical* to the true value's with the exponent one lower. A wrong
-   scale factor would give a clean ×2 or ×4; `4v-3` is what you get when the
-   significand moves and the exponent does not.
+   **Correction to an earlier version of this section**, which called these
+   exact and universal on the strength of the first handful of events. On 166
+   events they are neither:
+
+   - They describe *most* events, not all: **~11 % match none of the three**.
+   - They are not literal shifts of the FINAL float's mantissa. A left shift by
+     two would leave the bottom two mantissa bits zero, and 13 events that
+     invert cleanly as `4v-3` have **no** trailing zeros at all. So the shift
+     happens upstream of the float — in a fixed-point intermediate that is then
+     converted normally — and the bit pattern of the result carries no
+     fingerprint of it. Tested as a mode-decider on the held-out set, trailing
+     zeros agree with the truth 14 times and disagree 13: a coin toss.
+
+   What survives is the numeric relationship, which is what the repair below
+   uses. A wrong scale factor would still give a clean ×2 or ×4; `4v-3` is what
+   you get when a significand moves and its exponent does not.
 
 So: a current-range change at 1.20 A, where the rescale between ranges is done
 by shifting the float's fields, and on the crossing sample the shift lands in
@@ -410,13 +422,47 @@ Judged against the bench captures the gate holds up, with one known limit:
 - **8 of 11 corrupted samples caught.** The three that slip through are the mild
   `2v-1` mode, whose error at 1.20 A is only 0.2 A — under the floor.
 
-That last one was left alone deliberately. A missed `2v-1` sample is worth
-**+0.105 mΩ on R (0.03 %) and 8 % on σ_R**, measured by injecting it into the
-clean RTEST_003 data; the modes the gate does catch were worth 2.6× on σ_R.
-Chasing the remainder means either dropping the floor into the range of honest
-regulation lag, which trades a real error for a fabricated one, or adding a
-second mechanism — a one-sample spike test — to an engine whose value is that
-it is a faithful port of a hardware-verified design. Not worth 0.1 mΩ.
+### Recovering the reading instead of dropping it
+
+The corruption is invertible — `2r`, `(r+1)/2`, `(r+3)/4` — so a dropped sample
+is recoverable IF you can tell which one happened. Nothing in the frame says
+(see the correction above), so the engine now holds a suspect reading **one
+packet**, interpolates the ramp across it from the good samples either side, and
+takes the candidate nearest that line — accepting it only within **0.03 A** and
+with no rival within 2.5×. Otherwise it is dropped and counted, as before.
+
+Five discriminators were tried against the bench data before that one. The
+tolerance and the interpolation are both load-bearing:
+
+| rule | right | **wrong** | dropped |
+|---|---|---|---|
+| nearest to the commanded setpoint | 2 | **9** | 68 |
+| nearest to extrapolated past samples | 56 | **4** | 19 |
+| both of those must agree | 2 | **2** | 75 |
+| trailing-zero bit fingerprint | — | coin toss | — |
+| **interpolate across it, tol 0.03 A** | **104** | **0** | 62 |
+
+(the first three over one 79-event run; the last over 166 events across two
+independent 200-crossing runs at the sweep's own slew rate). At a 0.06 A
+tolerance the same rule fabricates 8 currents, which is why 0.03 is not a
+comfort margin. Replaying the whole engine over all nine captures — ~9 000
+samples — repairs 116, drops 75, and gets **none** wrong; the negative controls
+(steady hold, full-range scan, low-current cycle) repair nothing at all.
+
+**It does not improve the measurement, and is not meant to.** On RTEST_003:
+
+| | n | R | σ_R | R² |
+|---|---|---|---|---|
+| no gate | 250 | 0.346254 | 1.392 mΩ | 0.99601 |
+| gate only | 247 | 0.346602 | 0.532 mΩ | 0.99942 |
+| gate + repair | 248 | 0.346697 | 0.549 mΩ | 0.99938 |
+
+A reconstruction carries ~12 mA of error, so it is slightly noisier than a real
+sample; a sweep crosses 1.20 A only twice, so at most about one sample per run
+comes back. Both differences sit far under the 0.6 mΩ run-to-run repeatability
+of §6 — this recovers data without fabricating any, and that is the whole claim.
+The `repaired_samples` count is in the CSV, the PDF and the result screen so a
+report never leans on reconstructions silently.
 
 **The firmware deliberately does not have this gate yet.** It is the same class
 of change reverted on 2026-08-06 for being unproven, and it stays unproven on

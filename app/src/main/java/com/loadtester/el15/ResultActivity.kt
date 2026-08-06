@@ -181,6 +181,9 @@ class ResultActivity : BaseActivity() {
             if (r.offTargetSamples > 0) {
                 row("Off-target readings", "${r.offTargetSamples} (not fitted)")
             }
+            if (r.repairedSamples > 0) {
+                row("Recovered readings", "${r.repairedSamples} (corruption inverted)")
+            }
         }
     }
 

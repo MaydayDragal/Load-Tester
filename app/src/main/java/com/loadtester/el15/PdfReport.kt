@@ -127,6 +127,7 @@ object PdfReport {
                 "Samples fitted" to "${r.rawSamples} in ${r.samples.size} bands",
                 "Load dropouts" to r.loadDropouts.toString(),
                 "Off-target readings" to "${r.offTargetSamples} (not fitted)",
+                "Recovered readings" to "${r.repairedSamples} (corruption inverted)",
                 "Temperature" to "${fmt(r.tempMin, 1)} → ${fmt(r.tempMax, 1)} °C",
                 "Max fan" to "${r.maxFan} of ${El15Protocol.FAN_SPEED_MAX}",
             )

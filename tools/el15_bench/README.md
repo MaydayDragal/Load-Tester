@@ -38,6 +38,7 @@ times before disconnecting, and no profile may command past `HARD_MAX_A`.
 | `hold` | sit still either side of, and on, a threshold — the negative control |
 | `scan` | slow full-range: is there more than one threshold? |
 | `lowcycle` | the same question at the low-current end |
+| `fastcross` | ~200 crossings at the R-test's own slew rate — the held-out set any repair rule has to survive |
 
 `el15.py` is a faithful port of the app's protocol rules — sum-to-zero command
 checksums, control writes paced 50 ms apart with polls held 20 ms behind them,
@@ -55,3 +56,7 @@ The evidence behind §7, kept because the conclusion rests on specific frames:
   load's, not the phone's.
 - **`hold-steady-control.csv`** — 45 s held at 1.15, 1.25 and 1.20 A. Zero
   events. The fault needs the current to be moving through the threshold.
+- **`fastcross-heldout-1.csv`, `fastcross-heldout-2.csv`** — two independent
+  200-crossing runs at R-test slew rate, 166 events between them. These are what
+  the repair rule was judged on, and they are the reason its tolerance is
+  0.03 A: at 0.06 A the same data fabricates 8 currents.
