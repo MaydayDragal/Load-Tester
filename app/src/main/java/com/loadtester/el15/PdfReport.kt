@@ -54,10 +54,21 @@ object PdfReport {
     private const val GRID = 0xFFE1E0D9.toInt()
     private const val AXIS = 0xFFC3C2B7.toInt()
 
-    /** Categorical slots 1-3, the only three that clear the all-pairs floors. */
-    private const val S1 = 0xFF2A78D6.toInt()   // blue
-    private const val S2 = 0xFFEB6834.toInt()   // orange
-    private const val S3 = 0xFF1BAF7A.toInt()   // aqua
+    // Categorical slots 1-3 — the only three that clear the all-pairs separation
+    // floors, which is the bar that applies here because these charts are small
+    // multiples rather than series sharing one frame. A fourth entity would need
+    // a fourth hue, and every candidate collides: green against orange measures
+    // ΔE 3.2 under protanopia. So the report carries three quantities and the
+    // rest live in the tables.
+    //
+    // Colour follows the QUANTITY, not the chart: voltage is always blue, current
+    // always orange, capacity always aqua, so flipping between plots is safe.
+    private const val V_BLUE = 0xFF2A78D6.toInt()
+    private const val I_ORANGE = 0xFFEB6834.toInt()
+    // Aqua measures 2.74:1 on this surface, under the 3:1 bar. The sanctioned
+    // relief applies and is present: the series is named in the chart title and
+    // the y-axis label, and every value it plots is also in the tables above.
+    private const val AH_AQUA = 0xFF1BAF7A.toInt()
 
     private const val GOOD = 0xFF0CA30C.toInt()
     private const val WARN = 0xFFFAB219.toInt()
@@ -137,8 +148,8 @@ object PdfReport {
                     "The slope is the resistance.",
                 xLabel = "Current (A)", yLabel = "Voltage (V)",
                 series = listOf(
-                    Series("Fitted line", S2, fitLine, Style.LINE),
-                    Series("Measured", S1, pts, Style.SCATTER),
+                    Series("Fitted line", I_ORANGE, fitLine, Style.LINE),
+                    Series("Measured", V_BLUE, pts, Style.SCATTER),
                 ),
                 height = 218f,
             )
@@ -154,7 +165,7 @@ object PdfReport {
                 caption = "Measured minus fitted voltage. Scatter about zero is noise; " +
                     "a systematic bow means the circuit is not ohmic across the sweep.",
                 xLabel = "Current (A)", yLabel = "Residual (V)",
-                series = listOf(Series("Residual", S1, resid, Style.SCATTER)),
+                series = listOf(Series("Residual", V_BLUE, resid, Style.SCATTER)),
                 refLinesY = listOf(RefLine(0.0, "zero", AXIS)),
                 height = 168f,
             )
@@ -181,7 +192,7 @@ object PdfReport {
                 xLabel = "Elapsed (s)", yLabel = "Current (A)",
                 series = listOf(
                     Series("Commanded", MUTED, target, Style.LINE),
-                    Series("Measured", S1, measured, Style.LINE),
+                    Series("Measured", I_ORANGE, measured, Style.LINE),
                 ),
                 height = 168f,
             )
@@ -189,7 +200,7 @@ object PdfReport {
                 title = "Terminal voltage through the sweep",
                 caption = "Sag under load, and its recovery on the way back down.",
                 xLabel = "Elapsed (s)", yLabel = "Voltage (V)",
-                series = listOf(Series("Voltage", S3, volts, Style.LINE)),
+                series = listOf(Series("Voltage", V_BLUE, volts, Style.LINE)),
                 height = 168f,
             )
         }
@@ -270,14 +281,12 @@ object PdfReport {
             val vByT = ArrayList<Pair<Float, Float>>()
             val iByT = ArrayList<Pair<Float, Float>>()
             val ahByT = ArrayList<Pair<Float, Float>>()
-            val tempByT = ArrayList<Pair<Float, Float>>()
             log.replay { rec ->
                 val h = rec.tMs / 3_600_000f
                 vByAh.add(rec.aux0 to rec.v)
                 vByT.add(h to rec.v)
                 iByT.add(h to rec.i)
                 ahByT.add(h to rec.aux0)
-                tempByT.add(h to rec.temp)
                 true
             }
 
@@ -286,14 +295,14 @@ object PdfReport {
                 caption = "Terminal voltage against the capacity drawn out of the pack — " +
                     "the shape that shows how the pack behaves, not just how much it held.",
                 xLabel = "Capacity drawn (Ah)", yLabel = "Voltage (V)",
-                series = listOf(Series("Voltage", S1, vByAh, Style.LINE)),
+                series = listOf(Series("Voltage", V_BLUE, vByAh, Style.LINE)),
                 refLinesY = listOf(RefLine(r.cutoffV.toDouble(), "cutoff", CRITICAL)),
                 height = 218f,
             )
             s.chart(
                 title = "Voltage over time",
                 xLabel = "Elapsed (h)", yLabel = "Voltage (V)",
-                series = listOf(Series("Voltage", S1, vByT, Style.LINE)),
+                series = listOf(Series("Voltage", V_BLUE, vByT, Style.LINE)),
                 refLinesY = listOf(RefLine(r.cutoffV.toDouble(), "cutoff", CRITICAL)),
                 height = 156f,
             )
@@ -301,24 +310,15 @@ object PdfReport {
                 title = "Discharge current over time",
                 caption = "Flat is healthy: the load holds constant current until the cutoff.",
                 xLabel = "Elapsed (h)", yLabel = "Current (A)",
-                series = listOf(Series("Current", S2, iByT, Style.LINE)),
+                series = listOf(Series("Current", I_ORANGE, iByT, Style.LINE)),
                 height = 156f,
             )
             s.chart(
                 title = "Capacity accumulated",
                 xLabel = "Elapsed (h)", yLabel = "Capacity (Ah)",
-                series = listOf(Series("Capacity", S3, ahByT, Style.LINE)),
+                series = listOf(Series("Capacity", AH_AQUA, ahByT, Style.LINE)),
                 height = 156f,
             )
-            if (r.maxTemp - r.minTemp > 0.5f) {
-                s.chart(
-                    title = "Load temperature over time",
-                    caption = "The electronic load's own temperature, not the pack's.",
-                    xLabel = "Elapsed (h)", yLabel = "Temperature (°C)",
-                    series = listOf(Series("Temperature", S2, tempByT, Style.LINE)),
-                    height = 156f,
-                )
-            }
         }
 
         s.methodNote(
