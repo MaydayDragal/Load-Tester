@@ -182,4 +182,10 @@ Set the EL15’s own hardware UVP as a backstop first, keep the phone charged fo
     <string name="guard_retry">Retry</string>
 
     <string name="result_gone">That result is no longer in memory.</string>
+
+    <!-- Report export -->
+    <string name="rt_save_pdf">Save PDF report</string>
+    <string name="rt_save_csv_device">Save CSV data</string>
+    <string name="rt_share_pdf">PDF report</string>
+    <string name="rt_share_csv">CSV data</string>
 </resources>

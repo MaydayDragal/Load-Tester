@@ -7,6 +7,7 @@ import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.google.android.material.chip.Chip
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.loadtester.el15.databinding.ActivityResultBinding
 import java.util.Locale
 
@@ -62,29 +63,69 @@ class ResultActivity : BaseActivity() {
 
         if (kind == KIND_BATT) renderBattery() else renderRTest()
 
+        binding.pdfButton.setOnClickListener {
+            withStoragePermission {
+                runCatching { buildPdf() }
+                    .onSuccess { pdf ->
+                        val where = Exporter.saveToDownloads(
+                            this, Report.nextName(this, prefix()).replace(".CSV", ".pdf"),
+                            "application/pdf", pdf,
+                        )
+                        toast(
+                            if (where != null) getString(R.string.rt_saved_to, where)
+                            else getString(R.string.rt_save_failed)
+                        )
+                    }
+                    .onFailure { toast("PDF export failed: ${it.message}") }
+            }
+        }
         binding.saveButton.setOnClickListener {
             withStoragePermission {
-                val csv = buildCsv()
-                val prefix = if (kind == KIND_BATT) "BATT" else "RTEST"
-                val where = Report.save(this, prefix, csv)
+                val where = Report.save(this, prefix(), buildCsv())
                 toast(
                     if (where != null) getString(R.string.rt_saved_to, where)
                     else getString(R.string.rt_save_failed)
                 )
             }
         }
-        binding.shareButton.setOnClickListener {
-            try {
-                val prefix = if (kind == KIND_BATT) "BATT" else "RTEST"
-                Report.share(this, prefix, buildCsv(), getString(R.string.rt_results_title))
-            } catch (e: Exception) {
-                toast("Share failed: ${e.message}")
-            }
-        }
+        binding.shareButton.setOnClickListener { shareChooser() }
     }
+
+    private fun prefix() = if (kind == KIND_BATT) "BATT" else "RTEST"
 
     private fun buildCsv(): String =
         if (kind == KIND_BATT) Report.battCsv(battResult!!) else Report.rTestCsv(rtestResult!!)
+
+    private fun buildPdf(): ByteArray =
+        if (kind == KIND_BATT) PdfReport.battery(battResult!!) else PdfReport.rTest(rtestResult!!)
+
+    /**
+     * The PDF is the report a person reads; the CSV is the data a spreadsheet
+     * eats. Both are worth sharing, so ask rather than picking one.
+     */
+    private fun shareChooser() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.rt_share)
+            .setItems(
+                arrayOf(getString(R.string.rt_share_pdf), getString(R.string.rt_share_csv))
+            ) { _, which ->
+                try {
+                    val title = getString(R.string.rt_results_title)
+                    if (which == 0) {
+                        Exporter.share(
+                            this, Report.nextName(this, prefix()).replace(".CSV", ".pdf"),
+                            "application/pdf", buildPdf(), title,
+                        )
+                    } else {
+                        Report.share(this, prefix(), buildCsv(), title)
+                    }
+                } catch (e: Exception) {
+                    toast("Share failed: ${e.message}")
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
 
     // ---- Resistance sweep ------------------------------------------------------
     private fun renderRTest() {
