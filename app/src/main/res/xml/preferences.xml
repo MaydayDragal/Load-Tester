@@ -57,11 +57,6 @@
             app:summary="Length of the triangular current ramp. Longer sweeps collect more points and tighten the uncertainty. 5-900 s."
             app:defaultValue="30" />
         <EditTextPreference
-            app:key="pref_step_ma"
-            app:title="Current step (mA)"
-            app:summary="Hold each level for a whole step so the load settles, instead of chasing a continuously moving setpoint. Dwell per level follows from the sweep duration - lengthen the sweep to dwell longer. 0 = continuous."
-            app:defaultValue="50" />
-        <EditTextPreference
             app:key="pref_settle_ms"
             app:title="Skip after switch-on (ms)"
             app:summary="Discard readings for this long after the load energises, to skip the regulator start-up transient. 0 = use every sample."

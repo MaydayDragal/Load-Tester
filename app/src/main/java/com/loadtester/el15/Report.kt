@@ -56,13 +56,7 @@ object Report {
         f("# Sweep start current (A),%.3f\n", r.startCurrent)
         f("# Sweep peak current (A),%.3f\n", r.maxTestCurrent)
         f("# Sweep duration (s),%d\n", r.sweepSeconds)
-        f("# Sweep shape,eased triangular ramp (up then down)\n")
-        if (r.stepCurrentA > 0f) {
-            f("# Current step (mA),%.0f\n", r.stepCurrentA * 1000f)
-            f("# Dwell per level (ms),%d\n", r.dwellMs)
-        } else {
-            f("# Current step,continuous\n")
-        }
+        f("# Sweep shape,continuous triangular ramp (up then down)\n")
         f("# Probe wiring,%s\n", if (r.fourWire) "4-wire (Kelvin)" else "2-wire")
         f("# Lead tare (ohm),%.6f\n", r.tareOhm)
 
@@ -94,11 +88,6 @@ object Report {
         f("temperature_max,%.1f,C\n", r.tempMax)
         f("max_fan,%d,\n", r.maxFan)
         f("load_dropouts,%d,\n", r.loadDropouts)
-        // Samples the fit deliberately left out, so raw_samples above is
-        // auditable against the datapoint block below, which keeps everything.
-        f("excluded_step_transient,%d,\n", r.excludedTransient)
-        f("excluded_repeat_frame,%d,\n", r.excludedDuplicate)
-        f("excluded_off_target,%d,\n", r.excludedOffTarget)
         f("reliable,%s,\n", if (r.reliable) "yes" else "no")
 
         // Per-sample datapoints, streamed out of the log written during the
@@ -108,18 +97,12 @@ object Report {
         // current_a vs target_a shows the load's regulation lag; a dropout reads
         // as current_a ~ 0 under a nonzero target.
         val log = SampleLog.rtest
-        f("\n# Datapoints (%d averaged levels)\n", log.count)
-        f("# One row per current level: the mean of the samples taken while the ")
-        f("load sat there.\n")
-        f("# samples is how many went into that mean; current_spread_a is the ")
-        f("range across them,\n")
-        f("# so a level that caught a glitch shows a wide spread instead of ")
-        f("hiding it inside its mean.\n")
-        f("elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,samples,current_spread_a\n")
+        f("\n# Datapoints (%d samples, %d ms resolution at the end of the sweep)\n",
+            log.count, log.intervalMs)
+        f("elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,fan\n")
         log.replay { s ->
-            f("%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d,%.4f\n",
-                s.tMs / 1000f, s.aux0, s.v, s.i, s.v * s.i, s.temp,
-                s.aux1.toInt(), s.aux2)
+            f("%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d\n",
+                s.tMs / 1000f, s.aux0, s.v, s.i, s.v * s.i, s.temp, s.aux1.toInt())
             true
         }
     }

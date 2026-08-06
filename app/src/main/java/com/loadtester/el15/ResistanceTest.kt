@@ -2,7 +2,6 @@ package com.loadtester.el15
 
 import android.os.Handler
 import android.os.Looper
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -160,18 +159,6 @@ class ResistanceTest(
         val startCurrent: Float,
         /** Commanded ramp duration. */
         val sweepSeconds: Long,
-        /** Commanded current step, amps; 0 = a continuously moving setpoint. */
-        val stepCurrentA: Float,
-        /** How long each level was held, ms; 0 when continuous. */
-        val dwellMs: Long,
-        /** Samples each level had to collect before the ramp moved on. */
-        val samplesPerLevel: Int,
-        /** Averaged datapoints recorded — one per level visited. */
-        val levelsRecorded: Int,
-        /** Levels that moved on with fewer samples than asked for. */
-        val levelsShort: Int,
-        /** Wall-clock duration, which the sample pacing can stretch. */
-        val actualDurationS: Long,
         /** Status packets actually used in the fit. */
         val rawSamples: Int,
         val reliable: Boolean,
@@ -187,12 +174,6 @@ class ResistanceTest(
         val maxFan: Int,
         /** Times the load had to be re-asserted mid-sweep. */
         val loadDropouts: Int,
-        /** Samples dropped for arriving inside a setpoint step's response. */
-        val excludedTransient: Int,
-        /** Samples dropped as repeats of the previous measurement. */
-        val excludedDuplicate: Int,
-        /** Samples dropped for sitting too far from the commanded current. */
-        val excludedOffTarget: Int,
         /**
          * What the slope actually measured, before the lead tare was taken off.
          * This is also what a tare run itself records.
@@ -259,41 +240,9 @@ class ResistanceTest(
      */
     var settleMs: Long = 0
 
-    /**
-     * Ignore samples for this long after each SETPOINT change, to skip the CC
-     * loop's step response. 0 = use everything. See the blanking block in
-     * [onStatus] for why this exists and why it is safe.
-     */
-    var stepBlankMs: Long = DEFAULT_STEP_BLANK_MS
-
-    /**
-     * Quantise the commanded current to multiples of this, in amps. 0 = a
-     * continuously moving setpoint.
-     *
-     * A STEPPED sweep holds each level until the underlying ramp has travelled a
-     * whole step, so the load settles and most samples are true operating points
-     * rather than readings taken while it is still moving. It also means the
-     * setpoint is only re-commanded when it actually changes, which cuts the
-     * number of control writes several-fold — fewer chances for the device to
-     * drop one, and more of the link left for telemetry.
-     *
-     * The dwell that results is (step / ramp rate), so it follows from the sweep
-     * duration: a 4 A span over a 15 s sweep steps every ~95 ms at 50 mA, while
-     * the same span over 60 s dwells ~380 ms per level. Lengthen the sweep to
-     * dwell longer.
-     */
-    var stepCurrentA: Float = DEFAULT_STEP_A
-
-    /**
-     * How many samples each level must collect before the ramp is allowed to move
-     * on. The level's datapoint is the mean of ALL samples it caught, so a slower
-     * ramp simply averages more; this is the floor, not the quota.
-     */
-    var minSamplesPerLevel: Int = DEFAULT_SAMPLES_PER_LEVEL
-
     val running: Boolean get() = state != State.IDLE
 
-    private enum class State { IDLE, PRIMING, ARMING, SWEEPING }
+    private enum class State { IDLE, PRIMING, SWEEPING }
 
     private val main = Handler(Looper.getMainLooper())
     private var state = State.IDLE
@@ -316,37 +265,13 @@ class ResistanceTest(
 
     private var tStart = 0L
     private var lastSetMs = 0L
-    private var lastTickMs = 0L
-    private var rawTarget = 0f
-
-    /** Ramp progress, which advances only while the level is being served. */
-    private var rampMs = 0L
-    private var levelStartMs = 0L
-    private var levelsRecorded = 0
-    private var levelsShort = 0
-
-    // The level accumulator: one averaged datapoint comes out of these.
-    private var levelSumV = 0f
-    private var levelSumI = 0f
-    private var levelSumT = 0f
-    private var levelN = 0
-    private var levelFanMax = 0
-    private var levelMinI = 0f
-    private var levelMaxI = 0f
     private var lastOnPushMs = 0L
     private var primeStartMs = 0L
     private var lastClearPushMs = 0L
     private var primeDoneAtMs = 0L
-    private var armStartMs = 0L
     private var sweepMsEff = 30_000L
     private var loadDropouts = 0
     private var logging = false
-    private var excludedTransient = 0
-    private var excludedDuplicate = 0
-    private var excludedOffTarget = 0
-    private var lastFitV = 0f
-    private var lastFitI = 0f
-    private var haveLastFit = false
 
     private class Bin {
         var sumI = 0.0; var sumV = 0.0; var sumT = 0.0; var count = 0; var fanMax = 0
@@ -422,31 +347,19 @@ class ResistanceTest(
             abort("Load protection tripped (${status.warning}). Test stopped.")
             return
         }
-
-        // Waiting for the load to pick up. Re-assert on the same cadence the
-        // sweep uses, and only start the ramp once current is genuinely flowing
-        // — the loadOn bit alone is not enough, since the device can report the
-        // load on while still regulating in from zero.
-        if (state == State.ARMING) {
-            if (status.loadOn && status.current > ARM_MIN_CURRENT) { beginSweep(); return }
-            if (now() - lastOnPushMs > LOAD_REASSERT_MS) {
-                lastOnPushMs = now()
-                loadDropouts++
-                ble.setSetpoint(currentTarget)
-                ble.setLoad(true)
-            }
-            callback.onTestProgress(
-                0f, sweepMsEff / 1000f, currentTarget,
-                status.voltage, status.current, 0f, false,
-            )
-            return
-        }
-
         if (state != State.SWEEPING) return
 
-        // Note the datapoint log is written per LEVEL, not per packet — see
-        // flushLevel(). The gates below decide which packets feed a level's
-        // average; the level's mean is what gets recorded.
+        // Offer every packet to the datapoint log. Logged BEFORE the load-on and
+        // settle gates below on purpose: dropout and transient samples are
+        // excluded from the FIT, but the CSV should show what actually happened,
+        // not only what was fitted. The commanded target rides along so
+        // regulation lag is visible in the file (the fit itself never uses it).
+        if (logging) {
+            SampleLog.rtest.add(
+                now() - tStart, status.voltage, status.current,
+                status.temperature, currentTarget, status.fanSpeed.toFloat(),
+            )
+        }
 
         // The load must actually be sinking for a sample to be part of the sweep.
         // A packet reporting the load off is either the gap before LOAD_ON lands
@@ -480,100 +393,7 @@ class ResistanceTest(
             return
         }
 
-        // STEP-RESPONSE BLANKING. When the CC reference steps, the load's control
-        // loop overshoots for a few milliseconds before settling. If the device's
-        // current ADC happens to land inside that window it reports the peak —
-        // but its voltage reading is averaged over a longer window and never saw
-        // it, so the pair is physically inconsistent and does not lie on the V-I
-        // line at all.
-        //
-        // Observed on real sweeps: a step to 1.308 A read 1.6119 A (+29 %) while
-        // the terminal voltage stayed at the value belonging to ~1.24 A. Both
-        // spikes in those runs landed within one sample of a setpoint change,
-        // which is what identifies the mechanism.
-        //
-        // This is a TIME-domain exclusion, not outlier rejection: samples are
-        // dropped for when they arrived, never for their value, so it cannot
-        // quietly pull the fit toward the line it is trying to measure. They are
-        // still logged — the CSV shows what happened, the fit uses what settled.
-        if (stepBlankMs > 0 && now() - lastSetMs < stepBlankMs) {
-            excludedTransient++
-            callback.onTestProgress(
-                elapsedS(), sweepMsEff / 1000f, currentTarget,
-                status.voltage, status.current, 0f, false,
-            )
-            return
-        }
-
-        // OFF-TARGET READINGS. The load is in CC mode, so a settled sample must
-        // sit near the current it was told to draw. One that does not is not an
-        // operating point at all.
-        //
-        // This catches the failure step-blanking cannot, because it is triggered
-        // by CURRENT rather than by our commands: measured on real sweeps, the
-        // EL15 misreports its current around 1.1-1.2 A — 1.67x on one run, 0.56x
-        // on another — in BOTH ramp directions and at the same current every
-        // time, which is the signature of a measurement range or gain change with
-        // the sample caught across the switch. The voltage channel stays clean
-        // through it: on every good sample the reported current agrees with the
-        // current the terminal voltage implies to within 1 %, and on these it is
-        // out by 67 %.
-        //
-        // The commanded value is used ONLY as a validity gate and never enters
-        // the regression, so this cannot pull the slope toward the ramp. The
-        // tolerance is wide enough to pass ordinary regulation lag with room to
-        // spare — the worst genuine lag measured was 0.098 A against a 0.25 A
-        // floor — and is expressed against the commanded value so it scales with
-        // the sweep.
-        if (currentTarget > 0f) {
-            val tolerance = max(OFF_TARGET_FLOOR_A, currentTarget * OFF_TARGET_FRAC)
-            if (abs(status.current - currentTarget) > tolerance) {
-                excludedOffTarget++
-                callback.onTestProgress(
-                    elapsedS(), sweepMsEff / 1000f, currentTarget,
-                    status.voltage, status.current, 0f, false,
-                )
-                return
-            }
-        }
-
-        // REPEATED FRAMES. The device re-reports its last measurement when polled
-        // faster than it refreshes, so identical V AND I to float precision means
-        // one measurement seen twice, not two independent samples. Counting them
-        // as independent inflates n and makes the reported uncertainty tighter
-        // than the data earns — on one real sweep roughly half the frames were
-        // repeats, which understates the ± by about 40 %.
-        if (haveLastFit && status.voltage == lastFitV && status.current == lastFitI) {
-            excludedDuplicate++
-            return
-        }
-        lastFitV = status.voltage
-        lastFitI = status.current
-        haveLastFit = true
-
-        // Accumulate into the CURRENT LEVEL instead of fitting straight away.
-        //
-        // Each level contributes exactly ONE point to the regression: the mean of
-        // every sample taken while the load sat there. Two things come of that.
-        // Averaging n samples divides their noise by sqrt(n) — four samples halve
-        // it. And the regression then sees one independent observation per level
-        // rather than a crowd of correlated ones taken microseconds apart, which
-        // is what makes the reported uncertainty an honest number instead of an
-        // optimistic one.
-        levelSumV += status.voltage
-        levelSumI += status.current
-        levelSumT += status.temperature
-        if (levelN == 0) {
-            levelMinI = status.current; levelMaxI = status.current
-        } else {
-            levelMinI = min(levelMinI, status.current)
-            levelMaxI = max(levelMaxI, status.current)
-        }
-        levelN++
-        levelFanMax = max(levelFanMax, status.fanSpeed)
-
-        // Run-wide statistics still track every sample the load delivered, so
-        // they report what actually happened rather than what was averaged.
+        lsq.add(status.current, status.voltage)
         // Seed both bounds from the first sample rather than from zero — a
         // below-zero ambient would otherwise never move tempMax off 0.
         if (!haveTemp) {
@@ -584,6 +404,8 @@ class ResistanceTest(
         }
         fanMax = max(fanMax, status.fanSpeed)
         peakW = max(peakW, status.voltage * status.current)
+
+        binSample(status)
 
         val f = lsq.fit()
         callback.onTestProgress(
@@ -609,59 +431,15 @@ class ResistanceTest(
 
     private fun tick() {
         if (state == State.SWEEPING) {
-            val nowMs = now()
-            val since = if (lastTickMs != 0L) nowMs - lastTickMs else 0L
-            lastTickMs = nowMs
-
-            // The ramp advances only once the level has collected the samples it
-            // owes, so the sweep PACES ITSELF to the telemetry instead of running
-            // ahead of it. The requested duration therefore sets the pace rather
-            // than a deadline: a link too slow to deliver the samples stretches
-            // the sweep rather than silently thinning it.
-            //
-            // A level that never fills — a stalled link, a load that stopped
-            // answering — is released by the timeout so the sweep cannot hang.
-            val stalled = levelStartMs != 0L && nowMs - levelStartMs > levelTimeoutMs()
-            if (levelN >= minSamplesPerLevel || stalled) rampMs += since
-
-            if (rampMs >= sweepMsEff) { complete(); return }
-
-            // Slew-limit the CONTINUOUS ramp, before quantising, so the levels
-            // stay exact multiples of the step. A dropped write then becomes a
-            // short catch-up rather than a jump at the load.
-            var raw = targetAt(rampMs)
-            val limit = slewLimit(since)
-            if (rawTarget > 0f && limit > 0f) {
-                raw = rawTarget + (raw - rawTarget).coerceIn(-limit, limit)
-            }
-            rawTarget = raw
-
-            val want = clampToRatings(commandable(quantise(raw)))
-            // Only write when the level actually changes, and never faster than
-            // the setpoint cadence. Re-sending an unchanged setpoint would
-            // restart the blanking window on every tick and throw away the
-            // settled samples this mode exists to collect. A write the device
-            // drops self-heals at the next level.
-            if (want != currentTarget &&
-                (lastSetMs == 0L || nowMs - lastSetMs >= setpointStepMs())
-            ) {
-                flushLevel()          // record the level we are leaving
-                currentTarget = want
-                lastSetMs = nowMs
-                levelStartMs = nowMs
+            val el = now() - tStart
+            if (el >= sweepMsEff) { complete(); return }
+            // Re-command the setpoint on a fixed cadence, slower than the poll.
+            val step = setpointStepMs()
+            if (lastSetMs == 0L || now() - lastSetMs >= step) {
+                lastSetMs = now()
+                currentTarget = clampToRatings(commandable(targetAt(el)))
                 ble.setSetpoint(currentTarget)
             }
-            return
-        }
-        // The load never picked up. Say so plainly — a sweep that runs with no
-        // current produces no fit anyway, and "not enough usable samples" would
-        // send the user looking at the sample rate instead of at their
-        // connections.
-        if (state == State.ARMING && now() - armStartMs > ARM_MAX_MS) {
-            abort(
-                "The load never started sinking current. Check the connections " +
-                    "and that the source is above the minimum voltage, then retry."
-            )
             return
         }
         if (state == State.PRIMING && now() >= primeDoneAtMs) finishPriming()
@@ -680,72 +458,18 @@ class ResistanceTest(
 
     private fun setpointStepMs(): Long = if (setpointMs > 0) setpointMs else RAMP_STEP_MS
 
-    /**
-     * Snap the ramp to the nearest step level. Levels are measured FROM the
-     * ramp's floor, so the start current is itself a level rather than an offset
-     * into the grid, and the first and last samples sit on one.
-     */
-    private fun quantise(a: Float): Float {
-        val q = stepCurrentA
-        if (q <= 0f) return a
-        val n = Math.round((a - startCurrentEff) / q)
-        return startCurrentEff + n * q
-    }
-
-    /**
-     * How long the sweep will hold each level, for the setup screen. 0 when the
-     * sweep is continuous.
-     */
-    fun dwellMs(): Long {
-        val q = stepCurrentA
-        val span = maxCurrentEff - startCurrentEff
-        val half = sweepMsEff / 2.0f
-        if (q <= 0f || span <= 0f || half <= 0f) return 0
-        return (q / (span / half)).toLong()
-    }
-
     private fun elapsedS(): Float =
-        if (state == State.SWEEPING) rampMs / 1000f else 0f
+        if (state == State.SWEEPING) (now() - tStart) / 1000f else 0f
 
     /**
-     * Symmetric eased triangle: start -> max over the first half, back to start
-     * over the second. Returns the commanded current at [elMs] into the sweep.
-     *
-     * The easing is applied to the TRIANGLE PARAMETER, so each current is still
-     * visited once going up and once coming down, at times symmetric about the
-     * sweep midpoint. That symmetry is what cancels first-order time drift in
-     * the fit, and it survives unchanged — the samples just sit at slightly
-     * different instants than they did.
+     * Symmetric triangle: start -> max over the first half, back to start over
+     * the second. Returns the commanded current at [elMs] into the sweep.
      */
     private fun targetAt(elMs: Long): Float {
         val half = sweepMsEff / 2.0f
         if (half <= 0f) return startCurrentEff
-        val frac = if (elMs < half) elMs / half else 2.0f - elMs / half
-        return startCurrentEff + (maxCurrentEff - startCurrentEff) * easeTriangle(frac)
-    }
-
-    /**
-     * Largest setpoint change a single command may make, given how long it has
-     * actually been since the last one.
-     *
-     * Without this, a command the device DROPS (it silently discards a
-     * no-response write landing too close behind another) leaves the load
-     * holding a stale setpoint, and the next command that does land asks for the
-     * whole accumulated jump at once. That is a current spike, and it is the one
-     * the ramp shape cannot smooth away.
-     *
-     * Capping the per-command delta turns that jump into a short catch-up over
-     * the following commands. It costs a little regulation lag and NOTHING in
-     * accuracy: V and I inside one status frame are simultaneous, so lag changes
-     * which current a packet reports, never the voltage paired with it. The fit
-     * never sees the commanded value at all.
-     */
-    private fun slewLimit(sinceMs: Long): Float {
-        val span = maxCurrentEff - startCurrentEff
-        val half = sweepMsEff / 2.0f
-        if (span <= 0f || half <= 0f) return span
-        val ratePerMs = (span / half) / (1f - EASE_FRAC)
-        return ratePerMs * sinceMs * SLEW_CATCHUP
+        val frac = (if (elMs < half) elMs / half else 2.0f - elMs / half).coerceIn(0f, 1f)
+        return startCurrentEff + (maxCurrentEff - startCurrentEff) * frac
     }
 
     private fun resetAccumulators() {
@@ -753,57 +477,7 @@ class ResistanceTest(
         for (b in bins) b.reset()
         tempMin = 0f; tempMax = 0f; haveTemp = false
         fanMax = 0; peakW = 0f
-        lastSetMs = 0; lastTickMs = 0; currentTarget = 0f; rawTarget = 0f
-        excludedTransient = 0; excludedDuplicate = 0; excludedOffTarget = 0
-        lastFitV = 0f; lastFitI = 0f; haveLastFit = false
-        rampMs = 0; levelStartMs = 0; levelsRecorded = 0; levelsShort = 0
-        resetLevel()
-    }
-
-    private fun resetLevel() {
-        levelSumV = 0f; levelSumI = 0f; levelSumT = 0f
-        levelN = 0; levelFanMax = 0
-        levelMinI = 0f; levelMaxI = 0f
-    }
-
-    /**
-     * How long to wait for a level to collect its samples before giving up on it
-     * and letting the ramp move on. Generous against the poll rate — enough for
-     * several times the samples we need — so it only fires on a genuinely stalled
-     * link, never on ordinary jitter.
-     */
-    private fun levelTimeoutMs(): Long =
-        max(500L, pollIntervalMs * (minSamplesPerLevel * 3L + 4L))
-
-    /**
-     * Close the level the sweep is leaving: average its samples into a single
-     * datapoint, give that to the fit and the curve, and record it.
-     *
-     * A level that never reached [minSamplesPerLevel] is still used if it caught
-     * anything at all — a thin point is better than a hole in the sweep — but it
-     * is counted, because a run full of short levels means the poll rate could
-     * not keep up and the user should know that.
-     */
-    private fun flushLevel() {
-        if (levelN <= 0) return
-        val v = levelSumV / levelN
-        val i = levelSumI / levelN
-        val t = levelSumT / levelN
-        if (levelN < minSamplesPerLevel) levelsShort++
-        lsq.add(i, v)
-        binSample(i, v, t, levelFanMax)
-        levelsRecorded++
-        if (logging) {
-            // One row per level, not per packet: the datapoint IS the average.
-            // The sample count and the spread of current across those samples ride
-            // along, so a level that caught a glitch is visible as a wide spread
-            // rather than hiding inside its own mean.
-            SampleLog.rtest.add(
-                now() - tStart, v, i, t, currentTarget,
-                levelN.toFloat(), levelMaxI - levelMinI,
-            )
-        }
-        resetLevel()
+        lastSetMs = 0; currentTarget = 0f
     }
 
     /**
@@ -811,14 +485,14 @@ class ResistanceTest(
      * visits each bin once going up and once coming down, the two visits average
      * together in the bin, which is where the drift cancellation actually lands.
      */
-    private fun binSample(current: Float, voltage: Float, temperature: Float, fan: Int) {
+    private fun binSample(s: El15Status) {
         val span = maxCurrentEff - startCurrentEff
         if (span <= 1e-6f) return
-        val k = (((current - startCurrentEff) / span) * NBINS).toInt().coerceIn(0, NBINS - 1)
+        val k = (((s.current - startCurrentEff) / span) * NBINS).toInt().coerceIn(0, NBINS - 1)
         val b = bins[k]
-        b.sumI += current; b.sumV += voltage; b.sumT += temperature
+        b.sumI += s.current; b.sumV += s.voltage; b.sumT += s.temperature
         b.count++
-        b.fanMax = max(b.fanMax, fan)
+        b.fanMax = max(b.fanMax, s.fanSpeed)
     }
 
     /**
@@ -874,6 +548,18 @@ class ResistanceTest(
 
         sweepMsEff = sweepSeconds.coerceIn(MIN_SWEEP_S, MAX_SWEEP_S) * 1000L
 
+        // Open the datapoint log HERE, not in start(), so a run that dies in
+        // priming never truncates the previous sweep's log — its report may still
+        // be waiting to be saved.
+        logging = SampleLog.rtest.start()
+
+        state = State.SWEEPING
+        tStart = now()
+        lastSetMs = now()
+        // Arm the re-assert timer so the FIRST check happens one interval into
+        // the sweep, not one interval after some later event — a LOAD_ON that
+        // never landed has to be caught at the start, where it costs the most.
+        lastOnPushMs = now()
         // Command a real current BEFORE switching the load on. Verified on
         // hardware 2026-08-01: the EL15 accepts LOAD_ON at a 0.000 A CC setpoint
         // and then simply reports the load off — the whole sweep ran with I=0 and
@@ -881,45 +567,9 @@ class ResistanceTest(
         currentTarget = clampToRatings(commandable(startCurrentEff))
         ble.setSetpoint(currentTarget)
         ble.setLoad(true)
-
-        // ARM, don't sweep: the ramp clock must not start until the load is
-        // actually sinking current.
-        //
-        // These two writes go out back to back, and the device DROPS a
-        // no-response write that lands too close behind another, so the LOAD_ON
-        // is the one most likely to be lost. Pacing makes that rare, not
-        // impossible — the load can also just be slow to pick up.
-        //
-        // Starting the clock here anyway spends the opening of the ramp
-        // commanding currents nothing draws, and since the ramp starts at the
-        // BOTTOM that costs exactly the low-current end the fit most needs span
-        // at. Seen on a real sweep (RTEST_003): LOAD_ON lost, re-asserted twice,
-        // conduction at 1.07 s, and a run that commanded 0.05 A reported a
-        // measured minimum of 0.169 A.
-        state = State.ARMING
-        armStartMs = now()
-        // Arm the re-assert timer so the FIRST check happens one interval in,
-        // not one interval after some later event.
-        lastOnPushMs = now()
-    }
-
-    /** The load is conducting: start the ramp for real. */
-    private fun beginSweep() {
-        // Open the datapoint log HERE, so elapsed_s in the report is measured
-        // from the first current the sweep actually drew.
-        logging = SampleLog.rtest.start()
-        state = State.SWEEPING
-        tStart = now()
-        lastSetMs = now()
-        lastTickMs = 0   // 0 so the first tick commands immediately
-        rawTarget = 0f
-        rampMs = 0
-        levelStartMs = now()
-        lastOnPushMs = now()
     }
 
     private fun complete() {
-        flushLevel()   // the level in progress is a datapoint too
         val f = lsq.fit()
         finishSafely()
         state = State.IDLE
@@ -963,12 +613,6 @@ class ResistanceTest(
                 maxTestCurrent = maxCurrentEff,
                 startCurrent = startCurrentEff,
                 sweepSeconds = sweepMsEff / 1000,
-                stepCurrentA = stepCurrentA,
-                dwellMs = dwellMs(),
-                samplesPerLevel = minSamplesPerLevel,
-                levelsRecorded = levelsRecorded,
-                levelsShort = levelsShort,
-                actualDurationS = (now() - tStart) / 1000,
                 rawSamples = lsq.n.toInt(),
                 reliable = reliable,
                 minCurrent = lsq.minI,
@@ -979,9 +623,6 @@ class ResistanceTest(
                 tempMax = if (haveTemp) tempMax else 0f,
                 maxFan = fanMax,
                 loadDropouts = loadDropouts,
-                excludedTransient = excludedTransient,
-                excludedDuplicate = excludedDuplicate,
-                excludedOffTarget = excludedOffTarget,
                 rawResistanceOhm = f.resistanceOhm,
                 tareOhm = if (fourWire) 0f else tareOhm,
                 fourWire = fourWire,
@@ -1024,48 +665,6 @@ class ResistanceTest(
         private const val TICK_MS = 25L
 
         /**
-         * Fraction of each half-ramp spent easing the rate in and out.
-         *
-         * The raw shape is a symmetric triangle, which has a step change in
-         * slope at three places: switch-on, the turnaround at the peak, and the
-         * end. At each one the commanded current changes direction instantly,
-         * and the load's CC regulator answers that with an overshoot — a visible
-         * current spike.
-         *
-         * [easeTriangle] maps the triangle's position through a TRAPEZOIDAL
-         * VELOCITY profile instead: the ramp rate rises from zero over the first
-         * EASE_FRAC of each half, holds constant, then falls back to zero. Slope
-         * is continuous everywhere, including across the peak.
-         *
-         * The cost is small and bounded: holding the same span in the same time
-         * with two eased ends needs a plateau rate of 1/(1 - EASE_FRAC), about
-         * 9 % above the linear rate here. That matters because a LINEAR ramp
-         * already minimises the peak rate of change for a given span and
-         * duration — any smoothing has to buy its soft corners somewhere, and
-         * 9 % is the whole bill. (A raised cosine, the obvious alternative,
-         * costs 57 %.)
-         */
-        const val EASE_FRAC = 0.08f
-
-        /**
-         * How much faster than the nominal ramp rate a single command may move,
-         * so a gap left by a dropped write closes over a few commands rather
-         * than in one.
-         */
-        private const val SLEW_CATCHUP = 1.5f
-
-        /** The eased triangle parameter. Pure, so the profile is unit-testable. */
-        fun easeTriangle(tRaw: Float): Float {
-            val t = tRaw.coerceIn(0f, 1f)
-            val e = EASE_FRAC
-            val v = 1f / (1f - e)   // plateau rate that still covers 0..1
-            if (t < e) return v * t * t / (2f * e)
-            if (t <= 1f - e) return v * (t - e / 2f)
-            val d = 1f - t
-            return 1f - v * d * d / (2f * e)
-        }
-
-        /**
          * How soon a load reported off is re-asserted. Measured on hardware: the
          * INITIAL LOAD_ON does not always land, and at a 1 s interval that lost
          * the first second of the sweep — the whole low-current end of the ramp,
@@ -1076,50 +675,6 @@ class ResistanceTest(
 
         /** Grace period to shed a stale protection trip during priming. */
         private const val FAULT_CLEAR_MS = 4000L
-
-        /**
-         * How long to wait for the load to start conducting before calling it a
-         * wiring fault. Comfortably longer than several [LOAD_REASSERT_MS]
-         * retries.
-         */
-        private const val ARM_MAX_MS = 3000L
-
-        /**
-         * Current that counts as "actually sinking". Well below the 50 mA floor
-         * the ramp commands, so a load regulating in at the bottom of its range
-         * still trips it, but clear of a zero reading with noise on it.
-         */
-        private const val ARM_MIN_CURRENT = 0.02f
-
-        /**
-         * Default step-response blanking. Long enough to cover the CC loop's
-         * settling after a reference step, short enough to keep most of the
-         * samples between commands at the 100 ms ramp cadence.
-         */
-        const val DEFAULT_STEP_BLANK_MS = 30L
-
-        /**
-         * Absolute tolerance floor for the off-target gate. Above the worst
-         * genuine regulation lag measured on hardware (0.098 A) with margin, so
-         * it rejects glitches without ever rejecting real tracking.
-         */
-        const val OFF_TARGET_FLOOR_A = 0.25f
-
-        /** ...and the proportional part, so the gate scales with the sweep. */
-        const val OFF_TARGET_FRAC = 0.15f
-
-        /**
-         * Default current step. A stepped sweep settles at each level instead of
-         * chasing a moving target, so the readings are true operating points.
-         * 0 would give a continuously moving setpoint.
-         */
-        const val DEFAULT_STEP_A = 0.05f
-
-        /**
-         * Samples averaged into each level's datapoint. Four halves the noise on
-         * every point the fit sees.
-         */
-        const val DEFAULT_SAMPLES_PER_LEVEL = 4
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same

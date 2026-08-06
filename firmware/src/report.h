@@ -66,13 +66,7 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     fpf(f, "# Sweep start current (A),%.3f\n", r.startCurrent);
     fpf(f, "# Sweep peak current (A),%.3f\n", r.maxTestCurrent);
     fpf(f, "# Sweep duration (s),%lu\n", (unsigned long)r.sweepSeconds);
-    fpf(f, "# Sweep shape,eased triangular ramp (up then down)\n");
-    if (r.stepCurrentA > 0) {
-      fpf(f, "# Current step (mA),%.0f\n", r.stepCurrentA * 1000.0f);
-      fpf(f, "# Dwell per level (ms),%lu\n", (unsigned long)r.dwellMs);
-    } else {
-      fpf(f, "# Current step,continuous\n");
-    }
+    fpf(f, "# Sweep shape,continuous triangular ramp (up then down)\n");
     fpf(f, "# Probe wiring,%s\n", r.fourWire ? "4-wire (Kelvin)" : "2-wire");
     fpf(f, "# Lead tare (ohm),%.6f\n", r.tareOhm);
     // The fit runs on every raw sample; these rows are those samples averaged
@@ -101,12 +95,6 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     fpf(f, "temperature_min,%.1f,C\n", r.tempMin);
     fpf(f, "temperature_max,%.1f,C\n", r.tempMax);
     fpf(f, "max_fan,%d,\n", r.maxFan);
-    fpf(f, "load_dropouts,%d,\n", r.loadDropouts);
-    // Samples the fit deliberately left out, so raw_samples above is auditable
-    // against the datapoint block below, which keeps every packet.
-    fpf(f, "excluded_step_transient,%d,\n", r.excludedTransient);
-    fpf(f, "excluded_repeat_frame,%d,\n", r.excludedDuplicate);
-    fpf(f, "excluded_off_target,%d,\n", r.excludedOffTarget);
     fpf(f, "reliable,%s,\n", r.reliable ? "yes" : "no");
 
     // ---- Per-sample datapoints ----------------------------------------------
@@ -119,15 +107,13 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     // load's regulation lag; a dropout reads as current_a ~ 0 under a nonzero
     // target.
     uint32_t n = samplelog::rtest.count();
-    fpf(f, "\n# Datapoints (%lu averaged levels)\n", (unsigned long)n);
-    fpf(f, "# One row per current level: the mean of the samples taken while the load sat there.\n");
-    fpf(f, "# samples is how many went into that mean; current_spread_a is the range across them,\n");
-    fpf(f, "# so a level that caught a glitch shows a wide spread instead of hiding it inside its mean.\n");
-    fpf(f, "elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,samples,current_spread_a\n");
+    fpf(f, "\n# Datapoints (%lu samples, %lu ms resolution at the end of the sweep)\n",
+        (unsigned long)n, (unsigned long)samplelog::rtest.intervalMs());
+    fpf(f, "elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,fan\n");
     if (n > 0) {
       bool logOk = samplelog::rtest.replay([&f](const samplelog::Rec &s) {
-        fpf(f, "%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d,%.4f\n",
-            s.tMs / 1000.0f, s.aux0, s.v, s.i, s.v * s.i, s.temp, (int)s.aux1, s.aux2);
+        fpf(f, "%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d\n",
+            s.tMs / 1000.0f, s.aux0, s.v, s.i, s.v * s.i, s.temp, (int)s.aux1);
         return f.getWriteError() == 0;   // stop early if the card gave up
       });
       // replay() returning false means the flash log could not be read (or the

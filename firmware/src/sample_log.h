@@ -48,8 +48,7 @@ struct Rec {
   float i;        // current, A
   float temp;     // load temperature, degC
   float aux0;     // batt: integrated capacity so far, Ah | rtest: commanded target, A
-  float aux1;     // batt: integrated energy so far, Wh   | rtest: samples in the level
-  float aux2;     // batt: unused                          | rtest: current spread across them
+  float aux1;     // batt: integrated energy so far, Wh   | rtest: fan speed step
 };
 
 // Mount the flash filesystem shared by both logs. Safe to call repeatedly;
@@ -76,8 +75,7 @@ class Log {
   // decides whether this one is actually stored, so the caller does not have to
   // rate-limit. `tMs` must be the run's elapsed milliseconds (for the capacity
   // test: active time, so the timeline stays monotonic across a pause).
-  void add(uint32_t tMs, float v, float i, float temp, float aux0, float aux1,
-           float aux2 = 0);
+  void add(uint32_t tMs, float v, float i, float temp, float aux0, float aux1);
 
   // Push the RAM batch to flash. Called automatically when the batch fills; call
   // it explicitly at the end of a run (and before reading back) so the tail is

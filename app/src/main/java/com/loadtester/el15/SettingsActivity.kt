@@ -39,7 +39,6 @@ class SettingsActivity : BaseActivity() {
                 Prefs.POLL_MS to integer,
                 Prefs.SAFETY_PCT to integer,
                 Prefs.SWEEP_S to integer,
-                Prefs.STEP_MA to decimal,
                 Prefs.SETTLE_MS to integer,
                 Prefs.TARE_OHM to decimal,
                 Prefs.BATT_REST_S to integer,

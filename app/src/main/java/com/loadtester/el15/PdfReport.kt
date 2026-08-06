@@ -122,22 +122,9 @@ object PdfReport {
                 "Fuse rating" to "${fmt(r.fuseRating, 2)} A",
                 "Sweep" to "${fmt(r.startCurrent, 3)} → ${fmt(r.maxTestCurrent, 3)} A " +
                     "over ${r.sweepSeconds} s",
-                "Ramp shape" to "eased triangle, up then down",
-                "Current step" to
-                    if (r.stepCurrentA > 0f) "${fmt(r.stepCurrentA * 1000f, 0)} mA"
-                    else "continuous",
-                "Samples per level" to
-                    if (r.stepCurrentA > 0f)
-                        "${r.samplesPerLevel} averaged" +
-                            (if (r.levelsShort > 0) ", ${r.levelsShort} short" else "")
-                    else "n/a",
-                "Levels recorded" to r.levelsRecorded.toString(),
-                "Duration" to "${r.actualDurationS} s actual, ${r.sweepSeconds} s requested",
+                "Ramp shape" to "continuous triangular ramp, up then down",
                 "Current measured" to "${fmt(r.minCurrent, 4)} → ${fmt(r.maxCurrentSeen, 4)} A",
                 "Samples fitted" to "${r.rawSamples} in ${r.samples.size} bands",
-                "Excluded, step transient" to r.excludedTransient.toString(),
-                "Excluded, repeat frame" to r.excludedDuplicate.toString(),
-                "Excluded, off target" to r.excludedOffTarget.toString(),
                 "Load dropouts" to r.loadDropouts.toString(),
                 "Temperature" to "${fmt(r.tempMin, 1)} → ${fmt(r.tempMax, 1)} °C",
                 "Max fan" to "${r.maxFan} of ${El15Protocol.FAN_SPEED_MAX}",
@@ -199,10 +186,9 @@ object PdfReport {
             }
             s.chart(
                 title = "Current through the sweep",
-                caption = "One point per current level, each the mean of the samples taken " +
-                    "while the load sat there. The gap between commanded and measured is the " +
-                    "load's regulation lag, which the fit is immune to — voltage and current " +
-                    "inside one frame are simultaneous.",
+                caption = "Commanded against measured. The gap between them is the load's " +
+                    "regulation lag, which the fit is immune to — voltage and current inside " +
+                    "one frame are simultaneous.",
                 xLabel = "Elapsed (s)", yLabel = "Current (A)",
                 series = listOf(
                     Series("Commanded", MUTED, target, Style.LINE),
@@ -224,9 +210,8 @@ object PdfReport {
                 "fits every settled reading by least squares, so each current is visited once " +
                 "in each direction and first-order drift — self-heating, a sagging source — " +
                 "cancels instead of biasing the slope. The ± figure is the standard error of " +
-                "that slope, not a guess. Readings taken inside a setpoint step's response, " +
-                "and frames the device repeated between refreshes, are excluded from the fit " +
-                "and counted above; the CSV export keeps every packet."
+                "that slope, not a guess. The CSV export carries every packet the sweep " +
+                "recorded, so the fit is auditable against the raw data."
         )
         return s.finish()
     }
