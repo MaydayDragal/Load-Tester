@@ -88,6 +88,11 @@ object Report {
         f("temperature_max,%.1f,C\n", r.tempMax)
         f("max_fan,%d,\n", r.maxFan)
         f("load_dropouts,%d,\n", r.loadDropouts)
+        // Samples the fit deliberately left out, so raw_samples above is
+        // auditable against the datapoint block below, which keeps everything.
+        f("excluded_step_transient,%d,\n", r.excludedTransient)
+        f("excluded_repeat_frame,%d,\n", r.excludedDuplicate)
+        f("excluded_off_target,%d,\n", r.excludedOffTarget)
         f("reliable,%s,\n", if (r.reliable) "yes" else "no")
 
         // Per-sample datapoints, streamed out of the log written during the

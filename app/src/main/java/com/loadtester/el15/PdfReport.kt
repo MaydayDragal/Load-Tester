@@ -114,9 +114,11 @@ object PdfReport {
         s.section("Test conditions")
         s.table(
             listOf(
-                "Probe wiring" to
-                    if (r.fourWire) "4-wire (Kelvin)"
-                    else "2-wire, tare ${DeviceCore.formatOhm(r.tareOhm)}",
+                "Probe wiring" to when {
+                    r.fourWire -> "4-wire (Kelvin)"
+                    r.tareOhm > 0f -> "2-wire, tare ${DeviceCore.formatOhm(r.tareOhm)}"
+                    else -> "2-wire, no tare"
+                },
                 "Fuse rating" to "${fmt(r.fuseRating, 2)} A",
                 "Sweep" to "${fmt(r.startCurrent, 3)} → ${fmt(r.maxTestCurrent, 3)} A " +
                     "over ${r.sweepSeconds} s",
@@ -125,6 +127,7 @@ object PdfReport {
                 "Samples fitted" to "${r.rawSamples} in ${r.samples.size} bands",
                 "Excluded, step transient" to r.excludedTransient.toString(),
                 "Excluded, repeat frame" to r.excludedDuplicate.toString(),
+                "Excluded, off target" to r.excludedOffTarget.toString(),
                 "Load dropouts" to r.loadDropouts.toString(),
                 "Temperature" to "${fmt(r.tempMin, 1)} → ${fmt(r.tempMax, 1)} °C",
                 "Max fan" to "${r.maxFan} of ${El15Protocol.FAN_SPEED_MAX}",

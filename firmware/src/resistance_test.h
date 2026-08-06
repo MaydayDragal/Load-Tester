@@ -67,6 +67,7 @@ class ResistanceTest {
     int loadDropouts = 0;   // times the load had to be re-asserted mid-sweep
     int excludedTransient = 0;  // samples dropped inside a setpoint step response
     int excludedDuplicate = 0;  // samples dropped as repeats of the previous one
+    int excludedOffTarget = 0;  // samples dropped for straying from the commanded current
     // What the slope actually measured, before the lead tare was taken off.
     // rawResistanceOhm is also what a tare run itself records.
     float rawResistanceOhm = 0;
@@ -276,6 +277,34 @@ class ResistanceTest {
       return;
     }
 
+    // OFF-TARGET READINGS. The load is in CC mode, so a settled sample must sit
+    // near the current it was told to draw. One that does not is not an
+    // operating point at all.
+    //
+    // This catches the failure step-blanking cannot, because it is triggered by
+    // CURRENT rather than by our commands: measured on real sweeps, the EL15
+    // misreports its current around 1.1-1.2 A — 1.67x on one run, 0.56x on
+    // another — in BOTH ramp directions and at the same current every time,
+    // which is the signature of a measurement range or gain change with the
+    // sample caught across the switch. The voltage channel stays clean through
+    // it: on every good sample the reported current agrees with the current the
+    // terminal voltage implies to within 1 %, and on these it is out by 67 %.
+    //
+    // The commanded value is used ONLY as a validity gate and never enters the
+    // regression, so this cannot pull the slope toward the ramp. The tolerance
+    // passes ordinary regulation lag with room to spare — the worst genuine lag
+    // measured was 0.098 A against a 0.25 A floor.
+    if (currentTarget_ > 0) {
+      float tol = max(OFF_TARGET_FLOOR_A, currentTarget_ * OFF_TARGET_FRAC);
+      if (fabsf(s.current - currentTarget_) > tol) {
+        excludedOffTarget_++;
+        if (onProgress)
+          onProgress(elapsedS(), (float)sweepMsEff_ / 1000.0f, currentTarget_,
+                     s.voltage, s.current, 0, false);
+        return;
+      }
+    }
+
     // REPEATED FRAMES. The device re-reports its last measurement when polled
     // faster than it refreshes, so identical V AND I to float precision means one
     // measurement seen twice, not two independent samples. Counting them as
@@ -477,7 +506,7 @@ class ResistanceTest {
     fanMax_ = 0; peakW_ = 0;
     for (int k = 0; k < NBINS; k++) bins_[k] = Bin{};
     lastSetMs_ = 0; currentTarget_ = 0;
-    excludedTransient_ = 0; excludedDuplicate_ = 0;
+    excludedTransient_ = 0; excludedDuplicate_ = 0; excludedOffTarget_ = 0;
     lastFitV_ = 0; lastFitI_ = 0; haveLastFit_ = false;
   }
 
@@ -632,6 +661,7 @@ class ResistanceTest {
     res.loadDropouts = loadDropouts_;
     res.excludedTransient = excludedTransient_;
     res.excludedDuplicate = excludedDuplicate_;
+    res.excludedOffTarget = excludedOffTarget_;
 
     res.samples.reserve(NBINS);
     for (int k = 0; k < NBINS; k++) {
@@ -687,12 +717,17 @@ class ResistanceTest {
   // ramp commands, so a load regulating in at the bottom of its range still
   // trips it, but clear of a zero reading with noise on it.
   static constexpr float ARM_MIN_CURRENT = 0.02f;
+  // Off-target gate. The floor is above the worst genuine regulation lag
+  // measured on hardware (0.098 A) with margin, so it rejects glitches without
+  // ever rejecting real tracking; the fraction lets it scale with the sweep.
+  static constexpr float OFF_TARGET_FLOOR_A = 0.25f;
+  static constexpr float OFF_TARGET_FRAC = 0.15f;
 
   uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0, lastOnPushMs_ = 0;
   uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0, armStartMs_ = 0;
   uint32_t sweepMsEff_ = 30000;
   int loadDropouts_ = 0;   // how often the load had to be re-asserted
-  int excludedTransient_ = 0, excludedDuplicate_ = 0;
+  int excludedTransient_ = 0, excludedDuplicate_ = 0, excludedOffTarget_ = 0;
   float lastFitV_ = 0, lastFitI_ = 0;
   bool haveLastFit_ = false;
   bool logging_ = false;   // flash datapoint log opened for this sweep

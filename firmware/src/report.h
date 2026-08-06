@@ -95,6 +95,12 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     fpf(f, "temperature_min,%.1f,C\n", r.tempMin);
     fpf(f, "temperature_max,%.1f,C\n", r.tempMax);
     fpf(f, "max_fan,%d,\n", r.maxFan);
+    fpf(f, "load_dropouts,%d,\n", r.loadDropouts);
+    // Samples the fit deliberately left out, so raw_samples above is auditable
+    // against the datapoint block below, which keeps every packet.
+    fpf(f, "excluded_step_transient,%d,\n", r.excludedTransient);
+    fpf(f, "excluded_repeat_frame,%d,\n", r.excludedDuplicate);
+    fpf(f, "excluded_off_target,%d,\n", r.excludedOffTarget);
     fpf(f, "reliable,%s,\n", r.reliable ? "yes" : "no");
 
     // ---- Per-sample datapoints ----------------------------------------------

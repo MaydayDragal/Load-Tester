@@ -2,6 +2,7 @@ package com.loadtester.el15
 
 import android.os.Handler
 import android.os.Looper
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -178,6 +179,8 @@ class ResistanceTest(
         val excludedTransient: Int,
         /** Samples dropped as repeats of the previous measurement. */
         val excludedDuplicate: Int,
+        /** Samples dropped for sitting too far from the commanded current. */
+        val excludedOffTarget: Int,
         /**
          * What the slope actually measured, before the lead tare was taken off.
          * This is also what a tare run itself records.
@@ -286,6 +289,7 @@ class ResistanceTest(
     private var logging = false
     private var excludedTransient = 0
     private var excludedDuplicate = 0
+    private var excludedOffTarget = 0
     private var lastFitV = 0f
     private var lastFitI = 0f
     private var haveLastFit = false
@@ -455,6 +459,38 @@ class ResistanceTest(
             return
         }
 
+        // OFF-TARGET READINGS. The load is in CC mode, so a settled sample must
+        // sit near the current it was told to draw. One that does not is not an
+        // operating point at all.
+        //
+        // This catches the failure step-blanking cannot, because it is triggered
+        // by CURRENT rather than by our commands: measured on real sweeps, the
+        // EL15 misreports its current around 1.1-1.2 A — 1.67x on one run, 0.56x
+        // on another — in BOTH ramp directions and at the same current every
+        // time, which is the signature of a measurement range or gain change with
+        // the sample caught across the switch. The voltage channel stays clean
+        // through it: on every good sample the reported current agrees with the
+        // current the terminal voltage implies to within 1 %, and on these it is
+        // out by 67 %.
+        //
+        // The commanded value is used ONLY as a validity gate and never enters
+        // the regression, so this cannot pull the slope toward the ramp. The
+        // tolerance is wide enough to pass ordinary regulation lag with room to
+        // spare — the worst genuine lag measured was 0.098 A against a 0.25 A
+        // floor — and is expressed against the commanded value so it scales with
+        // the sweep.
+        if (currentTarget > 0f) {
+            val tolerance = max(OFF_TARGET_FLOOR_A, currentTarget * OFF_TARGET_FRAC)
+            if (abs(status.current - currentTarget) > tolerance) {
+                excludedOffTarget++
+                callback.onTestProgress(
+                    elapsedS(), sweepMsEff / 1000f, currentTarget,
+                    status.voltage, status.current, 0f, false,
+                )
+                return
+            }
+        }
+
         // REPEATED FRAMES. The device re-reports its last measurement when polled
         // faster than it refreshes, so identical V AND I to float precision means
         // one measurement seen twice, not two independent samples. Counting them
@@ -603,7 +639,7 @@ class ResistanceTest(
         tempMin = 0f; tempMax = 0f; haveTemp = false
         fanMax = 0; peakW = 0f
         lastSetMs = 0; currentTarget = 0f
-        excludedTransient = 0; excludedDuplicate = 0
+        excludedTransient = 0; excludedDuplicate = 0; excludedOffTarget = 0
         lastFitV = 0f; lastFitI = 0f; haveLastFit = false
     }
 
@@ -771,6 +807,7 @@ class ResistanceTest(
                 loadDropouts = loadDropouts,
                 excludedTransient = excludedTransient,
                 excludedDuplicate = excludedDuplicate,
+                excludedOffTarget = excludedOffTarget,
                 rawResistanceOhm = f.resistanceOhm,
                 tareOhm = if (fourWire) 0f else tareOhm,
                 fourWire = fourWire,
@@ -886,6 +923,16 @@ class ResistanceTest(
          * samples between commands at the 100 ms ramp cadence.
          */
         const val DEFAULT_STEP_BLANK_MS = 30L
+
+        /**
+         * Absolute tolerance floor for the off-target gate. Above the worst
+         * genuine regulation lag measured on hardware (0.098 A) with margin, so
+         * it rejects glitches without ever rejecting real tracking.
+         */
+        const val OFF_TARGET_FLOOR_A = 0.25f
+
+        /** ...and the proportional part, so the gate scales with the sweep. */
+        const val OFF_TARGET_FRAC = 0.15f
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same

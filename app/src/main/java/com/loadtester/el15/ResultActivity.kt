@@ -176,6 +176,9 @@ class ResultActivity : BaseActivity() {
             if (r.excludedDuplicate > 0) {
                 row("  skipped: repeat frame", r.excludedDuplicate.toString())
             }
+            if (r.excludedOffTarget > 0) {
+                row("  skipped: off target", r.excludedOffTarget.toString())
+            }
             row("Temperature", "%.1f → %.1f °C".format(Locale.US, r.tempMin, r.tempMax))
             row("Max fan", "${r.maxFan}/${El15Protocol.FAN_SPEED_MAX}")
             if (r.loadDropouts > 0) row("Load dropouts", r.loadDropouts.toString())
