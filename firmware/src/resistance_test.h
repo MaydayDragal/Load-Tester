@@ -55,6 +55,8 @@ class ResistanceTest {
     float fuseRating = 0, maxTestCurrent = 0;
     float startCurrent = 0;        // commanded ramp floor
     uint32_t sweepSeconds = 0;     // commanded ramp duration
+    float stepCurrentA = 0;        // commanded current step (0 = continuous)
+    uint32_t dwellMs = 0;          // how long each level was held (0 = continuous)
     int rawSamples = 0;            // status packets actually used in the fit
     bool reliable = false;
     // Run statistics, taken over EVERY raw sample rather than the binned curve,
@@ -115,6 +117,20 @@ class ResistanceTest {
   // loop's step response. 0 = use everything. See the blanking block in
   // onStatus() for why this exists and why it is safe.
   uint32_t stepBlankMs = 30;
+  // Quantise the commanded current to multiples of this, in amps. 0 = a
+  // continuously moving setpoint.
+  //
+  // A STEPPED sweep holds each level until the underlying ramp has travelled a
+  // whole step, so the load settles and most samples are true operating points
+  // rather than readings taken while it is still moving. It also re-commands the
+  // setpoint only when the level actually changes, which cuts the number of
+  // control writes several-fold — fewer chances for the device to drop one, and
+  // more of the link left for telemetry.
+  //
+  // The dwell that results is (step / ramp rate), so it follows from the sweep
+  // duration: a 4 A span over a 15 s sweep steps every ~95 ms at 50 mA, while the
+  // same span over 60 s dwells ~380 ms per level.
+  float stepCurrentA = 0.05f;
 
   static const uint32_t MIN_SWEEP_S = 5;
   static const uint32_t MAX_SWEEP_S = 900;
@@ -360,19 +376,29 @@ class ResistanceTest {
       // commands that crowd each other), so updating faster than we poll would
       // starve telemetry entirely and the sweep would collect nothing.
       uint32_t step = setpointStepMs();
-      if (lastSetMs_ == 0 || millis() - lastSetMs_ >= step) {
-        uint32_t since = lastSetMs_ ? millis() - lastSetMs_ : step;
-        lastSetMs_ = millis();
-        float want = clampToRatings(commandable(targetAt(el)));
-        // Slew-limit against what we last COMMANDED, so a dropped write becomes
-        // a short catch-up instead of a step change at the load.
+      if (lastTickMs_ == 0 || millis() - lastTickMs_ >= step) {
+        uint32_t since = lastTickMs_ ? millis() - lastTickMs_ : step;
+        lastTickMs_ = millis();
+
+        // Slew-limit the CONTINUOUS ramp, before quantising, so the levels stay
+        // exact multiples of the step. A dropped write then becomes a short
+        // catch-up rather than a jump at the load.
+        float raw = targetAt(el);
         float limit = slewLimit(since);
-        if (currentTarget_ > 0 && limit > 0) {
-          float delta = constrain(want - currentTarget_, -limit, limit);
-          want = currentTarget_ + delta;
+        if (rawTarget_ > 0 && limit > 0)
+          raw = rawTarget_ + constrain(raw - rawTarget_, -limit, limit);
+        rawTarget_ = raw;
+
+        float want = clampToRatings(commandable(quantise(raw)));
+        // Only write when the level actually changes. Re-sending an unchanged
+        // setpoint would restart the blanking window on every tick and throw
+        // away the settled samples this mode exists to collect. A write the
+        // device drops self-heals at the next level.
+        if (want != currentTarget_) {
+          currentTarget_ = want;
+          lastSetMs_ = millis();
+          ble_->setSetpoint(currentTarget_);
         }
-        currentTarget_ = want;
-        ble_->setSetpoint(currentTarget_);
       }
       return;
     }
@@ -424,6 +450,23 @@ class ResistanceTest {
   // 50 ms the device needs between control writes.
   uint32_t setpointStepMs() const {
     return setpointMs > 0 ? setpointMs : RAMP_STEP_MS;
+  }
+
+  // Snap the ramp to the nearest step level. Levels are measured FROM the ramp's
+  // floor, so the start current is itself a level rather than an offset into the
+  // grid, and the first and last samples sit on one.
+  float quantise(float a) const {
+    if (stepCurrentA <= 0) return a;
+    float n = roundf((a - startCurrent_) / stepCurrentA);
+    return startCurrent_ + n * stepCurrentA;
+  }
+
+  // How long the sweep holds each level. 0 when the sweep is continuous.
+  uint32_t dwellMs() const {
+    float span = maxCurrent_ - startCurrent_;
+    float half = sweepMsEff_ / 2.0f;
+    if (stepCurrentA <= 0 || span <= 0 || half <= 0) return 0;
+    return (uint32_t)(stepCurrentA / (span / half));
   }
 
   float elapsedS() const { return state_ == SWEEPING ? (millis() - tStart_) / 1000.0f : 0; }
@@ -505,7 +548,7 @@ class ResistanceTest {
     tempMin_ = tempMax_ = 0; haveTemp_ = false;
     fanMax_ = 0; peakW_ = 0;
     for (int k = 0; k < NBINS; k++) bins_[k] = Bin{};
-    lastSetMs_ = 0; currentTarget_ = 0;
+    lastSetMs_ = 0; lastTickMs_ = 0; currentTarget_ = 0; rawTarget_ = 0;
     excludedTransient_ = 0; excludedDuplicate_ = 0; excludedOffTarget_ = 0;
     lastFitV_ = 0; lastFitI_ = 0; haveLastFit_ = false;
   }
@@ -625,6 +668,8 @@ class ResistanceTest {
     state_ = SWEEPING;
     tStart_ = millis();
     lastSetMs_ = millis();
+    lastTickMs_ = 0;   // 0 so the first tick commands immediately
+    rawTarget_ = 0;
     lastOnPushMs_ = millis();
   }
 
@@ -650,6 +695,8 @@ class ResistanceTest {
     res.maxTestCurrent = maxCurrent_;
     res.startCurrent = startCurrent_;
     res.sweepSeconds = sweepMsEff_ / 1000;
+    res.stepCurrentA = stepCurrentA;
+    res.dwellMs = dwellMs();
     res.rawSamples = n_;
     res.minCurrent = minI_;
     res.maxCurrentSeen = maxI_;
@@ -723,7 +770,8 @@ class ResistanceTest {
   static constexpr float OFF_TARGET_FLOOR_A = 0.25f;
   static constexpr float OFF_TARGET_FRAC = 0.15f;
 
-  uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0, lastOnPushMs_ = 0;
+  uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0, lastTickMs_ = 0, lastOnPushMs_ = 0;
+  float rawTarget_ = 0;
   uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0, armStartMs_ = 0;
   uint32_t sweepMsEff_ = 30000;
   int loadDropouts_ = 0;   // how often the load had to be re-asserted

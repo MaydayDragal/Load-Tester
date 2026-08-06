@@ -36,6 +36,7 @@ object Prefs {
     const val SWEEP_MAX_A = "pref_sweep_max_a"
     const val SETTLE_MS = "pref_settle_ms"
     const val FUSE_A = "pref_fuse_a"
+    const val STEP_MA = "pref_step_ma"
 
     // ---- Battery capacity test ----------------------------------------------
     const val BATT_CHEM = "pref_batt_chem"
@@ -143,6 +144,14 @@ object Prefs {
         str(ctx, SETTLE_MS, "0").toLongOrNull()?.coerceIn(0, 10_000) ?: 0L
 
     fun fuseA(ctx: Context): Float = f(ctx, FUSE_A, 5f, 0.1f, 100f)
+
+    /**
+     * Current step for the sweep, in milliamps; 0 = a continuously moving
+     * setpoint. Stepping lets the load settle at each level, so the readings are
+     * true operating points rather than snapshots of a moving target.
+     */
+    fun stepMilliamps(ctx: Context): Float =
+        str(ctx, STEP_MA, "50").toFloatOrNull()?.coerceIn(0f, 2000f) ?: 50f
 
     fun setFuseA(ctx: Context, a: Float) {
         p(ctx).edit().putString(FUSE_A, a.toString()).apply()

@@ -160,6 +160,10 @@ class ResistanceTest(
         val startCurrent: Float,
         /** Commanded ramp duration. */
         val sweepSeconds: Long,
+        /** Commanded current step, amps; 0 = a continuously moving setpoint. */
+        val stepCurrentA: Float,
+        /** How long each level was held, ms; 0 when continuous. */
+        val dwellMs: Long,
         /** Status packets actually used in the fit. */
         val rawSamples: Int,
         val reliable: Boolean,
@@ -254,6 +258,24 @@ class ResistanceTest(
      */
     var stepBlankMs: Long = DEFAULT_STEP_BLANK_MS
 
+    /**
+     * Quantise the commanded current to multiples of this, in amps. 0 = a
+     * continuously moving setpoint.
+     *
+     * A STEPPED sweep holds each level until the underlying ramp has travelled a
+     * whole step, so the load settles and most samples are true operating points
+     * rather than readings taken while it is still moving. It also means the
+     * setpoint is only re-commanded when it actually changes, which cuts the
+     * number of control writes several-fold — fewer chances for the device to
+     * drop one, and more of the link left for telemetry.
+     *
+     * The dwell that results is (step / ramp rate), so it follows from the sweep
+     * duration: a 4 A span over a 15 s sweep steps every ~95 ms at 50 mA, while
+     * the same span over 60 s dwells ~380 ms per level. Lengthen the sweep to
+     * dwell longer.
+     */
+    var stepCurrentA: Float = DEFAULT_STEP_A
+
     val running: Boolean get() = state != State.IDLE
 
     private enum class State { IDLE, PRIMING, ARMING, SWEEPING }
@@ -279,6 +301,8 @@ class ResistanceTest(
 
     private var tStart = 0L
     private var lastSetMs = 0L
+    private var lastTickMs = 0L
+    private var rawTarget = 0f
     private var lastOnPushMs = 0L
     private var primeStartMs = 0L
     private var lastClearPushMs = 0L
@@ -545,20 +569,32 @@ class ResistanceTest(
         if (state == State.SWEEPING) {
             val el = now() - tStart
             if (el >= sweepMsEff) { complete(); return }
-            // Re-command the setpoint on a fixed cadence, slower than the poll.
+            // Re-evaluate the ramp on a fixed cadence, slower than the poll.
             val step = setpointStepMs()
-            if (lastSetMs == 0L || now() - lastSetMs >= step) {
-                val since = if (lastSetMs != 0L) now() - lastSetMs else step
-                lastSetMs = now()
-                var want = clampToRatings(commandable(targetAt(el)))
-                // Slew-limit against what we last COMMANDED, so a dropped write
-                // becomes a short catch-up instead of a step change at the load.
+            if (lastTickMs == 0L || now() - lastTickMs >= step) {
+                val since = if (lastTickMs != 0L) now() - lastTickMs else step
+                lastTickMs = now()
+
+                // Slew-limit the CONTINUOUS ramp, before quantising, so the
+                // levels stay exact multiples of the step. A dropped write then
+                // becomes a short catch-up rather than a jump at the load.
+                var raw = targetAt(el)
                 val limit = slewLimit(since)
-                if (currentTarget > 0f && limit > 0f) {
-                    want = currentTarget + (want - currentTarget).coerceIn(-limit, limit)
+                if (rawTarget > 0f && limit > 0f) {
+                    raw = rawTarget + (raw - rawTarget).coerceIn(-limit, limit)
                 }
-                currentTarget = want
-                ble.setSetpoint(currentTarget)
+                rawTarget = raw
+
+                val want = clampToRatings(commandable(quantise(raw)))
+                // Only write when the level actually changes. Re-sending an
+                // unchanged setpoint would restart the blanking window on every
+                // tick and throw away the settled samples this mode exists to
+                // collect. A write the device drops self-heals at the next level.
+                if (want != currentTarget) {
+                    currentTarget = want
+                    lastSetMs = now()
+                    ble.setSetpoint(currentTarget)
+                }
             }
             return
         }
@@ -588,6 +624,30 @@ class ResistanceTest(
     private fun commandable(target: Float): Float = max(target, MIN_TEST_CURRENT)
 
     private fun setpointStepMs(): Long = if (setpointMs > 0) setpointMs else RAMP_STEP_MS
+
+    /**
+     * Snap the ramp to the nearest step level. Levels are measured FROM the
+     * ramp's floor, so the start current is itself a level rather than an offset
+     * into the grid, and the first and last samples sit on one.
+     */
+    private fun quantise(a: Float): Float {
+        val q = stepCurrentA
+        if (q <= 0f) return a
+        val n = Math.round((a - startCurrentEff) / q)
+        return startCurrentEff + n * q
+    }
+
+    /**
+     * How long the sweep will hold each level, for the setup screen. 0 when the
+     * sweep is continuous.
+     */
+    fun dwellMs(): Long {
+        val q = stepCurrentA
+        val span = maxCurrentEff - startCurrentEff
+        val half = sweepMsEff / 2.0f
+        if (q <= 0f || span <= 0f || half <= 0f) return 0
+        return (q / (span / half)).toLong()
+    }
 
     private fun elapsedS(): Float =
         if (state == State.SWEEPING) (now() - tStart) / 1000f else 0f
@@ -638,7 +698,7 @@ class ResistanceTest(
         for (b in bins) b.reset()
         tempMin = 0f; tempMax = 0f; haveTemp = false
         fanMax = 0; peakW = 0f
-        lastSetMs = 0; currentTarget = 0f
+        lastSetMs = 0; lastTickMs = 0; currentTarget = 0f; rawTarget = 0f
         excludedTransient = 0; excludedDuplicate = 0; excludedOffTarget = 0
         lastFitV = 0f; lastFitI = 0f; haveLastFit = false
     }
@@ -748,6 +808,8 @@ class ResistanceTest(
         state = State.SWEEPING
         tStart = now()
         lastSetMs = now()
+        lastTickMs = 0   // 0 so the first tick commands immediately
+        rawTarget = 0f
         lastOnPushMs = now()
     }
 
@@ -795,6 +857,8 @@ class ResistanceTest(
                 maxTestCurrent = maxCurrentEff,
                 startCurrent = startCurrentEff,
                 sweepSeconds = sweepMsEff / 1000,
+                stepCurrentA = stepCurrentA,
+                dwellMs = dwellMs(),
                 rawSamples = lsq.n.toInt(),
                 reliable = reliable,
                 minCurrent = lsq.minI,
@@ -933,6 +997,13 @@ class ResistanceTest(
 
         /** ...and the proportional part, so the gate scales with the sweep. */
         const val OFF_TARGET_FRAC = 0.15f
+
+        /**
+         * Default current step. A stepped sweep settles at each level instead of
+         * chasing a moving target, so the readings are true operating points.
+         * 0 would give a continuously moving setpoint.
+         */
+        const val DEFAULT_STEP_A = 0.05f
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same

@@ -208,6 +208,7 @@ class DeviceCore private constructor(private val app: Context) :
         rtest.pollIntervalMs = poll
         rtest.safetyFactor = Prefs.safetyFactor(app)
         rtest.settleMs = Prefs.settleMs(app)
+        rtest.stepCurrentA = Prefs.stepMilliamps(app) / 1000f
         // Probe wiring is read live for the R-test because its result screen
         // reports which was in force; the capacity test snapshots it at start().
         rtest.fourWire = Prefs.fourWire(app)

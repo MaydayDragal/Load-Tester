@@ -123,6 +123,9 @@ object PdfReport {
                 "Sweep" to "${fmt(r.startCurrent, 3)} → ${fmt(r.maxTestCurrent, 3)} A " +
                     "over ${r.sweepSeconds} s",
                 "Ramp shape" to "eased triangle, up then down",
+                "Current step" to
+                    if (r.stepCurrentA > 0f) "${fmt(r.stepCurrentA * 1000f, 0)} mA, dwell ${r.dwellMs} ms"
+                    else "continuous",
                 "Current measured" to "${fmt(r.minCurrent, 4)} → ${fmt(r.maxCurrentSeen, 4)} A",
                 "Samples fitted" to "${r.rawSamples} in ${r.samples.size} bands",
                 "Excluded, step transient" to r.excludedTransient.toString(),

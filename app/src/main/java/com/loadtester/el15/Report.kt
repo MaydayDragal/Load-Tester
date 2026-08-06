@@ -56,7 +56,13 @@ object Report {
         f("# Sweep start current (A),%.3f\n", r.startCurrent)
         f("# Sweep peak current (A),%.3f\n", r.maxTestCurrent)
         f("# Sweep duration (s),%d\n", r.sweepSeconds)
-        f("# Sweep shape,continuous triangular ramp (up then down)\n")
+        f("# Sweep shape,eased triangular ramp (up then down)\n")
+        if (r.stepCurrentA > 0f) {
+            f("# Current step (mA),%.0f\n", r.stepCurrentA * 1000f)
+            f("# Dwell per level (ms),%d\n", r.dwellMs)
+        } else {
+            f("# Current step,continuous\n")
+        }
         f("# Probe wiring,%s\n", if (r.fourWire) "4-wire (Kelvin)" else "2-wire")
         f("# Lead tare (ohm),%.6f\n", r.tareOhm)
 

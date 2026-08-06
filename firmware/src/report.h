@@ -66,7 +66,13 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     fpf(f, "# Sweep start current (A),%.3f\n", r.startCurrent);
     fpf(f, "# Sweep peak current (A),%.3f\n", r.maxTestCurrent);
     fpf(f, "# Sweep duration (s),%lu\n", (unsigned long)r.sweepSeconds);
-    fpf(f, "# Sweep shape,continuous triangular ramp (up then down)\n");
+    fpf(f, "# Sweep shape,eased triangular ramp (up then down)\n");
+    if (r.stepCurrentA > 0) {
+      fpf(f, "# Current step (mA),%.0f\n", r.stepCurrentA * 1000.0f);
+      fpf(f, "# Dwell per level (ms),%lu\n", (unsigned long)r.dwellMs);
+    } else {
+      fpf(f, "# Current step,continuous\n");
+    }
     fpf(f, "# Probe wiring,%s\n", r.fourWire ? "4-wire (Kelvin)" : "2-wire");
     fpf(f, "# Lead tare (ohm),%.6f\n", r.tareOhm);
     // The fit runs on every raw sample; these rows are those samples averaged
