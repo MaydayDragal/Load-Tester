@@ -42,14 +42,26 @@ and runs its own resistance-sweep and battery-capacity test engines.
 There is deliberately **no on-device simulator**: simulation was done with an
 Android **EL15 Load Simulator** app impersonating the load — including a full
 battery discharge curve — over a *real* BLE link, so the firmware always
-exercised its actual radio/transport path, never an in-process fake. That app
-(and the Android control app it shipped beside) was **removed from the repo on
-2026-08-03**; both live in git history, last present at commit `1cd5607`.
-Check the simulator out from there for hardware-free bench testing.
+exercised its actual radio/transport path, never an in-process fake. That app was
+**removed from the repo on 2026-08-03** and lives in git history, last present at
+commit `1cd5607`. Check it out from there for hardware-free bench testing.
 
-**Not ported from the (since-removed) Android app:** the runtime/step/OCP bench tests,
-on-device history browsing, PDF export, alarms, and the calibration sweep. The
-engine + screen architecture is set up so these drop in as new engines and tabs.
+**Not in this firmware:** the runtime/step/OCP bench tests, on-device history
+browsing, PDF export, and the calibration sweep — all of which the Android
+control app once had. The engine + screen architecture is set up so these drop in
+as new engines and tabs.
+
+**The Android control app is back.** Removed alongside the simulator on
+2026-08-03, restored on 2026-08-06 as [`../app/`](../app/): its command-checksum
+defect is fixed and this firmware's engines (continuous R-test sweep, capacity
+test, battery model, probe wiring, link guard, report format) are ported to
+Kotlin. It is an **alternative** to this board, not a companion — the phone
+becomes the BLE central and the board is not involved. Unlike this firmware it
+has **not** been run against a real EL15. When changing a shared behaviour, the
+Kotlin ports are deliberately close enough to their headers to diff:
+`BatteryModel.kt` ↔ `battery_model.h`, `ResistanceTest.kt` ↔ `resistance_test.h`,
+`CapacityTest.kt` ↔ `capacity_test.h`, `LinkGuard.kt` ↔ `link_guard.h`,
+`SampleLog.kt` ↔ `sample_log.h`, `Report.kt` ↔ `report.h`.
 
 ---
 
