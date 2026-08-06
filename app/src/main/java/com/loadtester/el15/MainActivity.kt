@@ -608,7 +608,7 @@ class MainActivity : BaseActivity(), DeviceCore.Ui {
                 warn.toString()
     }
 
-    private fun startBatteryFlow() = with(binding.monitor) {
+    private fun startBatteryFlow(): Unit = with(binding.monitor) {
         val a = this@MainActivity
         val chem = BatteryModel.CHEMS[chemIndex]
         val n = cellsInput.text.toString().trim().toIntOrNull() ?: 0
