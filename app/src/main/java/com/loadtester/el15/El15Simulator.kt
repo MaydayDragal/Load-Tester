@@ -1,0 +1,276 @@
+package com.loadtester.el15
+
+import android.os.Handler
+import android.os.Looper
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
+
+/**
+ * A fake EL15 "demo device" for use without hardware.
+ *
+ * Models a virtual circuit under test — an ideal source of [emf] volts behind a
+ * series resistance [seriesR] ohms — and behaves like a real load: it honours
+ * mode/setpoint/load commands and pushes [El15Status] updates at the poll rate,
+ * so the whole app (live readouts, manual controls, and the circuit-resistance
+ * test) can be exercised end-to-end. A resistance test against it recovers
+ * ~[seriesR] Ω and ~[emf] V.
+ *
+ * Readings carry a little pseudo-random noise (deterministic, seeded) so charts
+ * look realistic without depending on a real RNG.
+ */
+class El15Simulator(
+    private val onStatus: (El15Status) -> Unit,
+    /** Open-circuit source voltage of the virtual circuit; editable live. */
+    var emf: Float = 12.60f,
+    /** Series resistance of the virtual circuit; editable live. */
+    var seriesR: Float = 0.35f,
+) : El15Controller {
+
+    private val main = Handler(Looper.getMainLooper())
+
+    private var mode: Int = El15Protocol.MODE_CC
+    private var setpoint: Float = 0f
+    private var loadOn: Boolean = false
+    private var lockOn: Boolean = false
+    private var runtimeSec: Int = 0
+    private var ticks: Int = 0
+    private var runMsAcc: Long = 0
+
+    /** Series resistance floored at 1 mOhm so the circuit math can never divide by zero. */
+    private val rEff: Float get() = max(seriesR, 0.001f)
+    private var rngState: Int = 0x2545F491
+
+    // Accumulators for CAP mode.
+    private var energyWh: Float = 0f
+    private var capacityAh: Float = 0f
+
+    private var poll: Runnable? = null
+
+    /** Status emit interval in ms; configurable from Settings. */
+    var pollIntervalMs: Long = 500L
+
+    fun start() {
+        stop()
+        runtimeSec = 0; ticks = 0; runMsAcc = 0; energyWh = 0f; capacityAh = 0f
+        val r = object : Runnable {
+            override fun run() {
+                tick()
+                main.postDelayed(this, pollIntervalMs)
+            }
+        }
+        poll = r
+        main.post(r)
+    }
+
+    fun stop() {
+        poll?.let { main.removeCallbacks(it) }
+        poll = null
+    }
+
+    // ---- El15Controller ---------------------------------------------------
+    override fun setMode(mode: Int) {
+        this.mode = mode
+        // Reset accumulators when entering CAP/leaving, mirroring device behaviour.
+        energyWh = 0f; capacityAh = 0f; runtimeSec = 0; runMsAcc = 0
+    }
+
+    override fun setSetpoint(value: Float) { setpoint = max(value, 0f) }
+
+    override fun setLoad(on: Boolean) {
+        loadOn = on
+        if (!on) { runtimeSec = 0; runMsAcc = 0 }
+    }
+
+    override fun setLock() { lockOn = !lockOn }
+
+    // ---- Simulation core --------------------------------------------------
+    private fun tick() {
+        ticks++
+        val (voltage, current, warn) = solveClamped()
+        if (loadOn && current > 0.001f) {
+            runMsAcc += pollIntervalMs
+            runtimeSec = (runMsAcc / 1000L).toInt()
+            val dtHours = pollIntervalMs / 3_600_000f
+            energyWh += voltage * current * dtHours
+            capacityAh += current * dtHours
+        }
+        // For normal operation, encode a real 28-byte packet and decode it
+        // through the production parser — the demo then exercises the exact same
+        // path as hardware, and the packet inspector shows a genuine frame.
+        // Protection states are delivered directly (not encoded).
+        val status = if (warn.isEmpty()) {
+            El15Protocol.parseStatus(encodePacket(voltage, current))
+        } else {
+            buildStatus(voltage, current, warn)
+        }
+        onStatus(status)
+    }
+
+    private fun fanFor(current: Float): Int = when {
+        current > 8f -> El15Protocol.FAN_SPEED_MAX
+        current > 4f -> 3
+        current > 1f -> 1
+        else -> 0
+    }
+
+    /** Encode the current state into a 28-byte EL15 status frame (inverse of parseStatus). */
+    private fun encodePacket(voltage: Float, current: Float): ByteArray {
+        val pkt = ByteArray(28)
+        pkt[0] = 0xDF.toByte(); pkt[1] = 0x07; pkt[2] = 0x03; pkt[3] = 0x08
+        val fan = fanFor(current)
+        pkt[5] = ((mode and 0x1F) or ((fan and 0x03) shl 6)).toByte()
+        pkt[6] = (((if (loadOn) 0x02 else 0)) or (if (lockOn) 0x04 else 0) or ((fan shr 2) and 0x01)).toByte()
+        putF32(pkt, 7, voltage)
+        putF32(pkt, 11, current)
+        when (mode) {
+            El15Protocol.MODE_CAP -> {
+                putI32(pkt, 15, runtimeSec)
+                putF32(pkt, 19, energyWh * 1000f)
+                putF32(pkt, 23, capacityAh * 1000f)
+            }
+            El15Protocol.MODE_DCR -> {
+                putF32(pkt, 15, current)          // I1
+                putF32(pkt, 19, current * 0.5f)   // I2
+                putF32(pkt, 23, rEff * 1000f)  // mΩ
+            }
+            else -> {
+                putI32(pkt, 15, runtimeSec)
+                putF32(pkt, 19, 24.5f + current * 0.9f) // temperature
+                putF32(pkt, 23, setpoint)
+            }
+        }
+        var sum = 0
+        for (k in 0..26) sum += pkt[k].toInt() and 0xFF
+        pkt[27] = ((-sum) and 0xFF).toByte()
+        return pkt
+    }
+
+    private fun putF32(a: ByteArray, off: Int, v: Float) {
+        val bits = java.lang.Float.floatToIntBits(v)
+        a[off] = bits.toByte()
+        a[off + 1] = (bits ushr 8).toByte()
+        a[off + 2] = (bits ushr 16).toByte()
+        a[off + 3] = (bits ushr 24).toByte()
+    }
+
+    private fun putI32(a: ByteArray, off: Int, v: Int) {
+        a[off] = v.toByte()
+        a[off + 1] = (v ushr 8).toByte()
+        a[off + 2] = (v ushr 16).toByte()
+        a[off + 3] = (v ushr 24).toByte()
+    }
+
+    /**
+     * Returns (terminalVoltage, current, warning) for the active mode, after
+     * enforcing the EL15's hardware limits (12 A max, 150 W over-power). A well-
+     * behaved auto test never reaches these; a manual overload trips protection,
+     * just like the real unit.
+     */
+    private fun solveClamped(): Triple<Float, Float, String> {
+        val (vRaw, iRaw) = solve()
+        var i = min(iRaw, El15Protocol.MAX_CURRENT_A)
+        var v = if (loadOn) max(emf - i * rEff, 0f) else vRaw
+        var warn = ""
+        // Over-power protection (with a small tolerance, like real OPP).
+        if (loadOn && v * i > El15Protocol.MAX_POWER_W * 1.02f) {
+            val disc = emf * emf - 4 * rEff * El15Protocol.MAX_POWER_W
+            i = if (disc > 0f) (emf - sqrt(disc)) / (2 * rEff)
+                else El15Protocol.MAX_POWER_W / max(v, 0.1f)
+            v = max(emf - i * rEff, 0f)
+            warn = "OPP"
+        } else if (loadOn && iRaw > El15Protocol.MAX_CURRENT_A * 1.001f) {
+            warn = "OCP"
+        }
+        return Triple(v.withNoise(0.0015f), i.withNoise(0.0015f), warn)
+    }
+
+    /** Ideal (unclamped) terminal voltage and current for the active mode. */
+    private fun solve(): Pair<Float, Float> {
+        if (!loadOn) return emf to 0f
+        // Physical ceiling: terminal voltage cannot fall below ~0.3 V.
+        val iCeil = (emf - 0.3f) / rEff
+        val i = when (mode) {
+            El15Protocol.MODE_CC, El15Protocol.MODE_CAP, El15Protocol.MODE_DCR ->
+                min(setpoint, iCeil)
+            El15Protocol.MODE_CV -> {
+                val vSet = min(setpoint, emf)
+                max((emf - vSet) / rEff, 0f)
+            }
+            El15Protocol.MODE_CR -> {
+                val rLoad = max(setpoint, 0.01f)
+                emf / (rEff + rLoad)
+            }
+            El15Protocol.MODE_CP -> {
+                // Solve V*I = P with V = emf - I*R  ->  R*I^2 - emf*I + P = 0
+                val p = setpoint
+                val disc = emf * emf - 4 * rEff * p
+                if (disc <= 0f) iCeil else min((emf - sqrt(disc)) / (2 * rEff), iCeil)
+            }
+            else -> min(setpoint, iCeil)
+        }
+        val current = max(i, 0f)
+        val voltage = max(emf - current * rEff, 0f)
+        return voltage to current
+    }
+
+    private fun buildStatus(voltage: Float, current: Float, warn: String): El15Status {
+        val s = El15Status()
+        s.valid = true
+        s.crcPass = true
+        s.warning = warn
+        s.mode = mode
+        s.modeName = El15Protocol.MODE_NAMES[mode] ?: "CC"
+        s.voltage = voltage
+        s.current = current
+        s.power = voltage * current
+        s.loadOn = loadOn
+        s.lockOn = lockOn
+        s.runtime = runtimeSec
+        s.temperature = 24.5f + current * 0.9f // warms with load
+        s.fanSpeed = when {
+            current > 8f -> El15Protocol.FAN_SPEED_MAX
+            current > 4f -> 3
+            current > 1f -> 1
+            else -> 0
+        }
+        s.ready = loadOn && warn.isEmpty()
+
+        val info = El15Protocol.MODE_SETPOINT_INFO[mode]
+        if (info != null) {
+            s.setpointUnit = info.unit
+            s.setpointDecimals = info.decimals
+            s.setpointLabel = info.label
+        }
+        when (mode) {
+            El15Protocol.MODE_CAP -> {
+                s.energyWh = energyWh
+                s.capacityAh = capacityAh
+                s.setpointInPacket = false
+            }
+            El15Protocol.MODE_DCR -> {
+                s.dcrMilliOhm = rEff * 1000f
+                s.dcrI1 = current
+                s.dcrI2 = current * 0.5f
+                s.current = 0f
+                s.power = 0f
+                s.setpointInPacket = false
+            }
+            else -> {
+                s.setpoint = setpoint
+                s.setpointInPacket = true
+            }
+        }
+        return s
+    }
+
+    // Deterministic xorshift noise in ±[frac] of the value.
+    private fun Float.withNoise(frac: Float): Float {
+        rngState = rngState xor (rngState shl 13)
+        rngState = rngState xor (rngState ushr 17)
+        rngState = rngState xor (rngState shl 5)
+        val unit = (abs(rngState % 1000) / 1000f) * 2f - 1f // -1..1
+        return this * (1f + unit * frac)
+    }
+}

@@ -1,0 +1,185 @@
+<resources>
+    <string name="app_name">EL15 Load Control</string>
+    <string name="app_name_caps">EL15 LOAD CONTROL</string>
+    <string name="app_kicker">ALIENTEK · Electronic Load</string>
+    <string name="no_device">No device</string>
+    <string name="settings">Settings</string>
+    <string name="about">About</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="waveform">Live waveform</string>
+    <string name="cd_wave_pause">Pause or resume the waveform</string>
+    <string name="cd_wave_record">Record waveform samples</string>
+    <string name="cd_wave_export">Export waveform as CSV</string>
+    <string name="waveform_legend">● Voltage   ● Current</string>
+    <string name="packet_inspector">Packet inspector</string>
+    <string name="rt_fuse_helper" formatted="false">Sweep peaks at 80% of this, capped to the EL15\'s 12 A / 150 W.</string>
+    <string name="scan_connect">Scan &amp; Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="cancel">Cancel</string>
+    <string name="load_on">Turn Load ON</string>
+    <string name="load_off">Turn Load OFF</string>
+    <string name="lock">Lock Keypad</string>
+    <string name="locked">Keypad Locked</string>
+    <string name="set">Set</string>
+    <string name="setpoint">Setpoint</string>
+    <string name="about_body">EL15 Load Control — an Android client for the ALIENTEK EL15 electronic load over Bluetooth Low Energy.\n\nVersion %1$s\n\nBLE protocol reverse-engineered from the DM40GUI desktop project (github.com/maj113/DM40GUI). Includes live monitoring, a waveform recorder with CSV export, and a fuse-aware circuit-resistance test with a detailed, exportable report.\n\nThis is an independent client and is not affiliated with ALIENTEK.</string>
+    <string name="voltage">Voltage</string>
+    <string name="current">Current</string>
+    <string name="power">Power</string>
+    <string name="mode">Mode</string>
+    <string name="protection">⚠ PROTECTION: %1$s</string>
+
+    <!-- Circuit resistance test -->
+    <string name="rt_hint">Fuse rating (A)</string>
+    <string name="rt_start">Start Test</string>
+    <string name="rt_stop">Stop</string>
+    <string name="rt_explain" formatted="false">Loads the circuit in steps up to 80% of the fuse rating, then computes resistance from the V–I slope.</string>
+    <string name="rt_confirm_title">Start resistance test?</string>
+    <string name="rt_results_title">Resistance Test Results</string>
+    <string name="rt_circuit_resistance">Circuit Resistance</string>
+    <string name="rt_share">Share</string>
+    <string name="rt_report_hint">Choose what appears in the printed / shared report.</string>
+    <string name="rt_details">Test details</string>
+    <string name="rt_save_device">Save to phone</string>
+    <string name="rt_saved_to">Saved to %1$s</string>
+    <string name="wave_export_title">Export waveform (%1$d samples)</string>
+
+    <!-- Test archive / history -->
+    <string name="history_empty">No saved tests yet.\nEvery completed resistance test is archived here automatically.</string>
+    <string name="history_delete">Delete test</string>
+    <string name="history_delete_msg">Delete the archived test (%1$s)? This cannot be undone.</string>
+
+    <!-- Chart customization -->
+    <string name="chart_title">Graphs</string>
+    <string name="chart_view_vi">V–I fit</string>
+    <string name="chart_view_trend">Trend</string>
+    <string name="chart_view_abs">Absolute</string>
+    <string name="chart_view_ri">R vs I</string>
+    <string name="chart_view_pi">P vs I</string>
+    <string name="chart_style_grid">Grid</string>
+    <string name="chart_style_markers">Markers</string>
+    <string name="chart_style_fill">Fill</string>
+    <string name="chart_style_thick">Thick lines</string>
+    <string name="rt_options">Sweep options</string>
+
+    <!-- Demo / simulator device -->
+    <string name="demo_device">🧪 EL15 Demo (Simulator)\nTap to set up a virtual circuit</string>
+    <string name="demo_connected_fmt">Demo — %1$.1f V, %2$.3f Ω · tap to edit circuit</string>
+    <string name="demo_cfg_title">Demo circuit</string>
+    <string name="demo_cfg_explain">Set the virtual circuit the demo load sees. A resistance test will recover these values. Try a higher voltage (e.g. 48 V) to see the sweep power-limit to the EL15\'s 150 W.</string>
+    <string name="demo_cfg_connect">Connect</string>
+    <string name="demo_cfg_apply">Apply</string>
+    <string name="demo_source">Source voltage</string>
+    <string name="demo_resistance">Series resistance</string>
+
+    <!-- Quick reconnect -->
+    <string name="reconnect_row">↻ Reconnect: %1$s\n%2$s</string>
+
+    <!-- Bench tests (battery / dynamics) -->
+
+    <!-- Session results -->
+    <string name="session_results_title">Bench Test Results</string>
+    <string name="session_health">Battery health</string>
+    <string name="session_chart_hint">Pinch to zoom · drag to pan · tap to inspect a sample</string>
+    <string name="session_reset_zoom">Reset</string>
+    <string name="record_tag_hint">Tag (e.g. “Pack A”, “cell 3” — searchable in History)</string>
+    <string name="save_pdf">Report (PDF)</string>
+
+    <!-- Widget / tile -->
+    <string name="widget_description">Live voltage, current and power, with an emergency Load-OFF button.</string>
+    <string name="widget_tap_to_open">Tap to open</string>
+    <string name="widget_load_off">LOAD OFF</string>
+    <string name="tile_load_off">Load OFF</string>
+
+    <!-- History additions -->
+    <string name="history_search_hint">Search notes, tags, devices…</string>
+    <string name="history_tab_sweeps">R-Tests</string>
+    <string name="history_tab_sessions">Bench</string>
+    <string name="history_compare">Compare</string>
+    <string name="history_trends">Trends</string>
+    <string name="history_export_all">Export all</string>
+    <string name="history_compare_hint">Select exactly two archived tests of the same kind (long-press to select), then tap Compare.</string>
+    <string name="history_delete_session">Delete session</string>
+    <string name="history_delete_session_msg">Delete the archived %1$s? This cannot be undone.</string>
+    <string name="history_edit_tag">Edit tag</string>
+    <string name="trends_empty">Not enough data for a trend yet — archive at least two comparable tests.</string>
+    <string name="compare_title">Compare</string>
+
+    <!-- Emergency stop -->
+    <string name="estop">Emergency stop</string>
+    <string name="estop_do">Force load OFF</string>
+    <string name="estop_done">Emergency stop — load forced OFF</string>
+    <string name="estop_idle">Nothing is drawing current right now. Force a LOAD OFF anyway?</string>
+
+    <!-- Resistance sweep -->
+    <string name="rt_confirm_msg">The sweep ramps current up to about %1$.2f A and back down over %3$d s, limited by %2$s.
+
+Make sure the circuit and probes can take it, then keep clear while it runs.</string>
+    <string name="rt_sweep">Sweep (s)</string>
+    <string name="rt_sweep_info">How long the current ramp takes, start to finish. The ramp is a symmetric triangle — up to the peak over the first half, back down over the second — and every status packet that arrives on the way is fitted.
+
+A longer sweep collects more points and tightens the ± uncertainty on the result. 30 s is a good default; 5–900 s is allowed.</string>
+    <string name="rt_start_a">Start (A)</string>
+    <string name="rt_start_a_info">Where the ramp begins. 0 means "as low as the load will hold" — below about 50 mA the EL15 reports the load off, so the ramp floors there.
+
+Raise it only if the circuit misbehaves at low current; a wider current span gives the fit more leverage and a tighter result.</string>
+    <string name="rt_peak_a">Peak (A)</string>
+    <string name="rt_peak_a_info">Where the ramp turns around. 0 means "use the whole safe headroom the fuse rating allows".
+
+Whatever you enter is still clamped to the fuse limit, the EL15's 12 A / 150 W ratings, and the power available at the measured voltage — so asking for too much gives you a safe sweep, not an error.</string>
+    <string name="rt_tare">Measure lead resistance (tare)</string>
+    <string name="rt_tare_confirm">Short the probes together — clip them to each other, not to a circuit — then run this sweep.
+
+It measures the resistance of your leads and contacts and stores it as the tare. Every later 2-wire reading has that drop added back, so measurements belong to the part rather than to your test leads.
+
+At the milliohm scale this correction is often larger than what you are trying to measure.</string>
+    <string name="rt_graph">Voltage vs current</string>
+    <string name="rt_report">Report</string>
+    <string name="rt_reliable">✓ Reliable — the fit's uncertainty is within tolerance</string>
+    <string name="rt_unreliable">⚠ Low confidence — widen the current span, lengthen the sweep, or raise the sample rate</string>
+    <string name="rt_save_failed">Save failed</string>
+    <string name="cd_sweep_info">About the sweep duration</string>
+    <string name="cd_start_a_info">About the start current</string>
+    <string name="cd_peak_a_info">About the peak current</string>
+
+    <!-- Probe wiring -->
+    <string name="probe_4wire">4-wire (Kelvin): leads carry no sense current, so no correction is applied.</string>
+    <string name="probe_4wire_short">4-wire (Kelvin)</string>
+    <string name="probe_2wire_tared">2-wire: lead tare %1$s will be subtracted from the result.</string>
+    <string name="probe_2wire_untared">2-wire, no lead tare — the result will include your leads. Run a tare first.</string>
+
+    <!-- Battery capacity test -->
+    <string name="batt_explain">Discharges a battery at a constant current and integrates Ah and Wh until the cutoff voltage, so you measure what the pack actually holds.</string>
+    <string name="batt_chem">Chemistry</string>
+    <string name="batt_chem_detail">%1$s · %2$.2f V nominal, %3$.2f V full, %4$.2f V cutoff per cell · up to %5$dS</string>
+    <string name="batt_chem_custom_detail">No voltage curve — set the cutoff yourself. Time remaining falls back to the rated capacity, and no charge state is shown.</string>
+    <string name="batt_cells">Cells (series)</string>
+    <string name="batt_rated">Rated</string>
+    <string name="batt_current">Current</string>
+    <string name="batt_cutoff">Cutoff</string>
+    <string name="batt_enter_hint">Enter a rated capacity and a discharge current for an estimate.</string>
+    <string name="batt_need_rated">Enter the pack's rated capacity first — the C-rate is a multiple of it.</string>
+    <string name="batt_start">Start discharge</string>
+    <string name="batt_stop">Stop discharge</string>
+    <string name="batt_stop_confirm">Stop now and report what has been measured so far? The load is switched off either way.</string>
+    <string name="batt_stopped_manual">Stopped manually</string>
+    <string name="batt_pause">Pause</string>
+    <string name="batt_resume">Resume</string>
+    <string name="batt_paused">Paused — load off, measurement kept</string>
+    <string name="batt_paused_manual">Paused manually</string>
+    <string name="batt_resumed">Resumed</string>
+    <string name="batt_priming">Priming…</string>
+    <string name="batt_confirm_title">Start the discharge?</string>
+    <string name="batt_confirm_msg">This draws %1$.3f A from the pack until it falls to %2$.2f V.%3$s
+
+Set the EL15's own hardware UVP as a backstop first, keep the phone charged for a long run, and stay clear of the setup while it runs.</string>
+    <string name="batt_results_title">Capacity test result</string>
+    <string name="batt_capacity">Measured capacity</string>
+    <string name="batt_curve">Discharge curve</string>
+
+    <!-- Link guard -->
+    <string name="guard_failed_title">Cannot reach the load</string>
+    <string name="guard_retry">Retry</string>
+
+    <string name="result_gone">That result is no longer in memory.</string>
+</resources>
