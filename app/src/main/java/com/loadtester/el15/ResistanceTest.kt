@@ -164,6 +164,14 @@ class ResistanceTest(
         val stepCurrentA: Float,
         /** How long each level was held, ms; 0 when continuous. */
         val dwellMs: Long,
+        /** Samples each level had to collect before the ramp moved on. */
+        val samplesPerLevel: Int,
+        /** Averaged datapoints recorded — one per level visited. */
+        val levelsRecorded: Int,
+        /** Levels that moved on with fewer samples than asked for. */
+        val levelsShort: Int,
+        /** Wall-clock duration, which the sample pacing can stretch. */
+        val actualDurationS: Long,
         /** Status packets actually used in the fit. */
         val rawSamples: Int,
         val reliable: Boolean,
@@ -276,6 +284,13 @@ class ResistanceTest(
      */
     var stepCurrentA: Float = DEFAULT_STEP_A
 
+    /**
+     * How many samples each level must collect before the ramp is allowed to move
+     * on. The level's datapoint is the mean of ALL samples it caught, so a slower
+     * ramp simply averages more; this is the floor, not the quota.
+     */
+    var minSamplesPerLevel: Int = DEFAULT_SAMPLES_PER_LEVEL
+
     val running: Boolean get() = state != State.IDLE
 
     private enum class State { IDLE, PRIMING, ARMING, SWEEPING }
@@ -303,6 +318,21 @@ class ResistanceTest(
     private var lastSetMs = 0L
     private var lastTickMs = 0L
     private var rawTarget = 0f
+
+    /** Ramp progress, which advances only while the level is being served. */
+    private var rampMs = 0L
+    private var levelStartMs = 0L
+    private var levelsRecorded = 0
+    private var levelsShort = 0
+
+    // The level accumulator: one averaged datapoint comes out of these.
+    private var levelSumV = 0f
+    private var levelSumI = 0f
+    private var levelSumT = 0f
+    private var levelN = 0
+    private var levelFanMax = 0
+    private var levelMinI = 0f
+    private var levelMaxI = 0f
     private var lastOnPushMs = 0L
     private var primeStartMs = 0L
     private var lastClearPushMs = 0L
@@ -414,17 +444,9 @@ class ResistanceTest(
 
         if (state != State.SWEEPING) return
 
-        // Offer every packet to the datapoint log. Logged BEFORE the load-on and
-        // settle gates below on purpose: dropout and transient samples are
-        // excluded from the FIT, but the CSV should show what actually happened,
-        // not only what was fitted. The commanded target rides along so
-        // regulation lag is visible in the file (the fit itself never uses it).
-        if (logging) {
-            SampleLog.rtest.add(
-                now() - tStart, status.voltage, status.current,
-                status.temperature, currentTarget, status.fanSpeed.toFloat(),
-            )
-        }
+        // Note the datapoint log is written per LEVEL, not per packet — see
+        // flushLevel(). The gates below decide which packets feed a level's
+        // average; the level's mean is what gets recorded.
 
         // The load must actually be sinking for a sample to be part of the sweep.
         // A packet reporting the load off is either the gap before LOAD_ON lands
@@ -529,7 +551,29 @@ class ResistanceTest(
         lastFitI = status.current
         haveLastFit = true
 
-        lsq.add(status.current, status.voltage)
+        // Accumulate into the CURRENT LEVEL instead of fitting straight away.
+        //
+        // Each level contributes exactly ONE point to the regression: the mean of
+        // every sample taken while the load sat there. Two things come of that.
+        // Averaging n samples divides their noise by sqrt(n) — four samples halve
+        // it. And the regression then sees one independent observation per level
+        // rather than a crowd of correlated ones taken microseconds apart, which
+        // is what makes the reported uncertainty an honest number instead of an
+        // optimistic one.
+        levelSumV += status.voltage
+        levelSumI += status.current
+        levelSumT += status.temperature
+        if (levelN == 0) {
+            levelMinI = status.current; levelMaxI = status.current
+        } else {
+            levelMinI = min(levelMinI, status.current)
+            levelMaxI = max(levelMaxI, status.current)
+        }
+        levelN++
+        levelFanMax = max(levelFanMax, status.fanSpeed)
+
+        // Run-wide statistics still track every sample the load delivered, so
+        // they report what actually happened rather than what was averaged.
         // Seed both bounds from the first sample rather than from zero — a
         // below-zero ambient would otherwise never move tempMax off 0.
         if (!haveTemp) {
@@ -540,8 +584,6 @@ class ResistanceTest(
         }
         fanMax = max(fanMax, status.fanSpeed)
         peakW = max(peakW, status.voltage * status.current)
-
-        binSample(status)
 
         val f = lsq.fit()
         callback.onTestProgress(
@@ -567,34 +609,47 @@ class ResistanceTest(
 
     private fun tick() {
         if (state == State.SWEEPING) {
-            val el = now() - tStart
-            if (el >= sweepMsEff) { complete(); return }
-            // Re-evaluate the ramp on a fixed cadence, slower than the poll.
-            val step = setpointStepMs()
-            if (lastTickMs == 0L || now() - lastTickMs >= step) {
-                val since = if (lastTickMs != 0L) now() - lastTickMs else step
-                lastTickMs = now()
+            val nowMs = now()
+            val since = if (lastTickMs != 0L) nowMs - lastTickMs else 0L
+            lastTickMs = nowMs
 
-                // Slew-limit the CONTINUOUS ramp, before quantising, so the
-                // levels stay exact multiples of the step. A dropped write then
-                // becomes a short catch-up rather than a jump at the load.
-                var raw = targetAt(el)
-                val limit = slewLimit(since)
-                if (rawTarget > 0f && limit > 0f) {
-                    raw = rawTarget + (raw - rawTarget).coerceIn(-limit, limit)
-                }
-                rawTarget = raw
+            // The ramp advances only once the level has collected the samples it
+            // owes, so the sweep PACES ITSELF to the telemetry instead of running
+            // ahead of it. The requested duration therefore sets the pace rather
+            // than a deadline: a link too slow to deliver the samples stretches
+            // the sweep rather than silently thinning it.
+            //
+            // A level that never fills — a stalled link, a load that stopped
+            // answering — is released by the timeout so the sweep cannot hang.
+            val stalled = levelStartMs != 0L && nowMs - levelStartMs > levelTimeoutMs()
+            if (levelN >= minSamplesPerLevel || stalled) rampMs += since
 
-                val want = clampToRatings(commandable(quantise(raw)))
-                // Only write when the level actually changes. Re-sending an
-                // unchanged setpoint would restart the blanking window on every
-                // tick and throw away the settled samples this mode exists to
-                // collect. A write the device drops self-heals at the next level.
-                if (want != currentTarget) {
-                    currentTarget = want
-                    lastSetMs = now()
-                    ble.setSetpoint(currentTarget)
-                }
+            if (rampMs >= sweepMsEff) { complete(); return }
+
+            // Slew-limit the CONTINUOUS ramp, before quantising, so the levels
+            // stay exact multiples of the step. A dropped write then becomes a
+            // short catch-up rather than a jump at the load.
+            var raw = targetAt(rampMs)
+            val limit = slewLimit(since)
+            if (rawTarget > 0f && limit > 0f) {
+                raw = rawTarget + (raw - rawTarget).coerceIn(-limit, limit)
+            }
+            rawTarget = raw
+
+            val want = clampToRatings(commandable(quantise(raw)))
+            // Only write when the level actually changes, and never faster than
+            // the setpoint cadence. Re-sending an unchanged setpoint would
+            // restart the blanking window on every tick and throw away the
+            // settled samples this mode exists to collect. A write the device
+            // drops self-heals at the next level.
+            if (want != currentTarget &&
+                (lastSetMs == 0L || nowMs - lastSetMs >= setpointStepMs())
+            ) {
+                flushLevel()          // record the level we are leaving
+                currentTarget = want
+                lastSetMs = nowMs
+                levelStartMs = nowMs
+                ble.setSetpoint(currentTarget)
             }
             return
         }
@@ -650,7 +705,7 @@ class ResistanceTest(
     }
 
     private fun elapsedS(): Float =
-        if (state == State.SWEEPING) (now() - tStart) / 1000f else 0f
+        if (state == State.SWEEPING) rampMs / 1000f else 0f
 
     /**
      * Symmetric eased triangle: start -> max over the first half, back to start
@@ -701,6 +756,54 @@ class ResistanceTest(
         lastSetMs = 0; lastTickMs = 0; currentTarget = 0f; rawTarget = 0f
         excludedTransient = 0; excludedDuplicate = 0; excludedOffTarget = 0
         lastFitV = 0f; lastFitI = 0f; haveLastFit = false
+        rampMs = 0; levelStartMs = 0; levelsRecorded = 0; levelsShort = 0
+        resetLevel()
+    }
+
+    private fun resetLevel() {
+        levelSumV = 0f; levelSumI = 0f; levelSumT = 0f
+        levelN = 0; levelFanMax = 0
+        levelMinI = 0f; levelMaxI = 0f
+    }
+
+    /**
+     * How long to wait for a level to collect its samples before giving up on it
+     * and letting the ramp move on. Generous against the poll rate — enough for
+     * several times the samples we need — so it only fires on a genuinely stalled
+     * link, never on ordinary jitter.
+     */
+    private fun levelTimeoutMs(): Long =
+        max(500L, pollIntervalMs * (minSamplesPerLevel * 3L + 4L))
+
+    /**
+     * Close the level the sweep is leaving: average its samples into a single
+     * datapoint, give that to the fit and the curve, and record it.
+     *
+     * A level that never reached [minSamplesPerLevel] is still used if it caught
+     * anything at all — a thin point is better than a hole in the sweep — but it
+     * is counted, because a run full of short levels means the poll rate could
+     * not keep up and the user should know that.
+     */
+    private fun flushLevel() {
+        if (levelN <= 0) return
+        val v = levelSumV / levelN
+        val i = levelSumI / levelN
+        val t = levelSumT / levelN
+        if (levelN < minSamplesPerLevel) levelsShort++
+        lsq.add(i, v)
+        binSample(i, v, t, levelFanMax)
+        levelsRecorded++
+        if (logging) {
+            // One row per level, not per packet: the datapoint IS the average.
+            // The sample count and the spread of current across those samples ride
+            // along, so a level that caught a glitch is visible as a wide spread
+            // rather than hiding inside its own mean.
+            SampleLog.rtest.add(
+                now() - tStart, v, i, t, currentTarget,
+                levelN.toFloat(), levelMaxI - levelMinI,
+            )
+        }
+        resetLevel()
     }
 
     /**
@@ -708,14 +811,14 @@ class ResistanceTest(
      * visits each bin once going up and once coming down, the two visits average
      * together in the bin, which is where the drift cancellation actually lands.
      */
-    private fun binSample(s: El15Status) {
+    private fun binSample(current: Float, voltage: Float, temperature: Float, fan: Int) {
         val span = maxCurrentEff - startCurrentEff
         if (span <= 1e-6f) return
-        val k = (((s.current - startCurrentEff) / span) * NBINS).toInt().coerceIn(0, NBINS - 1)
+        val k = (((current - startCurrentEff) / span) * NBINS).toInt().coerceIn(0, NBINS - 1)
         val b = bins[k]
-        b.sumI += s.current; b.sumV += s.voltage; b.sumT += s.temperature
+        b.sumI += current; b.sumV += voltage; b.sumT += temperature
         b.count++
-        b.fanMax = max(b.fanMax, s.fanSpeed)
+        b.fanMax = max(b.fanMax, fan)
     }
 
     /**
@@ -810,10 +913,13 @@ class ResistanceTest(
         lastSetMs = now()
         lastTickMs = 0   // 0 so the first tick commands immediately
         rawTarget = 0f
+        rampMs = 0
+        levelStartMs = now()
         lastOnPushMs = now()
     }
 
     private fun complete() {
+        flushLevel()   // the level in progress is a datapoint too
         val f = lsq.fit()
         finishSafely()
         state = State.IDLE
@@ -859,6 +965,10 @@ class ResistanceTest(
                 sweepSeconds = sweepMsEff / 1000,
                 stepCurrentA = stepCurrentA,
                 dwellMs = dwellMs(),
+                samplesPerLevel = minSamplesPerLevel,
+                levelsRecorded = levelsRecorded,
+                levelsShort = levelsShort,
+                actualDurationS = (now() - tStart) / 1000,
                 rawSamples = lsq.n.toInt(),
                 reliable = reliable,
                 minCurrent = lsq.minI,
@@ -1004,6 +1114,12 @@ class ResistanceTest(
          * 0 would give a continuously moving setpoint.
          */
         const val DEFAULT_STEP_A = 0.05f
+
+        /**
+         * Samples averaged into each level's datapoint. Four halves the noise on
+         * every point the fit sees.
+         */
+        const val DEFAULT_SAMPLES_PER_LEVEL = 4
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same

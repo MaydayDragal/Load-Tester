@@ -119,13 +119,15 @@ inline bool saveRTest(const ResistanceTest::Result &r, char *msg, size_t msgLen)
     // load's regulation lag; a dropout reads as current_a ~ 0 under a nonzero
     // target.
     uint32_t n = samplelog::rtest.count();
-    fpf(f, "\n# Datapoints (%lu samples, %lu ms resolution at the end of the sweep)\n",
-        (unsigned long)n, (unsigned long)samplelog::rtest.intervalMs());
-    fpf(f, "elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,fan\n");
+    fpf(f, "\n# Datapoints (%lu averaged levels)\n", (unsigned long)n);
+    fpf(f, "# One row per current level: the mean of the samples taken while the load sat there.\n");
+    fpf(f, "# samples is how many went into that mean; current_spread_a is the range across them,\n");
+    fpf(f, "# so a level that caught a glitch shows a wide spread instead of hiding it inside its mean.\n");
+    fpf(f, "elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,samples,current_spread_a\n");
     if (n > 0) {
       bool logOk = samplelog::rtest.replay([&f](const samplelog::Rec &s) {
-        fpf(f, "%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d\n",
-            s.tMs / 1000.0f, s.aux0, s.v, s.i, s.v * s.i, s.temp, (int)s.aux1);
+        fpf(f, "%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d,%.4f\n",
+            s.tMs / 1000.0f, s.aux0, s.v, s.i, s.v * s.i, s.temp, (int)s.aux1, s.aux2);
         return f.getWriteError() == 0;   // stop early if the card gave up
       });
       // replay() returning false means the flash log could not be read (or the

@@ -43,6 +43,8 @@ class SampleLog(
         val temp: Float,
         val aux0: Float,
         val aux1: Float,
+        /** rtest: spread of current across the level's samples | batt: unused. */
+        val aux2: Float = 0f,
     )
 
     private val records = ArrayList<Rec>()
@@ -81,10 +83,13 @@ class SampleLog(
      * rate-limit. [tMs] must be the run's elapsed milliseconds (for the capacity
      * test: active time, so the timeline stays monotonic across a pause).
      */
-    fun add(tMs: Long, v: Float, i: Float, temp: Float, aux0: Float, aux1: Float) {
+    fun add(
+        tMs: Long, v: Float, i: Float, temp: Float,
+        aux0: Float, aux1: Float, aux2: Float = 0f,
+    ) {
         if (!active) return
         if (records.isNotEmpty() && tMs < nextAtMs) return
-        records.add(Rec(tMs, v, i, temp, aux0, aux1))
+        records.add(Rec(tMs, v, i, temp, aux0, aux1, aux2))
         nextAtMs = tMs + intervalMsCur
         if (--tierLeft <= 0) nextTier()
     }

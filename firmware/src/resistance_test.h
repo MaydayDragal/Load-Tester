@@ -57,6 +57,10 @@ class ResistanceTest {
     uint32_t sweepSeconds = 0;     // commanded ramp duration
     float stepCurrentA = 0;        // commanded current step (0 = continuous)
     uint32_t dwellMs = 0;          // how long each level was held (0 = continuous)
+    int samplesPerLevel = 0;       // samples each level had to collect
+    int levelsRecorded = 0;        // averaged datapoints recorded, one per level
+    int levelsShort = 0;           // levels that moved on with fewer than asked
+    uint32_t actualDurationS = 0;  // wall clock, which the sample pacing stretches
     int rawSamples = 0;            // status packets actually used in the fit
     bool reliable = false;
     // Run statistics, taken over EVERY raw sample rather than the binned curve,
@@ -131,6 +135,10 @@ class ResistanceTest {
   // duration: a 4 A span over a 15 s sweep steps every ~95 ms at 50 mA, while the
   // same span over 60 s dwells ~380 ms per level.
   float stepCurrentA = 0.05f;
+  // How many samples each level must collect before the ramp is allowed to move
+  // on. The level's datapoint is the mean of ALL samples it caught, so a slower
+  // ramp simply averages more; this is the floor, not the quota.
+  int minSamplesPerLevel = 4;
 
   static const uint32_t MIN_SWEEP_S = 5;
   static const uint32_t MAX_SWEEP_S = 900;
@@ -334,30 +342,34 @@ class ResistanceTest {
     lastFitI_ = s.current;
     haveLastFit_ = true;
 
-    // Running least squares. Keeping the six sums rather than the samples means
-    // the fit is available at any instant and nothing grows during the sweep —
-    // the engine allocates nothing at all between start() and complete().
-    double i = s.current, v = s.voltage;
-    n_++;
-    sumI_ += i; sumV_ += v;
-    sumII_ += i * i; sumIV_ += i * v; sumVV_ += v * v;
-    if (n_ == 1) { minI_ = maxI_ = (float)i; minV_ = maxV_ = (float)v; }
+    // Accumulate into the CURRENT LEVEL instead of fitting straight away.
+    //
+    // Each level contributes exactly ONE point to the regression: the mean of
+    // every sample taken while the load sat there. Two things come of that.
+    // Averaging n samples divides their noise by sqrt(n) — four samples halve it.
+    // And the regression then sees one independent observation per level rather
+    // than a crowd of correlated ones taken microseconds apart, which is what
+    // makes the reported uncertainty an honest number instead of an optimistic
+    // one.
+    levelSumV_ += s.voltage;
+    levelSumI_ += s.current;
+    levelSumT_ += s.temperature;
+    if (levelN_ == 0) { levelMinI_ = levelMaxI_ = s.current; }
     else {
-      minI_ = min(minI_, (float)i); maxI_ = max(maxI_, (float)i);
-      minV_ = min(minV_, (float)v); maxV_ = max(maxV_, (float)v);
+      levelMinI_ = min(levelMinI_, s.current);
+      levelMaxI_ = max(levelMaxI_, s.current);
     }
+    levelN_++;
+    levelFanMax_ = max(levelFanMax_, s.fanSpeed);
+
+    // Run-wide statistics still track every sample the load delivered, so they
+    // report what actually happened rather than what was averaged.
     // Seed both bounds from the first sample rather than from zero — a
     // below-zero ambient would otherwise never move tempMax_ off 0.
     if (!haveTemp_) { tempMin_ = tempMax_ = s.temperature; haveTemp_ = true; }
     else { tempMin_ = min(tempMin_, s.temperature); tempMax_ = max(tempMax_, s.temperature); }
     fanMax_ = max(fanMax_, s.fanSpeed);
-    peakW_ = max(peakW_, (float)(v * i));
-
-    // Bin by measured current for the result curve and the CSV. Fixed array,
-    // so no allocation — and because the ramp visits each bin once going up and
-    // once coming down, the two visits average together in the bin, which is
-    // where the drift cancellation actually lands.
-    binSample(s);
+    peakW_ = max(peakW_, s.voltage * s.current);
 
     float r = 0;
     bool ok = fitSlope(r);
@@ -369,36 +381,45 @@ class ResistanceTest {
   // Pump the ramp + timers; call from loop().
   void tick() {
     if (state_ == SWEEPING) {
-      uint32_t el = millis() - tStart_;
-      if (el >= sweepMsEff_) { complete(); return; }
+      uint32_t nowMs = millis();
+      uint32_t since = lastTickMs_ ? nowMs - lastTickMs_ : 0;
+      lastTickMs_ = nowMs;
+
+      // The ramp advances only once the level has collected the samples it owes,
+      // so the sweep PACES ITSELF to the telemetry instead of running ahead of
+      // it. The requested duration therefore sets the pace rather than a
+      // deadline. A level that never fills is released by the timeout so the
+      // sweep cannot hang.
+      bool stalled = levelStartMs_ && (nowMs - levelStartMs_) > levelTimeoutMs();
+      if (levelN_ >= minSamplesPerLevel || stalled) rampMs_ += since;
+
+      if (rampMs_ >= sweepMsEff_) { complete(); return; }
       // Re-command the setpoint on a fixed cadence. It must stay SLOWER than the
       // poll interval: every control write defers the next poll (the device drops
       // commands that crowd each other), so updating faster than we poll would
       // starve telemetry entirely and the sweep would collect nothing.
-      uint32_t step = setpointStepMs();
-      if (lastTickMs_ == 0 || millis() - lastTickMs_ >= step) {
-        uint32_t since = lastTickMs_ ? millis() - lastTickMs_ : step;
-        lastTickMs_ = millis();
+      // Slew-limit the CONTINUOUS ramp, before quantising, so the levels stay
+      // exact multiples of the step. A dropped write then becomes a short
+      // catch-up rather than a jump at the load.
+      float raw = targetAt(rampMs_);
+      float limit = slewLimit(since);
+      if (rawTarget_ > 0 && limit > 0)
+        raw = rawTarget_ + constrain(raw - rawTarget_, -limit, limit);
+      rawTarget_ = raw;
 
-        // Slew-limit the CONTINUOUS ramp, before quantising, so the levels stay
-        // exact multiples of the step. A dropped write then becomes a short
-        // catch-up rather than a jump at the load.
-        float raw = targetAt(el);
-        float limit = slewLimit(since);
-        if (rawTarget_ > 0 && limit > 0)
-          raw = rawTarget_ + constrain(raw - rawTarget_, -limit, limit);
-        rawTarget_ = raw;
-
-        float want = clampToRatings(commandable(quantise(raw)));
-        // Only write when the level actually changes. Re-sending an unchanged
-        // setpoint would restart the blanking window on every tick and throw
-        // away the settled samples this mode exists to collect. A write the
-        // device drops self-heals at the next level.
-        if (want != currentTarget_) {
-          currentTarget_ = want;
-          lastSetMs_ = millis();
-          ble_->setSetpoint(currentTarget_);
-        }
+      float want = clampToRatings(commandable(quantise(raw)));
+      // Only write when the level actually changes, and never faster than the
+      // setpoint cadence. Re-sending an unchanged setpoint would restart the
+      // blanking window on every tick and throw away the settled samples this
+      // mode exists to collect. A write the device drops self-heals at the next
+      // level.
+      if (want != currentTarget_ &&
+          (lastSetMs_ == 0 || nowMs - lastSetMs_ >= setpointStepMs())) {
+        flushLevel();          // record the level we are leaving
+        currentTarget_ = want;
+        lastSetMs_ = nowMs;
+        levelStartMs_ = nowMs;
+        ble_->setSetpoint(currentTarget_);
       }
       return;
     }
@@ -469,7 +490,7 @@ class ResistanceTest {
     return (uint32_t)(stepCurrentA / (span / half));
   }
 
-  float elapsedS() const { return state_ == SWEEPING ? (millis() - tStart_) / 1000.0f : 0; }
+  float elapsedS() const { return state_ == SWEEPING ? rampMs_ / 1000.0f : 0; }
 
   // Ease the corners of the ramp.
   //
@@ -549,19 +570,70 @@ class ResistanceTest {
     fanMax_ = 0; peakW_ = 0;
     for (int k = 0; k < NBINS; k++) bins_[k] = Bin{};
     lastSetMs_ = 0; lastTickMs_ = 0; currentTarget_ = 0; rawTarget_ = 0;
+    rampMs_ = 0; levelStartMs_ = 0; levelsRecorded_ = 0; levelsShort_ = 0;
+    resetLevel();
     excludedTransient_ = 0; excludedDuplicate_ = 0; excludedOffTarget_ = 0;
     lastFitV_ = 0; lastFitI_ = 0; haveLastFit_ = false;
   }
 
-  void binSample(const el15::Status &s) {
+  void binSample(float current, float voltage, float temperature, int fan) {
     float span = maxCurrent_ - startCurrent_;
     if (span <= 1e-6f) return;
-    int k = (int)((s.current - startCurrent_) / span * NBINS);
+    int k = (int)((current - startCurrent_) / span * NBINS);
     k = constrain(k, 0, NBINS - 1);
     Bin &b = bins_[k];
-    b.sumI += s.current; b.sumV += s.voltage; b.sumT += s.temperature;
+    b.sumI += current; b.sumV += voltage; b.sumT += temperature;
     b.count++;
-    b.fanMax = max(b.fanMax, s.fanSpeed);
+    b.fanMax = max(b.fanMax, fan);
+  }
+
+  void resetLevel() {
+    levelSumV_ = levelSumI_ = levelSumT_ = 0;
+    levelN_ = 0; levelFanMax_ = 0;
+    levelMinI_ = levelMaxI_ = 0;
+  }
+
+  // How long to wait for a level to collect its samples before giving up on it
+  // and letting the ramp move on. Generous against the poll rate, so it only
+  // fires on a genuinely stalled link and never on ordinary jitter.
+  uint32_t levelTimeoutMs() const {
+    return max((uint32_t)500, pollIntervalMs * (uint32_t)(minSamplesPerLevel * 3 + 4));
+  }
+
+  // Close the level the sweep is leaving: average its samples into a single
+  // datapoint, give that to the fit and the curve, and record it.
+  //
+  // A level that never reached minSamplesPerLevel is still used if it caught
+  // anything at all — a thin point beats a hole in the sweep — but it is
+  // counted, because a run full of short levels means the poll rate could not
+  // keep up and the user should know.
+  void flushLevel() {
+    if (levelN_ <= 0) return;
+    float v = levelSumV_ / levelN_;
+    float i = levelSumI_ / levelN_;
+    float t = levelSumT_ / levelN_;
+    if (levelN_ < minSamplesPerLevel) levelsShort_++;
+
+    n_++;
+    sumI_ += i; sumV_ += v;
+    sumII_ += (double)i * i; sumIV_ += (double)i * v; sumVV_ += (double)v * v;
+    if (n_ == 1) { minI_ = maxI_ = i; minV_ = maxV_ = v; }
+    else {
+      minI_ = min(minI_, i); maxI_ = max(maxI_, i);
+      minV_ = min(minV_, v); maxV_ = max(maxV_, v);
+    }
+
+    binSample(i, v, t, levelFanMax_);
+    levelsRecorded_++;
+    if (logging_) {
+      // One row per level, not per packet: the datapoint IS the average. The
+      // sample count and the spread of current across those samples ride along,
+      // so a level that caught a glitch is visible as a wide spread rather than
+      // hiding inside its own mean.
+      samplelog::rtest.add(millis() - tStart_, v, i, t, currentTarget_,
+                           (float)levelN_, levelMaxI_ - levelMinI_);
+    }
+    resetLevel();
   }
 
   // Ordinary least squares on the running sums. False until the sweep has
@@ -670,10 +742,13 @@ class ResistanceTest {
     lastSetMs_ = millis();
     lastTickMs_ = 0;   // 0 so the first tick commands immediately
     rawTarget_ = 0;
+    rampMs_ = 0;
+    levelStartMs_ = millis();
     lastOnPushMs_ = millis();
   }
 
   void complete() {
+    flushLevel();   // the level in progress is a datapoint too
     float r = 0, intercept = 0, r2 = 0, stdErr = 0;
     bool ok = fitSlope(r, &intercept, &r2, &stdErr);
     finishSafely();
@@ -697,6 +772,10 @@ class ResistanceTest {
     res.sweepSeconds = sweepMsEff_ / 1000;
     res.stepCurrentA = stepCurrentA;
     res.dwellMs = dwellMs();
+    res.samplesPerLevel = minSamplesPerLevel;
+    res.levelsRecorded = levelsRecorded_;
+    res.levelsShort = levelsShort_;
+    res.actualDurationS = (millis() - tStart_) / 1000;
     res.rawSamples = n_;
     res.minCurrent = minI_;
     res.maxCurrentSeen = maxI_;
@@ -772,6 +851,12 @@ class ResistanceTest {
 
   uint32_t timerAt_ = 0, tStart_ = 0, lastSetMs_ = 0, lastTickMs_ = 0, lastOnPushMs_ = 0;
   float rawTarget_ = 0;
+  uint32_t rampMs_ = 0, levelStartMs_ = 0;
+  int levelsRecorded_ = 0, levelsShort_ = 0;
+  // The level accumulator: one averaged datapoint comes out of these.
+  float levelSumV_ = 0, levelSumI_ = 0, levelSumT_ = 0;
+  int levelN_ = 0, levelFanMax_ = 0;
+  float levelMinI_ = 0, levelMaxI_ = 0;
   uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0, armStartMs_ = 0;
   uint32_t sweepMsEff_ = 30000;
   int loadDropouts_ = 0;   // how often the load had to be re-asserted

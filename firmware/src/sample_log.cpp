@@ -78,7 +78,8 @@ void Log::flush() {
   batchN_ = 0;
 }
 
-void Log::add(uint32_t tMs, float v, float i, float temp, float aux0, float aux1) {
+void Log::add(uint32_t tMs, float v, float i, float temp, float aux0, float aux1,
+              float aux2) {
   if (!active_) return;
   // Tier schedule: store only when this sample is due. `>=` (not ==) because
   // the poll cadence never lands exactly on the interval boundary.
@@ -87,7 +88,7 @@ void Log::add(uint32_t tMs, float v, float i, float temp, float aux0, float aux1
   if (tierLeft_ == 0) nextTier();
   if (tierLeft_ == 0) return;
 
-  batch_[batchN_++] = Rec{tMs, v, i, temp, aux0, aux1};
+  batch_[batchN_++] = Rec{tMs, v, i, temp, aux0, aux1, aux2};
   count_++;
   tierLeft_--;
   nextAtMs_ = tMs + intervalMs_;

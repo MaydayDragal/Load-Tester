@@ -108,12 +108,18 @@ object Report {
         // current_a vs target_a shows the load's regulation lag; a dropout reads
         // as current_a ~ 0 under a nonzero target.
         val log = SampleLog.rtest
-        f("\n# Datapoints (%d samples, %d ms resolution at the end of the sweep)\n",
-            log.count, log.intervalMs)
-        f("elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,fan\n")
+        f("\n# Datapoints (%d averaged levels)\n", log.count)
+        f("# One row per current level: the mean of the samples taken while the ")
+        f("load sat there.\n")
+        f("# samples is how many went into that mean; current_spread_a is the ")
+        f("range across them,\n")
+        f("# so a level that caught a glitch shows a wide spread instead of ")
+        f("hiding it inside its mean.\n")
+        f("elapsed_s,target_a,voltage_v,current_a,power_w,temperature_c,samples,current_spread_a\n")
         log.replay { s ->
-            f("%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d\n",
-                s.tMs / 1000f, s.aux0, s.v, s.i, s.v * s.i, s.temp, s.aux1.toInt())
+            f("%.3f,%.3f,%.4f,%.4f,%.3f,%.1f,%d,%.4f\n",
+                s.tMs / 1000f, s.aux0, s.v, s.i, s.v * s.i, s.temp,
+                s.aux1.toInt(), s.aux2)
             true
         }
     }

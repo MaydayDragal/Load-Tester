@@ -124,8 +124,15 @@ object PdfReport {
                     "over ${r.sweepSeconds} s",
                 "Ramp shape" to "eased triangle, up then down",
                 "Current step" to
-                    if (r.stepCurrentA > 0f) "${fmt(r.stepCurrentA * 1000f, 0)} mA, dwell ${r.dwellMs} ms"
+                    if (r.stepCurrentA > 0f) "${fmt(r.stepCurrentA * 1000f, 0)} mA"
                     else "continuous",
+                "Samples per level" to
+                    if (r.stepCurrentA > 0f)
+                        "${r.samplesPerLevel} averaged" +
+                            (if (r.levelsShort > 0) ", ${r.levelsShort} short" else "")
+                    else "n/a",
+                "Levels recorded" to r.levelsRecorded.toString(),
+                "Duration" to "${r.actualDurationS} s actual, ${r.sweepSeconds} s requested",
                 "Current measured" to "${fmt(r.minCurrent, 4)} → ${fmt(r.maxCurrentSeen, 4)} A",
                 "Samples fitted" to "${r.rawSamples} in ${r.samples.size} bands",
                 "Excluded, step transient" to r.excludedTransient.toString(),
@@ -192,9 +199,10 @@ object PdfReport {
             }
             s.chart(
                 title = "Current through the sweep",
-                caption = "Commanded against measured. The gap between them is the load's " +
-                    "regulation lag, which the fit is immune to — voltage and current inside " +
-                    "one frame are simultaneous.",
+                caption = "One point per current level, each the mean of the samples taken " +
+                    "while the load sat there. The gap between commanded and measured is the " +
+                    "load's regulation lag, which the fit is immune to — voltage and current " +
+                    "inside one frame are simultaneous.",
                 xLabel = "Elapsed (s)", yLabel = "Current (A)",
                 series = listOf(
                     Series("Commanded", MUTED, target, Style.LINE),
