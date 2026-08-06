@@ -27,7 +27,7 @@ Parity with the firmware, adapted where a phone differs from the board.
 | **Adjust** | Mode chips CC · CV · CR · CP · CAP · DCR, unit-aware setpoint entry, LOAD ON/OFF, keypad lock |
 | **R-Test** | Fuse-aware **continuous triangular current sweep**. Every status packet is fitted by a running least-squares regression, so the result carries a real **± uncertainty**; reports series resistance, Voc, R², estimated short-circuit current, sag, peak power, temperature range. 2-wire/4-wire with a shorted-probe **tare** |
 | **Battery** | Ten chemistry presets each with its own OCV curve and 60 V cell ceiling, cell-count suggestion from the connected pack, C-rate chips, CC discharge with local Ah/Wh integration, debounced cutoff, pause/resume, rest/rebound, pack internal resistance from the switch-on sag, and a **time-to-cutoff estimate read off the discharge curve** with the pack's capacity learned during the run |
-| **Reports** | `RTEST_NNN.CSV` / `BATT_NNN.CSV` into `Downloads/EL15 Load Control`, **field-for-field identical** to what the board writes to its SD card, including the per-sample datapoint block |
+| **Reports** | `RTEST_NNN.CSV` / `BATT_NNN.CSV` into `Downloads/EL15 Load Control`, matching what the board writes to its SD card field for field — plus a printable `RTEST_NNN.pdf` / `BATT_NNN.pdf` under the same number, drawn as a real document rather than a screenshot |
 | **Probe wiring** | Global 2-wire / 4-wire (Kelvin). In 2-wire the lead resistance is added back to every reading — monitor, graph, battery cutoff and reports alike — so measurements belong to the part and not to your leads |
 | **Safety** | On-screen emergency stop in the header · link-loss reconnect-and-kill supervisor · crash recovery across a process death · load-safe disconnect · engine mutual exclusion · foreground service so a long run survives the UI being destroyed |
 | **Settings** | Theme · poll interval · probe wiring · sweep and battery defaults · alarms · periodic CSV snapshot · demo circuit |
@@ -35,10 +35,15 @@ Parity with the firmware, adapted where a phone differs from the board.
 ### Deliberately not included
 
 Scope is firmware parity, so the extras this app used to carry are gone: test
-**History**, **Trends**, **PDF export**, the home-screen **widget**, and the
-quick-settings **tile**. So are the **runtime / step / OCP** bench engines and
-the **calibration sweep**, which the firmware README lists as never ported. All
-of it remains in git history at `1cd5607`.
+**History**, **Trends**, the home-screen **widget**, and the quick-settings
+**tile**. So are the **runtime / step / OCP** bench engines and the
+**calibration sweep**, which the firmware README lists as never ported. All of
+it remains in git history at `1cd5607`.
+
+**PDF export came back** (2026-08-06) and is the one place this app now does
+more than the board: the board has no printer and no document to hand someone.
+It reports the same numbers as the CSV, so nothing is reachable only by reading
+a chart.
 
 The in-process **demo simulator** is kept, as a development aid — it is the only
 way to see the app work before an EL15 is wired up. The firmware deliberately
@@ -58,6 +63,7 @@ has none; nothing the simulator produces is a measurement.
 | AMOLED burn-in shift/dim | Keep-screen-on setting | Not the phone's problem |
 | RTC "not set" fallback | Always a real timestamp | A phone's clock is set |
 | PMIC brownout auto-off | — | No equivalent; the link guard and the load's own UVP are the backstops |
+| Sweep fits every valid packet | Fits every packet the load actually held the commanded current for | The one MEASUREMENT difference between the two engines. At ~1.2 A the EL15 emits one or two frames per sweep whose current field is wrong while the voltage stays on the fitted line; unfitted they inflate the reported uncertainty 2.6×. See `RTEST_ACCURACY.md` §7 — the firmware does not have the gate until it can be run on the board |
 
 **Poll rate.** The sweep fits every packet that arrives, so the poll interval is
 what tightens the resistance uncertainty. The default is **50 ms (20 Hz)**,

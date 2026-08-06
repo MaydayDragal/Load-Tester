@@ -68,8 +68,7 @@ class ResultActivity : BaseActivity() {
                 runCatching { buildPdf() }
                     .onSuccess { pdf ->
                         val where = Exporter.saveToDownloads(
-                            this, Report.nextName(this, prefix()).replace(".CSV", ".pdf"),
-                            "application/pdf", pdf,
+                            this, pdfName(), "application/pdf", pdf,
                         )
                         toast(
                             if (where != null) getString(R.string.rt_saved_to, where)
@@ -81,7 +80,7 @@ class ResultActivity : BaseActivity() {
         }
         binding.saveButton.setOnClickListener {
             withStoragePermission {
-                val where = Report.save(this, prefix(), buildCsv())
+                val where = Report.save(this, csvName(), buildCsv())
                 toast(
                     if (where != null) getString(R.string.rt_saved_to, where)
                     else getString(R.string.rt_save_failed)
@@ -91,7 +90,14 @@ class ResultActivity : BaseActivity() {
         binding.shareButton.setOnClickListener { shareChooser() }
     }
 
-    private fun prefix() = if (kind == KIND_BATT) "BATT" else "RTEST"
+    /**
+     * The one report number this run claimed. Every export of the same result —
+     * CSV or PDF, saved or shared, this visit to the screen or the next — files
+     * under it, so a test's two files sit next to each other in Downloads.
+     */
+    private fun csvName(): String = DeviceCore.get(this).reportName(kind)
+
+    private fun pdfName(): String = csvName().replace(".CSV", ".pdf")
 
     private fun buildCsv(): String =
         if (kind == KIND_BATT) Report.battCsv(battResult!!) else Report.rTestCsv(rtestResult!!)
@@ -112,12 +118,9 @@ class ResultActivity : BaseActivity() {
                 try {
                     val title = getString(R.string.rt_results_title)
                     if (which == 0) {
-                        Exporter.share(
-                            this, Report.nextName(this, prefix()).replace(".CSV", ".pdf"),
-                            "application/pdf", buildPdf(), title,
-                        )
+                        Exporter.share(this, pdfName(), "application/pdf", buildPdf(), title)
                     } else {
-                        Report.share(this, prefix(), buildCsv(), title)
+                        Report.share(this, csvName(), buildCsv(), title)
                     }
                 } catch (e: Exception) {
                     toast("Share failed: ${e.message}")
@@ -173,6 +176,11 @@ class ResultActivity : BaseActivity() {
             row("Temperature", "%.1f → %.1f °C".format(Locale.US, r.tempMin, r.tempMax))
             row("Max fan", "${r.maxFan}/${El15Protocol.FAN_SPEED_MAX}")
             if (r.loadDropouts > 0) row("Load dropouts", r.loadDropouts.toString())
+            // Only when it happened: a zero here would read as a warning about
+            // nothing on every clean sweep.
+            if (r.offTargetSamples > 0) {
+                row("Off-target readings", "${r.offTargetSamples} (not fitted)")
+            }
         }
     }
 

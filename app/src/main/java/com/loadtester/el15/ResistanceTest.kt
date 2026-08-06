@@ -2,6 +2,7 @@ package com.loadtester.el15
 
 import android.os.Handler
 import android.os.Looper
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -121,6 +122,10 @@ class LeastSquares {
  *  3. SAMPLE DENSITY — every packet counts, so a faster poll rate directly
  *     tightens the fit. The regression runs incrementally, so the live R
  *     estimate costs nothing and no sample buffer grows.
+ *  4. OFF-TARGET REJECTION — the load regulates current, so a frame reporting a
+ *     current far from the commanded one is a bad reading rather than an
+ *     operating point. Those are kept out of the fit and counted; the load
+ *     emits one or two per sweep at a fixed current. See [offTargetLimit].
  *
  * V and I inside one status frame are simultaneous, which is what makes a moving
  * setpoint safe to fit: the load's regulation lag shifts WHICH current a packet
@@ -174,6 +179,13 @@ class ResistanceTest(
         val maxFan: Int,
         /** Times the load had to be re-asserted mid-sweep. */
         val loadDropouts: Int,
+        /**
+         * Readings the load reported at a current nowhere near the one it was
+         * commanded to hold, and which the fit therefore refused. See
+         * [offTargetLimit]. Reported rather than hidden: a run that discards
+         * anything has to say so.
+         */
+        val offTargetSamples: Int,
         /**
          * What the slope actually measured, before the lead tare was taken off.
          * This is also what a tare run itself records.
@@ -271,6 +283,7 @@ class ResistanceTest(
     private var primeDoneAtMs = 0L
     private var sweepMsEff = 30_000L
     private var loadDropouts = 0
+    private var offTargetSamples = 0
     private var logging = false
 
     private class Bin {
@@ -286,6 +299,7 @@ class ResistanceTest(
         vOcMeasured = 0f
         vRecent = 0f
         loadDropouts = 0
+        offTargetSamples = 0
         state = State.PRIMING
         primeStartMs = now()
         lastClearPushMs = 0
@@ -393,6 +407,19 @@ class ResistanceTest(
             return
         }
 
+        // A reading whose current is nowhere near the commanded one is not a
+        // measurement of this circuit — see [offTargetLimit]. It has already gone
+        // into the datapoint log above, so the CSV still shows it; what it must
+        // not do is enter the fit, the bins, or the run statistics.
+        if (abs(status.current - currentTarget) > offTargetLimit(currentTarget, rampStepA())) {
+            offTargetSamples++
+            callback.onTestProgress(
+                elapsedS(), sweepMsEff / 1000f, currentTarget,
+                status.voltage, status.current, 0f, false,
+            )
+            return
+        }
+
         lsq.add(status.current, status.voltage)
         // Seed both bounds from the first sample rather than from zero — a
         // below-zero ambient would otherwise never move tempMax off 0.
@@ -457,6 +484,17 @@ class ResistanceTest(
     private fun commandable(target: Float): Float = max(target, MIN_TEST_CURRENT)
 
     private fun setpointStepMs(): Long = if (setpointMs > 0) setpointMs else RAMP_STEP_MS
+
+    /**
+     * How much the commanded current moves between two setpoint writes. The
+     * measured current trails the command by roughly this much — more on a short
+     * sweep over a wide span — so it sets the scale of honest regulation lag.
+     */
+    private fun rampStepA(): Float {
+        val half = sweepMsEff / 2f
+        if (half <= 0f) return 0f
+        return (maxCurrentEff - startCurrentEff) * (setpointStepMs() / half)
+    }
 
     private fun elapsedS(): Float =
         if (state == State.SWEEPING) (now() - tStart) / 1000f else 0f
@@ -623,6 +661,7 @@ class ResistanceTest(
                 tempMax = if (haveTemp) tempMax else 0f,
                 maxFan = fanMax,
                 loadDropouts = loadDropouts,
+                offTargetSamples = offTargetSamples,
                 rawResistanceOhm = f.resistanceOhm,
                 tareOhm = if (fourWire) 0f else tareOhm,
                 fourWire = fourWire,
@@ -675,6 +714,47 @@ class ResistanceTest(
 
         /** Grace period to shed a stale protection trip during priming. */
         private const val FAULT_CLEAR_MS = 4000L
+
+        // ---- Off-target rejection ------------------------------------------
+        // Measured on a real EL15 (2026-08-06, RTEST_003): as the current crosses
+        // ~1.2 A the load emits one or two status frames whose CURRENT field is
+        // wrong while the voltage field stays exactly on the fitted V-I line —
+        // once on the way up, once on the way down, in every sweep. It is a
+        // measurement artifact inside the load, not current the circuit drew: a
+        // real 0.55 A excursion would have pulled the terminal voltage down
+        // 0.19 V, and it instead rose 0.03 V. One of the four events read exactly
+        // HALF the true current (0.6226 A against 1.2452 A) — a single bit of the
+        // float's exponent, which is what a scaling or range change looks like,
+        // not what noise looks like. The frames pass the device's own checksum, so
+        // nothing on the phone corrupted them.
+        //
+        // Three such samples in 250 cost more than they look: they take R-squared
+        // from 0.99942 to 0.99601 and inflate the reported uncertainty from
+        // 0.53 mOhm to 1.39 mOhm, so the sweep reports itself 2.6x less certain
+        // than it measured. R itself moves 0.35 mOhm.
+        //
+        // The load REGULATES current, so a reading far from the commanded
+        // setpoint cannot be an operating point of this circuit. In that data the
+        // worst honest regulation lag was 0.135 A against glitches of 0.49-0.55 A,
+        // so the window below clears both by about 2x. It is the maximum of three
+        // terms because lag scales differently in each regime: a floor for slow
+        // sweeps, a fraction for high currents, and the ramp's own step size for a
+        // short sweep over a wide span, where the command genuinely outruns the
+        // load. Rejections are COUNTED and reported, never silently dropped.
+        private const val OFF_TARGET_FLOOR_A = 0.25f
+        private const val OFF_TARGET_FRACTION = 0.20f
+        private const val OFF_TARGET_STEPS = 4f
+
+        /**
+         * How far a reading may sit from the commanded current and still count as
+         * this circuit's operating point. [rampStepA] is the commanded increment
+         * between setpoint writes.
+         */
+        fun offTargetLimit(target: Float, rampStepA: Float): Float = maxOf(
+            OFF_TARGET_FLOOR_A,
+            OFF_TARGET_FRACTION * target,
+            OFF_TARGET_STEPS * rampStepA,
+        )
 
         /**
          * Safe peak current for a given fuse rating and source voltage — the same

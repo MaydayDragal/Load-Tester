@@ -291,4 +291,71 @@ the bench source collapsed mid-run.
 - **Averaging the priming Voc** (§2.6) and an **endpoint-weighted ladder** (§2.4).
 
 ---
+
+## 7. The ~1.2 A current-reading glitch (2026-08-06)
+
+A blip shows up in every sweep's current trace, once on the ascent and once on
+the descent. It is **the load's own current reading**, not current the circuit
+drew, and not anything the controller does.
+
+### What the data says
+
+From `RTEST_003` (Android app, 0.05 → 4 A over 15 s, 250 logged packets, a
+~14.3 V source through 0.346 Ω):
+
+| elapsed | commanded | reported I | reported V | V implies I |
+|---|---|---|---|---|
+| 2.458 s | 1.241 A | **1.7939 A** | 13.9665 V | 1.08 A |
+| 2.502 s | 1.305 A | **1.7939 A** | 13.9665 V | 1.08 A |
+| 12.894 s | 1.125 A | **0.6226 A** | 13.9506 V | 1.12 A |
+
+Both events sit where the current crosses **~1.2 A**, one per ramp direction. A
+60 s sweep the same morning put them at sample 145 and sample 819 of 962 —
+again ~1.2 A each way, symmetric about the turnaround.
+
+Three things make it a measurement artifact rather than a real excursion:
+
+1. **The voltage does not move.** A genuine 0.55 A excursion drags a 0.346 Ω
+   source down 0.19 V. The terminal voltage instead rose 0.03 V and stayed on
+   the fitted line — only the current channel is wrong.
+2. **One event is exactly half the true current** (0.6226 A against 1.2452 A).
+   In IEEE-754 that is a single bit of the exponent, which is what a scaling or
+   range change looks like; noise does not halve a number.
+3. **The frames pass the device's own sum-to-zero checksum**, so the load built
+   them that way — nothing in the BLE path corrupted them.
+
+The most likely mechanism is a current-sense range/gain change inside the EL15
+at ~1.2 A, with one status refresh served using the wrong constant. The
+duplicate at 2.458/2.502 s is just the poll running faster than the device's
+refresh, so the bad frame is served twice.
+
+### What it costs
+
+Three samples out of 250:
+
+| | R | σ_R | R² |
+|---|---|---|---|
+| every packet fitted | 0.346254 Ω | 1.39 mΩ | 0.99601 |
+| the three excluded | 0.346602 Ω | 0.53 mΩ | 0.99942 |
+
+So the artifact barely moves R (0.35 mΩ) but makes the sweep **report itself
+2.6× less certain than it measured** — and "reliable" is gated on exactly that
+number (§2.2).
+
+### What was done about it
+
+**The Android app** rejects a reading whose current sits further from the
+commanded setpoint than `max(0.25 A, 20 %, 4 ramp steps)` — see
+`ResistanceTest.offTargetLimit`. In the run above the worst honest regulation
+lag was 0.135 A and the glitches were 0.49–0.55 A, so the window clears both by
+about 2×. Rejected frames are counted, reported (`off_target_samples` in the
+CSV, a row in the PDF and the result screen) and still written to the datapoint
+log, so the raw sweep remains auditable.
+
+**The firmware deliberately does not have this gate yet.** It is the same class
+of change reverted on 2026-08-06 for being unproven, and it stays unproven on
+the board until a sweep is run with it. Until then the two engines differ in
+this one respect, and a board-saved report will show the wider σ_R.
+
+---
 *Companion: resistance_test.h (engine), CAPACITY_PLAN.md, FEATURE_IDEAS.md.*

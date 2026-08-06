@@ -121,8 +121,15 @@ object Prefs {
 
     fun tareOhm(ctx: Context): Float = f(ctx, TARE_OHM, 0f, 0f, 10f)
 
+    /**
+     * Locale.US on purpose: this string is read back through `toFloatOrNull`,
+     * which rejects a comma decimal separator. Formatted in the phone's own
+     * locale, a tare measured on a French or German phone was stored as
+     * "0,084152", failed to parse on the next read, and silently fell back to
+     * zero — quietly dropping the lead correction from every 2-wire result.
+     */
     fun setTareOhm(ctx: Context, ohm: Float) {
-        p(ctx).edit().putString(TARE_OHM, "%.6f".format(ohm)).apply()
+        p(ctx).edit().putString(TARE_OHM, "%.6f".format(java.util.Locale.US, ohm)).apply()
     }
 
     fun setFourWire(ctx: Context, on: Boolean) {

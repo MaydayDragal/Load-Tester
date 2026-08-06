@@ -98,14 +98,40 @@ class DeviceCore private constructor(private val app: Context) :
     var lastBattResult: CapacityTest.Result? = null
         private set
 
+    /**
+     * The report number each finished run has claimed, or null until it exports
+     * something. Held HERE rather than in the result screen because that screen
+     * is destroyed and rebuilt freely: a per-Activity reservation burned a fresh
+     * number every time the user came back, and the CSV and the PDF of one test
+     * ended up filed under different numbers (RTEST_002.pdf next to
+     * RTEST_003.CSV). One run, one number, both formats.
+     */
+    private var rtestReportName: String? = null
+    private var battReportName: String? = null
+
+    /**
+     * The base `RTEST_007.CSV` / `BATT_003.CSV` name for the last result of
+     * [kind], claiming one on first use. Callers swap the extension for other
+     * formats rather than asking for another name.
+     */
+    fun reportName(kind: String): String {
+        val batt = kind == ResultActivity.KIND_BATT
+        val existing = if (batt) battReportName else rtestReportName
+        if (existing != null) return existing
+        val name = Report.nextName(app, if (batt) "BATT" else "RTEST")
+        if (batt) {
+            battReportName = name
+        } else {
+            rtestReportName = name
+        }
+        return name
+    }
+
     /** Rolling display buffer + optional full recording (survives UI death). */
     val waveLog = ArrayDeque<WaveformView.WPoint>()
     val recordLog = ArrayDeque<WaveformView.WPoint>()
     var recording = false
         private set
-
-    /** Live V/I curve for whichever engine is running, for the in-test graph. */
-    val testCurve = ArrayDeque<WaveformView.WPoint>()
 
     private val listeners = LinkedHashSet<Ui>()
     private var tone: ToneGenerator? = null
@@ -230,9 +256,17 @@ class DeviceCore private constructor(private val app: Context) :
         // A tare sweep measures the leads themselves, so it must subtract
         // nothing and must not be treated as 4-wire (which would mean "the leads
         // are already excluded" — the opposite of what is being measured).
-        rtest.fourWire = false
-        rtest.tareOhm = 0f
-        testCurve.clear()
+        //
+        // ONLY a tare sweep. Applied unconditionally, as it was, this overwrote
+        // the probe wiring syncSettings() had just read from Settings, so every
+        // ordinary sweep ran as untared 2-wire: a measured lead tare was never
+        // taken off the slope, and a 4-wire run was labelled 2-wire in its own
+        // report. The whole probe-wiring feature was dead for the one test built
+        // around it.
+        if (tare) {
+            rtest.fourWire = false
+            rtest.tareOhm = 0f
+        }
         // Arm before any current flows: a link that drops between the command and
         // the first status packet must still be recoverable.
         guard.arm(Prefs.FLIGHT_RTEST)
@@ -256,7 +290,6 @@ class DeviceCore private constructor(private val app: Context) :
         // actually recorded, even if Settings change before a (re)save.
         batt.fourWire = Prefs.fourWire(app)
         batt.tareOhm = Prefs.tareOhm(app)
-        testCurve.clear()
         guard.arm(Prefs.FLIGHT_CAPACITY)
         batt.start()
         each { it.coreStateChanged() }
@@ -389,10 +422,6 @@ class DeviceCore private constructor(private val app: Context) :
             recordLog.addLast(pt)
             while (recordLog.size > RECORD_CAP) recordLog.removeFirst()
         }
-        if (busy) {
-            testCurve.addLast(pt)
-            while (testCurve.size > CURVE_CAP) testCurve.removeFirst()
-        }
         checkAlarms(c)
         maybeSnapshot(c)
         MonitorService.tick(app, c)
@@ -425,10 +454,12 @@ class DeviceCore private constructor(private val app: Context) :
             tareRun = false
         } else {
             lastRTestResult = result
+            rtestReportName = null   // a new run files under a new number
             lastProgressText = "Done — R = ${formatOhm(result.resistanceOhm)}"
         }
         beep(ToneGenerator.TONE_PROP_ACK, 250)
-        Notifications.testDone(app, "Resistance test complete", lastProgressText)
+        Notifications.testDone(
+            app, "Resistance test complete", lastProgressText, ResultActivity.KIND_RTEST)
         each { it.coreRTestComplete(result) }
         MonitorService.refresh(app)
     }
@@ -460,10 +491,11 @@ class DeviceCore private constructor(private val app: Context) :
     override fun onCapacityComplete(result: CapacityTest.Result) {
         guard.disarm()
         lastBattResult = result
+        battReportName = null
         lastProgressText = "Done — %.3f Ah · %.2f Wh".format(result.capacityAh, result.energyWh)
         beep(ToneGenerator.TONE_PROP_ACK, 250)
         Notifications.testDone(app, "Capacity test complete",
-            "${result.stopReason} — $lastProgressText")
+            "${result.stopReason} — $lastProgressText", ResultActivity.KIND_BATT)
         each { it.coreBattComplete(result) }
         MonitorService.refresh(app)
     }
@@ -535,7 +567,6 @@ class DeviceCore private constructor(private val app: Context) :
     companion object {
         private const val WAVE_CAP = 600
         private const val RECORD_CAP = 200_000
-        private const val CURVE_CAP = 2_000
         private const val ALARM_COOLDOWN_MS = 30_000L
 
         fun formatOhm(ohm: Float): String = when {

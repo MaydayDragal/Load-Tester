@@ -26,7 +26,11 @@ object Report {
     private const val SEQ_RTEST = "pref_seq_rtest"
     private const val SEQ_BATT = "pref_seq_batt"
 
-    /** `RTEST_007.CSV` — the firmware's naming, continued. */
+    /**
+     * `RTEST_007.CSV` — the firmware's naming, continued. Consumes a number, so
+     * a run must claim ONE and reuse it: go through [DeviceCore.reportName]
+     * rather than calling this per export.
+     */
     fun nextName(ctx: Context, prefix: String): String {
         val key = if (prefix == "RTEST") SEQ_RTEST else SEQ_BATT
         val p = PreferenceManager.getDefaultSharedPreferences(ctx)
@@ -88,14 +92,16 @@ object Report {
         f("temperature_max,%.1f,C\n", r.tempMax)
         f("max_fan,%d,\n", r.maxFan)
         f("load_dropouts,%d,\n", r.loadDropouts)
+        f("off_target_samples,%d,\n", r.offTargetSamples)
         f("reliable,%s,\n", if (r.reliable) "yes" else "no")
 
         // Per-sample datapoints, streamed out of the log written during the
         // sweep. Includes the samples the fit EXCLUDED (load-off dropouts, settle
-        // transients): the banded curve above is what was fitted, this block is
-        // what happened. target_a is the commanded setpoint at that instant, so
-        // current_a vs target_a shows the load's regulation lag; a dropout reads
-        // as current_a ~ 0 under a nonzero target.
+        // transients, off-target readings): the banded curve above is what was
+        // fitted, this block is what happened. target_a is the commanded setpoint
+        // at that instant, so current_a vs target_a shows the load's regulation
+        // lag; a dropout reads as current_a ~ 0 under a nonzero target, and an
+        // off-target reading is one that `off_target_samples` above counted.
         val log = SampleLog.rtest
         f("\n# Datapoints (%d samples, %d ms resolution at the end of the sweep)\n",
             log.count, log.intervalMs)
@@ -196,14 +202,15 @@ object Report {
 
     // ---- Saving ---------------------------------------------------------------
     /**
-     * Write a report into Downloads. Returns the human-readable location, or null
-     * if the write failed — the caller must surface that rather than claiming a
-     * save that did not happen.
+     * Write a report into Downloads under a name the caller already reserved
+     * ([DeviceCore.reportName]). Returns the human-readable location, or null if
+     * the write failed — the caller must surface that rather than claiming a save
+     * that did not happen.
      */
-    fun save(ctx: Context, prefix: String, csv: String): String? =
-        Exporter.saveToDownloads(ctx, nextName(ctx, prefix), "text/csv", csv.toByteArray())
+    fun save(ctx: Context, fileName: String, csv: String): String? =
+        Exporter.saveToDownloads(ctx, fileName, "text/csv", csv.toByteArray())
 
-    fun share(ctx: Context, prefix: String, csv: String, subject: String) {
-        Exporter.share(ctx, nextName(ctx, prefix), "text/csv", csv.toByteArray(), subject)
+    fun share(ctx: Context, fileName: String, csv: String, subject: String) {
+        Exporter.share(ctx, fileName, "text/csv", csv.toByteArray(), subject)
     }
 }

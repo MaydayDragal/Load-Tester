@@ -85,13 +85,25 @@ object Notifications {
     /**
      * A finished test. Opens the result screen, which reads the result straight
      * off [DeviceCore] — the app keeps the last result of each kind in memory
-     * rather than archiving it, so there is no record id to carry here.
+     * rather than archiving it, so there is no record id to carry here, only
+     * WHICH kind to show.
+     *
+     * [kind] is not optional in practice: without it the result screen falls back
+     * to the sweep, so a finished battery run opened the last R-Test's numbers
+     * (or "result no longer available" when there had never been a sweep). The
+     * request code varies with it too — PendingIntent identity ignores extras, so
+     * with one shared request code the two kinds would be the same pending
+     * intent, and FLAG_UPDATE_CURRENT would let whichever test finished last
+     * rewrite where the other's notification leads.
      */
-    fun testDone(ctx: Context, title: String, message: String) {
+    fun testDone(ctx: Context, title: String, message: String, kind: String) {
         if (!canPost(ctx)) return
         ensureChannels(ctx)
-        val open = PendingIntent.getActivity(ctx, 0,
-            Intent(ctx, ResultActivity::class.java),
+        val open = PendingIntent.getActivity(
+            ctx,
+            if (kind == ResultActivity.KIND_BATT) 11 else 10,
+            Intent(ctx, ResultActivity::class.java)
+                .putExtra(ResultActivity.EXTRA_KIND, kind),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val n = NotificationCompat.Builder(ctx, CH_ALERTS)
             .setSmallIcon(R.drawable.ic_check_notif)

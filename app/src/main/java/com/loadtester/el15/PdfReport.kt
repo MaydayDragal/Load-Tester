@@ -126,6 +126,7 @@ object PdfReport {
                 "Current measured" to "${fmt(r.minCurrent, 4)} → ${fmt(r.maxCurrentSeen, 4)} A",
                 "Samples fitted" to "${r.rawSamples} in ${r.samples.size} bands",
                 "Load dropouts" to r.loadDropouts.toString(),
+                "Off-target readings" to "${r.offTargetSamples} (not fitted)",
                 "Temperature" to "${fmt(r.tempMin, 1)} → ${fmt(r.tempMax, 1)} °C",
                 "Max fan" to "${r.maxFan} of ${El15Protocol.FAN_SPEED_MAX}",
             )
@@ -207,7 +208,9 @@ object PdfReport {
 
         s.methodNote(
             "The sweep ramps the load's current up and back down as a smooth triangle and " +
-                "fits every settled reading by least squares, so each current is visited once " +
+                "fits by least squares every reading the load actually held the commanded " +
+                "current for — the few frames it reports at some other current are counted " +
+                "above and left out — so each current is visited once " +
                 "in each direction and first-order drift — self-heating, a sagging source — " +
                 "cancels instead of biasing the slope. The ± figure is the standard error of " +
                 "that slope, not a guess. The CSV export carries every packet the sweep " +

@@ -12,9 +12,9 @@ import kotlin.math.max
 
 /**
  * Live scrolling waveform of voltage and current. Keeps a capped display buffer
- * plus an optional full-resolution recording buffer for CSV export, and exposes
- * min/max/avg over the visible window. Pause freezes the display without losing
- * the connection.
+ * and exposes min/max/avg over the visible window; the recording that CSV export
+ * prefers is [DeviceCore]'s, so it outlives this view. Pause freezes the display
+ * without losing the connection.
  *
  * Drawing avoids per-frame allocation: samples are copied into flat float
  * arrays once per frame and both series render from them.
@@ -34,11 +34,8 @@ class WaveformView @JvmOverloads constructor(
     )
 
     var paused = false
-    var recording = false
-        private set
 
     private val display = ArrayDeque<WPoint>()
-    private val record = ArrayDeque<WPoint>()
     private val maxDisplay = 600
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -51,26 +48,22 @@ class WaveformView @JvmOverloads constructor(
     private val tv = TypedValue()
 
     fun add(v: Float, i: Float, p: Float, temp: Float, fan: Int, tMs: Long) {
-        if (recording) {
-            record.addLast(WPoint(tMs, v, i, p, temp, fan))
-            if (record.size > MAX_RECORD) record.removeFirst() // O(1) ring behaviour
-        }
         if (paused) return
         display.addLast(WPoint(tMs, v, i, p, temp, fan))
         while (display.size > maxDisplay) display.removeFirst()
         invalidate()
     }
 
-    fun startRecording() { record.clear(); recording = true }
-    fun stopRecording() { recording = false }
-    fun recordedCount(): Int = record.size
-
     fun clear() {
-        display.clear(); record.clear(); invalidate()
+        display.clear(); invalidate()
     }
 
-    /** Rows for CSV export: the full recording if any, else the visible window. */
-    fun exportRows(): List<WPoint> = if (record.isNotEmpty()) record.toList() else display.toList()
+    /**
+     * Rows for CSV export — the visible window. The full recording lives in
+     * [DeviceCore], not here, so that it survives this view being destroyed;
+     * the caller prefers that one and falls back to this.
+     */
+    fun exportRows(): List<WPoint> = display.toList()
 
     /** min/avg/max over the visible window, as a compact one-liner. */
     fun statsText(): String {
@@ -157,10 +150,6 @@ class WaveformView @JvmOverloads constructor(
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
     private fun sp(v: Float) = v * resources.displayMetrics.scaledDensity
-
-    companion object {
-        private const val MAX_RECORD = 200_000
-    }
 }
 
 /** Small helper to read a color resource across API levels. */
