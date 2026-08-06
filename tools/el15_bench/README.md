@@ -14,9 +14,16 @@ turned a hypothesis into a mechanism.
 
 ```
 pip install bleak
-python sweep.py cycle out.csv        # drive a profile, capture every packet
+python rtest.py 5 30 out.csv         # a full R-test: fuse 5 A, 30 s sweep
+python sweep.py cycle out.csv        # drive a bare profile, capture every packet
 python glitchscan.py out.csv         # find corrupted samples and name the corruption
 ```
+
+`rtest.py` is a port of the app's whole ResistanceTest engine — same ramp, same
+off-target gate, same one-packet-delay repair, same binning and reliability rule
+— so its numbers are the app's numbers for the same sweep, with no phone in the
+loop. It also re-asserts LOAD_ON like the app does: writing it once is not
+enough, and a sweep whose LOAD_ON was lost runs to completion at zero current.
 
 The address defaults to the unit this was written against; override with
 `EL15_ADDR=AA:BB:...` or pass it as the third argument. `el15.find()` scans if
@@ -56,6 +63,9 @@ The evidence behind §7, kept because the conclusion rests on specific frames:
   load's, not the phone's.
 - **`hold-steady-control.csv`** — 45 s held at 1.15, 1.25 and 1.20 A. Zero
   events. The fault needs the current to be moving through the threshold.
+- **`rtest-live-repair.csv`** — a real 30 s R-test (85.66 mΩ ± 1.01) in which the
+  load halved one reading on the way down: 0.6064 A reported where the ramp was
+  at 1.2101 A, recovered to 1.2128 A. The repair working end to end.
 - **`fastcross-heldout-1.csv`, `fastcross-heldout-2.csv`** — two independent
   200-crossing runs at R-test slew rate, 166 events between them. These are what
   the repair rule was judged on, and they are the reason its tolerance is
