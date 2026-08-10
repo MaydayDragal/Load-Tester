@@ -25,10 +25,22 @@
 // returned NULL -> a child created on it dereferenced a null parent and
 // panicked). The ESP32-C6 has ample internal RAM, so let LVGL grow on demand.
 #define LV_MEM_CUSTOM 1
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+// Put the widget tree in PSRAM. Without this, every LVGL allocation is small
+// enough to be served from internal SRAM (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL is
+// 4096 in the prebuilt libs), which starved the BLE stack badly enough to panic
+// on connect. See lv_mem_psram.h for the full account.
+#define LV_MEM_CUSTOM_INCLUDE "lv_mem_psram.h"
+#define LV_MEM_CUSTOM_ALLOC   lvPsramAlloc
+#define LV_MEM_CUSTOM_FREE    lvPsramFree
+#define LV_MEM_CUSTOM_REALLOC lvPsramRealloc
+#else
+// The C6 has no PSRAM; the ordinary heap is the only heap.
 #define LV_MEM_CUSTOM_INCLUDE <stdlib.h>
 #define LV_MEM_CUSTOM_ALLOC   malloc
 #define LV_MEM_CUSTOM_FREE    free
 #define LV_MEM_CUSTOM_REALLOC realloc
+#endif
 
 // ---- HAL / tick -----------------------------------------------------------
 // Use the Arduino millis() as the tick source.
