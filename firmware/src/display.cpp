@@ -179,6 +179,15 @@ static const uint8_t AXS_READ_CMD[11] = {
 
 static int readTouch(uint16_t &x, uint16_t &y) {
   uint8_t d[14];
+
+  // ONE transaction per poll. Do NOT add a retry loop here — it was tried on
+  // hardware 2026-08-10 and made things categorically worse, not marginally so:
+  // issuing the 11-byte command two or three times in quick succession puts this
+  // controller into a state where it returns junk CONTINUOUSLY, including while
+  // nothing is touching the panel. The census went from a normal idle stream to
+  // every single poll classifying as garbage at the full 50/s poll rate, with the
+  // idle and good counters frozen. It needs recovery time between commands, so
+  // the correct response to a corrupt frame is to wait for the next poll.
   Wire.beginTransmission(TOUCH_I2C_ADDR);
   Wire.write(AXS_READ_CMD, sizeof(AXS_READ_CMD));
   if (Wire.endTransmission() != 0) return -1;
@@ -480,9 +489,43 @@ static void pressProbeTimer(lv_timer_t *) {
                   pressCount, maxTravelY, maxSumY, scrollObjSeen);
   }
 
+  // On each NEW press, record the whole ancestor chain from the pressed object up
+  // to the screen. This is the thing that decides whether a drag can scroll, and
+  // it is per-press rather than pooled across screens — the earlier cumulative
+  // counters could not tell a working screen's scroll from a broken one's.
+  //
+  // Identify the Settings screen in the output by childCnt=12 / down=1719; a
+  // single tap on it is enough, and the trace is reprinted every 2 s so it can be
+  // read back at any time.
+  static char chain[400];
+  if (act && !last) {
+    int n = 0;
+    lv_obj_t *p = act;
+    for (int i = 0; i < 8 && p; i++) {
+      bool scrollable = lv_obj_has_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+      bool chainVer = lv_obj_has_flag(p, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+      bool clickable = lv_obj_has_flag(p, LV_OBJ_FLAG_CLICKABLE);
+      n += snprintf(chain + n, sizeof(chain) - n,
+                    "%s{cc=%lu h=%d scr=%d down=%d chain=%d clk=%d}",
+                    i ? " < " : "",
+                    (unsigned long)lv_obj_get_child_cnt(p), (int)lv_obj_get_height(p),
+                    scrollable ? 1 : 0, (int)lv_obj_get_scroll_bottom(p),
+                    chainVer ? 1 : 0, clickable ? 1 : 0);
+      if (n >= (int)sizeof(chain) - 60) break;
+      p = lv_obj_get_parent(p);
+    }
+  }
+  {
+    static uint32_t lastChainRep = 0;
+    if (chain[0] && millis() - lastChainRep >= 2000) {
+      lastChainRep = millis();
+      Serial.printf("[chain] %s\n", chain);
+    }
+  }
+
   if (act == last) return;
   last = act;
-  if (!act) { Serial.println("[press] released"); return; }
+  if (!act) return;
 
   bool chainBlocked = !lv_obj_has_flag(act, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
   const char *kind = "obj";
