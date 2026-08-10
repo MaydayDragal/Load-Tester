@@ -151,36 +151,66 @@ static int readTouch(uint16_t &x, uint16_t &y) {
   if (Wire.requestFrom((int)TOUCH_I2C_ADDR, (int)sizeof(d)) < (int)sizeof(d)) return -1;
   for (size_t i = 0; i < sizeof(d); i++) d[i] = Wire.read();
 
-  // A DEFINITE release: 0xff in the first byte is this part's "nothing is
-  // touching" report, and a contact count above the two points it can track is
-  // a frame we should not believe. Both end the gesture.
+  // Opt-in frame dump. Off unless built with -D S3_TOUCH_FRAME_DEBUG=1, e.g.
+  //     PLATFORMIO_BUILD_FLAGS="-D S3_TOUCH_FRAME_DEBUG=1" pio run -e ... -t upload
+  // Prints every report so a slow drag can be read back as the sequence the
+  // controller actually sends. This is how the frame layout documented below was
+  // established, and how the 10 ms poll rate was caught starving it — worth
+  // keeping, because nothing else here is observable from the outside.
+#if S3_TOUCH_FRAME_DEBUG
+  if (d[0] != 0xff) {
+    Serial.printf("[tp] %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                  d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+                  d[8], d[9], d[10], d[11], d[12], d[13]);
+  } else {
+    Serial.println("[tp] idle (ff)");
+  }
+#endif
+
+  // Frame layout, confirmed by logging real reports off this board 2026-08-10:
+  //
+  //   idle          00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  //   one contact   00 01 80 97 00 cb 1c 1d ff ff ff ff ff ff
+  //                 ^d0 ^count            ^-- unused
+  //                       ^d2: event flag in the high nibble (0x80 = contact),
+  //                           x's high nibble in the low one
+  //                          ^d3: x low byte   -> x = 0x097 = 151
+  //                             ^d4/^d5: same for y  -> y = 0x0cb = 203
+  //
+  // The vendor driver rejects frames on d[2]==0 / d[3]<2 / d[5]<2. Those tests
+  // are not used here: d[2]==0 is simply a touch-DOWN at x<256, which is most of
+  // a 320 px panel, and the other two throw away legitimate coordinates near an
+  // edge. The observed frames make a cleaner split available — believe the
+  // contact count, then range-check what it decodes to.
   static uint32_t holdingSinceMs = 0;
-  if (d[0] == 0xff || d[1] > 2) {
+
+  // DEFINITE release. Zero contacts is the real idle report on this board (the
+  // all-zero frame above); 0xff is the form the vendor documents. Accept both.
+  if (d[0] == 0xff || d[1] == 0) {
     holdingSinceMs = 0;
     return 0;
   }
 
-  // Anything else malformed is a TRANSIENT, and must hold the previous state
-  // rather than report a release.
+  // GARBAGE — hold the gesture rather than ending it. Two shapes show up: every
+  // byte identical (0x12 repeated, ~6 % of reads) and frames shifted two bytes
+  // out of alignment. Both decode to a contact count far above the two points
+  // this part tracks. Reporting these as "no touch" would read to LVGL as
+  // press-then-release mid-drag, turning a swipe into a click on whatever was
+  // under the finger.
   //
-  // This part emits partial frames mid-gesture, and the vendor driver's response
-  // is to return early WITHOUT touching its stored touch_data — i.e. keep the
-  // last point and keep the finger down. Reporting these as "no touch" instead
-  // is what broke scrolling on the bench 2026-08-10: one rejected frame during a
-  // drag looked to LVGL like press-then-release, so the gesture fired as a click
-  // on whatever was under the finger the instant it landed, and a swipe could
-  // never accumulate enough movement to become a scroll.
-  //
-  // Note d[2] carries the event flag in its upper nibble and x's high nibble in
-  // its lower one, so d[2] == 0 is specifically a touch-DOWN at x < 256 — common
-  // on a 320 px-wide panel, which is why this filter fires often enough to
-  // matter.
-  //
-  // The watchdog is the safety net the vendor lacks: holding forever would
-  // strand a press if the release frame were ever missed, so after this long
-  // with nothing believable we give up and report the release.
+  // The watchdog is the safety net the vendor driver lacks: holding forever
+  // would strand a press if a release frame were ever missed, so after this long
+  // with nothing believable, report the release anyway.
   const uint32_t HOLD_LIMIT_MS = 400;
-  if (d[1] == 0 || d[2] == 0 || d[3] < 2 || d[5] < 2) {
+  bool bad = (d[1] > 2);
+
+  x = (uint16_t)(((d[2] & 0x0F) << 8) | d[3]);
+  y = (uint16_t)(((d[4] & 0x0F) << 8) | d[5]);
+  // A misaligned frame can still carry a plausible count, so range-check what it
+  // actually decoded to before believing it.
+  if (x >= LCD_WIDTH || y >= LCD_HEIGHT) bad = true;
+
+  if (bad) {
     uint32_t now = millis();
     if (holdingSinceMs == 0) holdingSinceMs = now;
     if (now - holdingSinceMs > HOLD_LIMIT_MS) {
@@ -190,13 +220,8 @@ static int readTouch(uint16_t &x, uint16_t &y) {
     return -1;
   }
   holdingSinceMs = 0;
-
-  x = (uint16_t)(((d[2] & 0x0F) << 8) | d[3]);
-  y = (uint16_t)(((d[4] & 0x0F) << 8) | d[5]);
-
-  // 12-bit fields; clamp so a glitched read cannot feed LVGL an off-screen point.
-  if (x >= LCD_WIDTH) x = LCD_WIDTH - 1;
-  if (y >= LCD_HEIGHT) y = LCD_HEIGHT - 1;
+  // No clamp needed: an out-of-range decode was already routed to `bad` above,
+  // so anything reaching here is on-panel by construction.
   return 1;
 }
 #else
@@ -743,7 +768,35 @@ void begin() {
   lv_indev_drv_init(&g_indevDrv);
   g_indevDrv.type = LV_INDEV_TYPE_POINTER;
   g_indevDrv.read_cb = touchReadCb;
-  lv_indev_drv_register(&g_indevDrv);
+  lv_indev_t *indev = lv_indev_drv_register(&g_indevDrv);
+
+#if BOARD_TOUCH_AXS15231B
+  // Poll this controller at 30 ms, not the 10 ms the rest of the project uses.
+  //
+  // lv_conf.h sets LV_INDEV_DEF_READ_PERIOD to 10, which suits the C6's
+  // FocalTech part: that one is a register file, and reading it is a cheap,
+  // stateless transaction you can repeat as fast as you like. The AXS15231B is
+  // not — every poll is an 11-byte command followed by a 14-byte response, and
+  // it needs time to service that.
+  //
+  // Measured on the bench 2026-08-10 at 10 ms: of 6704 consecutive reads, 6097
+  // came back all-zero and 389 came back as pure garbage (every byte 0x12, plus
+  // some frames shifted 2 bytes out of alignment). Only about ten were real
+  // touch reports. That is enough for a tap, which needs one good frame, and
+  // nowhere near enough for a drag, which needs a continuous stream of moving
+  // coordinates — which is exactly how it behaved: taps fine, scrolling
+  // impossible.
+  //
+  // 30 ms is what Waveshare's own LVGL example runs (their lv_conf.h sets
+  // LV_INDEV_DEF_READ_PERIOD 30), i.e. the rate this part is actually known to
+  // work at. Set per-board here rather than in lv_conf.h so the C6 keeps its
+  // 10 ms and the snappier touch feel that goes with it.
+  if (indev && indev->driver && indev->driver->read_timer) {
+    lv_timer_set_period(indev->driver->read_timer, 30);
+  }
+#else
+  (void)indev;
+#endif
 }
 
 // ---- Screen care -----------------------------------------------------------
