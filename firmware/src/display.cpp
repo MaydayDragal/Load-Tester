@@ -33,20 +33,36 @@ static Arduino_SH8601 *g_amoled = new Arduino_SH8601(
     g_bus, LCD_RST_GPIO, 0 /* rotation */, LCD_WIDTH, LCD_HEIGHT);
 static Arduino_GFX *g_gfx = g_amoled;
 
-#elif BOARD_PANEL_SPI_TFT
-// ST7796 IPS TFT over ordinary 4-wire SPI, matching Waveshare's own
-// ESP32-S3-Touch-LCD-3.5 Arduino demos (08_gfx_helloworld, 11_lvgl_arduino_v8):
-//     Arduino_ESP32SPI(DC, CS, SCK, MOSI, MISO)
-//     Arduino_ST7796(bus, RST, rotation, ips, w, h)
-// CS is not brought out to a GPIO on this board (the panel is the only device on
-// its bus, so it is tied asserted) and RST is on the TCA9554 expander, so both
-// are -1 here and the reset pulse is issued over I2C in expanderPanelEnable().
-// `ips = true` is what the demo passes and is what gets the inversion right —
-// an ST7796 initialised as non-IPS renders colour-inverted.
-static Arduino_DataBus *g_bus = new Arduino_ESP32SPI(
-    LCD_DC_GPIO, LCD_CS_GPIO, LCD_SPI_SCK, LCD_SPI_MOSI, LCD_SPI_MISO);
-static Arduino_GFX *g_gfx = new Arduino_ST7796(
-    g_bus, LCD_RST_GPIO, 0 /* rotation */, true /* ips */, LCD_WIDTH, LCD_HEIGHT);
+#elif BOARD_PANEL_QSPI_TFT
+// AXS15231B IPS TFT over QSPI, matching Waveshare's own ESP32-S3-Touch-LCD-3.5B
+// Arduino demos (08_gfx_helloworld, 09_lvgl_arduino_v8), which agree exactly:
+//     Arduino_ESP32QSPI(CS, CLK, D0, D1, D2, D3)
+//     Arduino_AXS15231B(bus, RST, rotation, ips, w, h)
+//
+// RST is -1 because the panel's reset is on the TCA9554 expander, not a GPIO;
+// the pulse is issued over I2C in expanderPanelEnable() before begin() runs.
+//
+// `ips = false` is what the vendor passes. Note this is the OPPOSITE of the
+// ST7796 path this replaced — do not "fix" it to true by analogy with the old
+// plain-3.5 code, which was for a different panel on a different bus.
+//
+// is_shared_interface defaults to false, which is right here and is what the
+// vendor relies on: the SD card is on the hardware SDMMC host, so nothing else
+// touches this QSPI bus and the lock can be held from begin() onwards.
+//
+// INIT TABLE. We deliberately take Arduino_GFX's default rather than passing
+// axs15231b_320480_type1/type2, despite this being a 320x480 panel. Waveshare's
+// bundled copy of Arduino_GFX carries exactly ONE table, and it is byte-for-byte
+// identical to upstream's axs15231b_180640_init_operations — which is the
+// default. The "180640" in that name describes the panel the sequence was first
+// written for, not the only geometry it drives; width and height are passed
+// separately below. Verified by diffing the vendor library against libdeps
+// 2026-08-10. If the panel ever comes up geometrically wrong rather than blank,
+// the two 320480 tables are the things to try, passed as the 11th/12th args.
+static Arduino_DataBus *g_bus = new Arduino_ESP32QSPI(
+    LCD_QSPI_CS, LCD_QSPI_SCK, LCD_QSPI_D0, LCD_QSPI_D1, LCD_QSPI_D2, LCD_QSPI_D3);
+static Arduino_GFX *g_gfx = new Arduino_AXS15231B(
+    g_bus, LCD_RST_GPIO, 0 /* rotation */, false /* ips */, LCD_WIDTH, LCD_HEIGHT);
 #else
 #error "board_config.h defined no panel type"
 #endif
@@ -89,8 +105,10 @@ static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
   lv_disp_flush_ready(drv);
 }
 
-// ---- FT3168 capacitive touch (minimal I2C driver) --------------------------
+// ---- Capacitive touch (minimal I2C driver) ---------------------------------
+// Two very different parts behind one signature.
 // Returns: 1 = touch (x,y set), 0 = no touch, -1 = I2C read failed.
+#if BOARD_TOUCH_FOCALTECH
 static int readTouch(uint16_t &x, uint16_t &y) {
   // FT3168/FT6x36-family register map: 0x02 = touch count, 0x03.. = point data.
   Wire.beginTransmission(TOUCH_I2C_ADDR);
@@ -108,6 +126,47 @@ static int readTouch(uint16_t &x, uint16_t &y) {
   if (y >= LCD_HEIGHT) y = LCD_HEIGHT - 1;
   return 1;
 }
+
+#elif BOARD_TOUCH_AXS15231B
+// The AXS15231B's touch block is not a register file — there is no "read
+// register 0x02". It answers a fixed 11-byte command with a 14-byte report, and
+// that command is the only transaction the vendor driver ever issues
+// (libraries/esp_lcd_touch_axs15231b/esp_lcd_touch_axs15231b.cpp, bsp_touch_read).
+// The trailing 0x0e is the number of bytes it is being asked to return.
+static const uint8_t AXS_READ_CMD[11] = {
+    0xb5, 0xab, 0xa5, 0x5a, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00};
+
+static int readTouch(uint16_t &x, uint16_t &y) {
+  uint8_t d[14];
+  Wire.beginTransmission(TOUCH_I2C_ADDR);
+  Wire.write(AXS_READ_CMD, sizeof(AXS_READ_CMD));
+  if (Wire.endTransmission() != 0) return -1;
+  if (Wire.requestFrom((int)TOUCH_I2C_ADDR, (int)sizeof(d)) < (int)sizeof(d)) return -1;
+  for (size_t i = 0; i < sizeof(d); i++) d[i] = Wire.read();
+
+  // 0xff in the first byte, or an implausible contact count, means "nothing to
+  // report" rather than a bus failure — return 0 (no touch), not -1, so the
+  // caller does not treat an idle panel as a transient I2C error and hold the
+  // last state forever.
+  if (d[0] == 0xff || d[1] > 2) return 0;
+  if (d[1] == 0) return 0;
+
+  x = (uint16_t)(((d[2] & 0x0F) << 8) | d[3]);
+  y = (uint16_t)(((d[4] & 0x0F) << 8) | d[5]);
+  // The vendor additionally discards reports whose raw x/y high bytes are zero
+  // or whose low bytes are < 2. That filter is what keeps this part from
+  // emitting a spurious (0,0) press on release, so it is kept — but as a
+  // no-touch result rather than the vendor's silent "keep the previous point".
+  if (d[2] == 0 || d[3] < 2 || d[5] < 2) return 0;
+
+  // 12-bit fields; clamp so a glitched read cannot feed LVGL an off-screen point.
+  if (x >= LCD_WIDTH) x = LCD_WIDTH - 1;
+  if (y >= LCD_HEIGHT) y = LCD_HEIGHT - 1;
+  return 1;
+}
+#else
+#error "board_config.h defined no touch controller type"
+#endif
 
 // ---- Touch-target snapping ("guess what I meant") ---------------------------
 // The 1.8" panel is ~320 DPI, so even a 40 px button is barely 3 mm wide and a
@@ -213,6 +272,20 @@ static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
   data->point = lastPt;
 }
 
+#if BOARD_TOUCH_AXS15231B
+// Nothing to do. The AXS15231B's touch block has no power-mode or auto-sleep
+// registers to write — the vendor's bsp_touch_init() only stores the geometry
+// and, on boards that wire one, pulses a reset GPIO. This board does not wire
+// one (tp_rst = -1), and the controller shares the panel's reset, which
+// expanderPanelEnable() has already pulsed by the time we get here.
+//
+// Do NOT be tempted to send the FocalTech register writes below "just in case":
+// they are not no-ops on this part. It parses whatever arrives as the start of a
+// command frame, and a stray 2-byte write leaves it out of sync with the 11-byte
+// command the read path issues.
+static void touchInit() {}
+
+#elif BOARD_TOUCH_FOCALTECH
 // The FT3168 powers up in a low-power state and stops updating its touch
 // registers (0x02 stays 0) until its power mode is configured — Waveshare's
 // driver writes register 0xA5 during init. We set Active mode (continuous scan)
@@ -243,6 +316,7 @@ static void touchInit() {
   Wire.endTransmission();
   delay(20);
 }
+#endif
 
 static uint8_t g_brightness = LCD_DEFAULT_BRIGHTNESS;
 

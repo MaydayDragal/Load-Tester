@@ -25,8 +25,10 @@
 // ---- Capability flags (what display.cpp / sd_card.cpp compile in) ----------
 #define BOARD_NAME              "ESP32-C6-Touch-AMOLED-1.8"
 #define BOARD_PANEL_QSPI_AMOLED 1   // Arduino_SH8601 over Arduino_ESP32QSPI
-#define BOARD_PANEL_SPI_TFT     0
+#define BOARD_PANEL_QSPI_TFT    0
 #define BOARD_BACKLIGHT_PWM     0   // brightness is a panel command (0x51)
+#define BOARD_TOUCH_FOCALTECH   1   // FT3168/FT6x36 register file at 0x38
+#define BOARD_TOUCH_AXS15231B   0
 #define BOARD_SD_SDMMC          0   // bit-banged software SPI (see sd_card.cpp)
 #define BOARD_SD_SOFT_SPI       1
 #define BOARD_HAS_PSRAM         0
