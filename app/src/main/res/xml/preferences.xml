@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory app:title="Appearance">
+        <ListPreference
+            app:key="pref_theme_mode"
+            app:title="Theme"
+            app:entries="@array/theme_entries"
+            app:entryValues="@array/theme_values"
+            app:defaultValue="system"
+            app:useSimpleSummaryProvider="true" />
+        <Preference
+            app:key="pref_accent_fixed"
+            app:title="Accent colour"
+            app:summary="Steel"
+            app:selectable="false" />
+        <SwitchPreferenceCompat
+            app:key="pref_keep_screen_on"
+            app:title="Keep screen on while connected"
+            app:defaultValue="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Connection">
+        <EditTextPreference
+            app:key="pref_poll_ms"
+            app:title="Poll interval (ms)"
+            app:summary="How often the load is polled for a reading. The resistance sweep fits every packet that arrives, so a faster poll directly tightens its result. 50 ms matches the firmware."
+            app:defaultValue="50" />
+        <SwitchPreferenceCompat
+            app:key="pref_auto_connect"
+            app:title="Reconnect to the last device at launch"
+            app:defaultValue="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Probe wiring">
+        <SwitchPreferenceCompat
+            app:key="pref_four_wire"
+            app:title="4-wire (Kelvin) probing"
+            app:summary="On: the sense leads carry no current, so readings already belong to the part and nothing is corrected. Off (2-wire): the lead resistance below is added back to every reading."
+            app:defaultValue="false" />
+        <EditTextPreference
+            app:key="pref_tare_ohm"
+            app:title="Lead resistance (Ω)"
+            app:summary="Type it, or let the R-Test tare sweep measure it with the probes shorted. Applied to the monitor, the graph, the battery cutoff and the reports alike."
+            app:defaultValue="0" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Resistance test defaults">
+        <EditTextPreference
+            app:key="pref_safety_pct"
+            app:title="Safety factor (% of fuse)"
+            app:defaultValue="80"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_sweep_s"
+            app:title="Sweep duration (s)"
+            app:summary="Length of the triangular current ramp. Longer sweeps collect more points and tighten the uncertainty. 5-900 s."
+            app:defaultValue="30" />
+        <EditTextPreference
+            app:key="pref_settle_ms"
+            app:title="Skip after switch-on (ms)"
+            app:summary="Discard readings for this long after the load energises, to skip the regulator start-up transient. 0 = use every sample."
+            app:defaultValue="0" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Battery test defaults">
+        <EditTextPreference
+            app:key="pref_batt_rest_s"
+            app:title="Rest after cutoff (s)"
+            app:summary="With the load off, keep reading so the report captures the pack's voltage rebound. 0 = report immediately."
+            app:defaultValue="60" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Demo device">
+        <EditTextPreference
+            app:key="pref_demo_emf"
+            app:title="Source voltage (V)"
+            app:defaultValue="12.6"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_demo_r"
+            app:title="Series resistance (Ω)"
+            app:defaultValue="0.35"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Monitoring &amp; alarms">
+        <EditTextPreference
+            app:key="pref_alarm_low_v"
+            app:title="Low-voltage alarm (V)"
+            app:summary="Beep and notify when the source drops below this while loaded. 0 = off."
+            app:defaultValue="0" />
+        <EditTextPreference
+            app:key="pref_alarm_high_t"
+            app:title="High-temperature alarm (°C)"
+            app:summary="Beep and notify when the load unit exceeds this. 0 = off."
+            app:defaultValue="0" />
+        <EditTextPreference
+            app:key="pref_snapshot_min"
+            app:title="Periodic CSV snapshot (minutes)"
+            app:summary="While connected, append a reading to a rolling CSV log every N minutes. 0 = off."
+            app:defaultValue="0" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="About">
+        <!-- Summary is set at runtime from BuildConfig.VERSION_NAME. -->
+        <Preference
+            app:key="pref_about"
+            app:title="EL15 Load Control" />
+    </PreferenceCategory>
+</PreferenceScreen>

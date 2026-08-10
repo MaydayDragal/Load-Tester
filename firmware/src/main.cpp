@@ -580,28 +580,47 @@ void setup() {
   // Exercises the whole path the capacity test uses — mount, tiered append,
   // batch flush, replay — without energising anything.
   Serial.printf("[sdtest] free heap before LittleFS: %u B\n", (unsigned)ESP.getFreeHeap());
-  if (samplelog::start()) {
+  if (samplelog::batt.start()) {
     Serial.printf("[sdtest] free heap after  LittleFS: %u B\n", (unsigned)ESP.getFreeHeap());
-    // 600 offered samples one simulated second apart. At a 2 s base interval
+    // 600 offered samples one simulated second apart. At the 2 s base interval
     // that must store ~300 of them, proving the tier schedule rate-limits.
     for (uint32_t t = 0; t < 600; t++)
-      samplelog::add(t, 12.0f - t * 0.001f, 1.5f, 30.0f + t * 0.01f,
-                     1.5f * t / 3600.0f, 18.0f * t / 3600.0f);
-    samplelog::flush();
-    Serial.printf("[sdtest] log stored %lu records at %lu s interval (expect ~300 @ 2 s)\n",
-                  (unsigned long)samplelog::count(), (unsigned long)samplelog::intervalS());
+      samplelog::batt.add(t * 1000u, 12.0f - t * 0.001f, 1.5f, 30.0f + t * 0.01f,
+                          1.5f * t / 3600.0f, 18.0f * t / 3600.0f);
+    samplelog::batt.flush();
+    Serial.printf("[sdtest] batt log stored %lu records at %lu ms interval (expect ~300 @ 2000)\n",
+                  (unsigned long)samplelog::batt.count(), (unsigned long)samplelog::batt.intervalMs());
     uint32_t seen = 0, firstT = 0, lastT = 0;
     float firstV = 0, lastV = 0;
-    samplelog::replay([&](const samplelog::Rec &r) {
-      if (seen == 0) { firstT = r.tS; firstV = r.v; }
-      lastT = r.tS; lastV = r.v; seen++;
+    samplelog::batt.replay([&](const samplelog::Rec &r) {
+      if (seen == 0) { firstT = r.tMs; firstV = r.v; }
+      lastT = r.tMs; lastV = r.v; seen++;
       return true;
     });
-    Serial.printf("[sdtest] replay read %lu records, t %lu..%lu s, V %.3f..%.3f\n",
+    Serial.printf("[sdtest] batt replay read %lu records, t %lu..%lu ms, V %.3f..%.3f\n",
                   (unsigned long)seen, (unsigned long)firstT, (unsigned long)lastT,
                   firstV, lastV);
-    Serial.printf("[sdtest] log %s\n",
-                  (seen == samplelog::count() && seen > 0) ? "OK" : "FAIL (count mismatch)");
+    Serial.printf("[sdtest] batt log %s\n",
+                  (seen == samplelog::batt.count() && seen > 0) ? "OK" : "FAIL (count mismatch)");
+    // The rtest log at its 25 ms base must store EVERY sample offered at the
+    // 50 ms poll cadence — that is the whole point of the second instance —
+    // and it must not have disturbed the batt log it shares the flash with.
+    if (samplelog::rtest.start()) {
+      for (uint32_t t = 0; t < 400; t++)
+        samplelog::rtest.add(t * 50u, 12.0f - t * 0.01f, 0.05f + t * 0.01f,
+                             30.0f, 0.05f + t * 0.01f, (float)(t % 8));
+      samplelog::rtest.flush();
+      uint32_t rseen = 0;
+      samplelog::rtest.replay([&](const samplelog::Rec &) { rseen++; return true; });
+      Serial.printf("[sdtest] rtest log stored %lu of 400 offered (expect 400), replay %lu\n",
+                    (unsigned long)samplelog::rtest.count(), (unsigned long)rseen);
+      bool crossTalk = samplelog::batt.count() != seen;
+      Serial.printf("[sdtest] rtest log %s\n",
+                    (rseen == 400 && !crossTalk) ? "OK"
+                                                 : "FAIL (count mismatch or batt log disturbed)");
+    } else {
+      Serial.println("[sdtest] rtest log FAIL - could not start");
+    }
   } else {
     Serial.println("[sdtest] log FAIL - LittleFS unavailable");
   }

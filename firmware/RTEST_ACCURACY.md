@@ -291,4 +291,212 @@ the bench source collapsed mid-run.
 - **Averaging the priming Voc** (§2.6) and an **endpoint-weighted ladder** (§2.4).
 
 ---
+
+## 7. The ~1.2 A current-reading glitch (2026-08-06)
+
+A blip shows up in every sweep's current trace, once on the ascent and once on
+the descent. It is **the load's own current reading**, not current the circuit
+drew, and not anything the controller does.
+
+### What the data says
+
+From `RTEST_003` (Android app, 0.05 → 4 A over 15 s, 250 logged packets, a
+~14.3 V source through 0.346 Ω):
+
+| elapsed | commanded | reported I | reported V | V implies I |
+|---|---|---|---|---|
+| 2.458 s | 1.241 A | **1.7939 A** | 13.9665 V | 1.08 A |
+| 2.502 s | 1.305 A | **1.7939 A** | 13.9665 V | 1.08 A |
+| 12.894 s | 1.125 A | **0.6226 A** | 13.9506 V | 1.12 A |
+
+Both events sit where the current crosses **~1.2 A**, one per ramp direction. A
+60 s sweep the same morning put them at sample 145 and sample 819 of 962 —
+again ~1.2 A each way, symmetric about the turnaround.
+
+Three things make it a measurement artifact rather than a real excursion:
+
+1. **The voltage does not move.** A genuine 0.55 A excursion drags a 0.346 Ω
+   source down 0.19 V. The terminal voltage instead rose 0.03 V and stayed on
+   the fitted line — only the current channel is wrong.
+2. **One event is exactly half the true current** (0.6226 A against 1.2452 A).
+   In IEEE-754 that is a single bit of the exponent, which is what a scaling or
+   range change looks like; noise does not halve a number.
+3. **The frames pass the device's own sum-to-zero checksum**, so the load built
+   them that way — nothing in the BLE path corrupted them.
+
+The duplicate at 2.458/2.502 s is just the poll running faster than the device's
+refresh, so the bad frame is served twice.
+
+### Confirmed on the bench, from a PC (2026-08-06)
+
+The above was inference from app-side logs. It was then tested directly by
+driving the load over BLE from a laptop — no phone, no app — with
+`tools/el15_bench`, which keeps the raw 28 bytes of every frame. Five profiles,
+~3 500 conducting samples. Findings, in order of how much they pin down:
+
+1. **It reproduces with a completely different controller.** The app's own
+   0.05→4→0.05 A sweep, driven from the PC, glitched twice — once each way,
+   both at ~1.2 A. Nothing on the phone is involved.
+
+2. **Every event happens in a 32 mA window.** Across all captures, 11 spikes,
+   and the true current at every one of them lies between **1.175 A and
+   1.207 A**. Nothing anywhere else in 0.02–4.0 A.
+
+3. **It needs the current to be MOVING through that window.** 45 s held at
+   1.15 A, 1.25 A and 1.20 A — 462 samples, including 15 s sitting *on* the
+   threshold — produced **zero** events. So it is not a hunting comparator; it
+   fires on the crossing.
+
+4. **About one crossing in three.** 24 crossings of 1.10↔1.30 A produced 8
+   events. A slow 140 s full-range ramp crossed twice and produced none, which
+   is why a single sweep can look clean.
+
+5. **Only the current field.** The same spike test run over the voltage series
+   of every capture: **0 outliers in ~3 500 samples**. Whatever goes wrong,
+   goes wrong after the two channels have parted company.
+
+6. **There is no second threshold.** A slow 0.05→5 A scan and 20 crossings of
+   0.08↔0.20 A both produced nothing. The low end of an R-test sweep is clean.
+
+7. **The corruption is a one-bit shift of the significand against the
+   exponent.** With the true value known from the neighbours, each reported
+   value is one of:
+
+   | | reported | at 1.20 A | seen |
+   |---|---|---|---|
+   | exponent LSB dropped | `v/2` | 0.600 A | down-crossings |
+   | significand shifted left 1 | `2v-1` | 1.400 A | either |
+   | significand shifted left 2 | `4v-3` | 1.800 A | up-crossings |
+
+   **Correction to an earlier version of this section**, which called these
+   exact and universal on the strength of the first handful of events. On 166
+   events they are neither:
+
+   - They describe *most* events, not all: **~11 % match none of the three**.
+   - They are not literal shifts of the FINAL float's mantissa. A left shift by
+     two would leave the bottom two mantissa bits zero, and 13 events that
+     invert cleanly as `4v-3` have **no** trailing zeros at all. So the shift
+     happens upstream of the float — in a fixed-point intermediate that is then
+     converted normally — and the bit pattern of the result carries no
+     fingerprint of it. Tested as a mode-decider on the held-out set, trailing
+     zeros agree with the truth 14 times and disagree 13: a coin toss.
+
+   What survives is the numeric relationship, which is what the repair below
+   uses. A wrong scale factor would still give a clean ×2 or ×4; `4v-3` is what
+   you get when a significand moves and its exponent does not.
+
+So: a current-range change at 1.20 A, where the rescale between ranges is done
+by shifting the float's fields, and on the crossing sample the shift lands in
+the wrong field or by the wrong amount. It is a firmware fault inside the load.
+Nothing the controller sends changes it, and nothing the controller does can
+prevent it — only refuse the sample.
+
+### What it costs
+
+Three samples out of 250:
+
+| | R | σ_R | R² |
+|---|---|---|---|
+| every packet fitted | 0.346254 Ω | 1.39 mΩ | 0.99601 |
+| the three excluded | 0.346602 Ω | 0.53 mΩ | 0.99942 |
+
+So the artifact barely moves R (0.35 mΩ) but makes the sweep **report itself
+2.6× less certain than it measured** — and "reliable" is gated on exactly that
+number (§2.2).
+
+### What was done about it
+
+**The Android app** rejects a reading whose current sits further from the
+commanded setpoint than `max(0.25 A, 20 %, 4 ramp steps)` — see
+`ResistanceTest.offTargetLimit`. Rejected frames are counted, reported
+(`off_target_samples` in the CSV, a row in the PDF and the result screen) and
+still written to the datapoint log, so the raw sweep remains auditable.
+
+Judged against the bench captures the gate holds up, with one known limit:
+
+- **0 false rejections** in ~3 500 samples across all five profiles. The worst
+  honest regulation lag measured anywhere was 0.183 A, against a floor of
+  0.25 A — a 1.37× margin, narrower than the 2× the phone data alone suggested,
+  which is why the ramp-step term matters: it is what widens the window on a
+  fast sweep instead of leaving that margin to be eaten.
+- **8 of 11 corrupted samples caught.** The three that slip through are the mild
+  `2v-1` mode, whose error at 1.20 A is only 0.2 A — under the floor.
+
+### Catching the ones the command test cannot see
+
+The `|I − target|` window has to be wide — 0.25 A — because the commanded
+current leads the measured one by design. The load's mildest corruption at
+1.20 A moves the reading only 0.20 A, so it fits inside that window and reaches
+the fit as data. Measured over 12 real R-test sweeps (3 698 conducting samples,
+15 one-sample corruptions): **the command test alone misses 4 of the 15**, one
+of them a textbook `2v-1` — 1.4024 A reported where the ramp was at 1.1967.
+
+A second test closes it, and needs nothing from the command. A ramp is
+monotonic, so an honest reading lies **between** the readings either side of it
+— and keeps doing so no matter how far the command has run ahead. Lag preserves
+that ordering; the load's stale repeats are *equal* to a neighbour, so they
+preserve it too. Corruption does not. Over 3 511 samples:
+
+| how far a reading sticks out past BOTH neighbours | |
+|---|---|
+| median | 0.0000 A |
+| 99th percentile | 0.0002 A |
+| corrupted readings | ~0.55 A |
+
+Three orders of magnitude of daylight, so the 0.05 A trigger is nowhere near
+either edge — anything from 0.03 to 0.08 A flags the same 14–17 samples. Adding
+it to the engine (every reading is now held one packet, so both neighbours are
+in hand) caught 3 more corruptions across those sweeps: one recovered, two kept
+out of the fit, and **no honest sample dragged in**. The ramp's own turning
+point is the one place a genuine reading does stand above both neighbours, so
+the test stands down within three setpoint steps of the apex and the ends.
+
+### Recovering the reading instead of dropping it
+
+The corruption is invertible — `2r`, `(r+1)/2`, `(r+3)/4` — so a dropped sample
+is recoverable IF you can tell which one happened. Nothing in the frame says
+(see the correction above), so the engine now holds a suspect reading **one
+packet**, interpolates the ramp across it from the good samples either side, and
+takes the candidate nearest that line — accepting it only within **0.03 A** and
+with no rival within 2.5×. Otherwise it is dropped and counted, as before.
+
+Five discriminators were tried against the bench data before that one. The
+tolerance and the interpolation are both load-bearing:
+
+| rule | right | **wrong** | dropped |
+|---|---|---|---|
+| nearest to the commanded setpoint | 2 | **9** | 68 |
+| nearest to extrapolated past samples | 56 | **4** | 19 |
+| both of those must agree | 2 | **2** | 75 |
+| trailing-zero bit fingerprint | — | coin toss | — |
+| **interpolate across it, tol 0.03 A** | **104** | **0** | 62 |
+
+(the first three over one 79-event run; the last over 166 events across two
+independent 200-crossing runs at the sweep's own slew rate). At a 0.06 A
+tolerance the same rule fabricates 8 currents, which is why 0.03 is not a
+comfort margin. Replaying the whole engine over all nine captures — ~9 000
+samples — repairs 116, drops 75, and gets **none** wrong; the negative controls
+(steady hold, full-range scan, low-current cycle) repair nothing at all.
+
+**It does not improve the measurement, and is not meant to.** On RTEST_003:
+
+| | n | R | σ_R | R² |
+|---|---|---|---|---|
+| no gate | 250 | 0.346254 | 1.392 mΩ | 0.99601 |
+| gate only | 247 | 0.346602 | 0.532 mΩ | 0.99942 |
+| gate + repair | 248 | 0.346697 | 0.549 mΩ | 0.99938 |
+
+A reconstruction carries ~12 mA of error, so it is slightly noisier than a real
+sample; a sweep crosses 1.20 A only twice, so at most about one sample per run
+comes back. Both differences sit far under the 0.6 mΩ run-to-run repeatability
+of §6 — this recovers data without fabricating any, and that is the whole claim.
+The `repaired_samples` count is in the CSV, the PDF and the result screen so a
+report never leans on reconstructions silently.
+
+**The firmware deliberately does not have this gate yet.** It is the same class
+of change reverted on 2026-08-06 for being unproven, and it stays unproven on
+the board until a sweep is run with it. Until then the two engines differ in
+this one respect, and a board-saved report will show the wider σ_R.
+
+---
 *Companion: resistance_test.h (engine), CAPACITY_PLAN.md, FEATURE_IDEAS.md.*

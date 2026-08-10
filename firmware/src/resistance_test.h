@@ -42,6 +42,7 @@
 #include <vector>
 #include "el15_controller.h"
 #include "el15_protocol.h"
+#include "sample_log.h"
 
 class ResistanceTest {
  public:
@@ -181,6 +182,17 @@ class ResistanceTest {
     // Mid-sweep a protection trip is real and immediate: current is flowing.
     if (s.warning[0] != '\0') { abort_("Load protection tripped. Test stopped."); return; }
     if (state_ != SWEEPING) return;
+
+    // Offer every packet to the flash log — the same per-sample record the
+    // capacity test keeps, and at a 25 ms base interval that means literally
+    // every packet for any ordinary sweep length. Logged BEFORE the load-on and
+    // settle gates below on purpose: dropout and transient samples are excluded
+    // from the FIT, but the CSV should show what actually happened, not only
+    // what was fitted. The commanded target rides along so regulation lag is
+    // visible in the file (the fit itself never uses it).
+    if (logging_)
+      samplelog::rtest.add(millis() - tStart_, s.voltage, s.current,
+                           s.temperature, currentTarget_, (float)s.fanSpeed);
 
     // The load must actually be sinking for a sample to be part of the sweep.
     // A packet reporting the load off is either the gap before LOAD_ON lands or
@@ -400,6 +412,14 @@ class ResistanceTest {
 
     sweepMsEff_ = constrain(sweepSeconds, MIN_SWEEP_S, MAX_SWEEP_S) * 1000u;
 
+    // Open the flash-backed datapoint log. Started HERE, not in start(), so a
+    // run that dies in priming never truncates the previous sweep's log — its
+    // report may still be waiting for a card. A failure is non-fatal: the sweep
+    // still runs and reports, the CSV just carries no per-sample block. (Note a
+    // tare sweep records too, replacing the previous sweep's datapoints — by
+    // then its result screen, the only save path, has been left anyway.)
+    logging_ = samplelog::rtest.start();
+
     state_ = SWEEPING;
     tStart_ = millis();
     lastSetMs_ = millis();
@@ -422,6 +442,7 @@ class ResistanceTest {
     bool ok = fitSlope(r, &intercept, &r2, &stdErr);
     finishSafely();
     state_ = IDLE;
+    samplelog::rtest.flush();   // the last partial batch belongs in the report
     if (!ok) {
       if (onError) onError("Not enough usable samples - raise the sample rate or lengthen the sweep.");
       return;
@@ -497,6 +518,7 @@ class ResistanceTest {
   uint32_t primeStartMs_ = 0, lastClearPushMs_ = 0;
   uint32_t sweepMsEff_ = 30000;
   int loadDropouts_ = 0;   // how often the load had to be re-asserted
+  bool logging_ = false;   // flash datapoint log opened for this sweep
 
   // Running regression sums — the whole sample history in six doubles.
   uint32_t n_ = 0;

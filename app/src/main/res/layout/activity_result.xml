@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?android:attr/colorBackground">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="@drawable/header_bg"
+        app:navigationIcon="@drawable/ic_back"
+        app:title="@string/rt_results_title"
+        app:titleTextColor="?attr/colorOnSurface"
+        app:titleTextAppearance="@style/ToolbarTitle" />
+
+    <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/divider" />
+
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="13dp">
+
+            <!-- Headline: the one number the test exists to produce -->
+            <com.loadtester.el15.BlueprintFrame
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:background="@color/surface" android:padding="16dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <TextView android:id="@+id/headlineLabel" style="@style/SectionHeader"
+                        android:text="@string/rt_circuit_resistance" />
+                    <TextView android:id="@+id/headlineValue"
+                        android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp" android:fontFamily="monospace"
+                        android:textSize="34sp" android:textStyle="bold"
+                        android:textColor="@color/value_green" android:text="—" />
+                    <TextView android:id="@+id/headlineSub"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp" android:fontFamily="monospace"
+                        android:textColor="@color/muted" android:textSize="12sp" />
+                    <TextView android:id="@+id/reliabilityText"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:textSize="12sp" />
+                </LinearLayout>
+            </com.loadtester.el15.BlueprintFrame>
+
+            <!-- Chart: V-I fit for a sweep, discharge curve for a capacity run -->
+            <com.loadtester.el15.BlueprintFrame
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="11dp" android:background="@color/surface" android:padding="14dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <TextView android:id="@+id/chartLabel" style="@style/SectionHeader"
+                        android:text="@string/rt_graph" />
+
+                    <com.loadtester.el15.TestChartView android:id="@+id/viChart"
+                        android:layout_width="match_parent" android:layout_height="230dp"
+                        android:layout_marginTop="8dp" />
+
+                    <com.loadtester.el15.TimeSeriesChartView android:id="@+id/curveChart"
+                        android:layout_width="match_parent" android:layout_height="230dp"
+                        android:layout_marginTop="8dp" android:visibility="gone" />
+
+                    <com.google.android.material.chip.ChipGroup android:id="@+id/seriesGroup"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:visibility="gone"
+                        app:singleLine="true" app:chipSpacingHorizontal="6dp" />
+                </LinearLayout>
+            </com.loadtester.el15.BlueprintFrame>
+
+            <!-- Everything the run measured -->
+            <com.loadtester.el15.BlueprintFrame
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="11dp" android:background="@color/surface" android:padding="14dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <TextView style="@style/SectionHeader" android:text="@string/rt_details" />
+                    <TextView android:id="@+id/detailText"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:fontFamily="monospace"
+                        android:textIsSelectable="true"
+                        android:textColor="?attr/colorOnSurface" android:textSize="12sp" />
+                </LinearLayout>
+            </com.loadtester.el15.BlueprintFrame>
+
+            <!-- Report: the same CSV the board writes to its SD card -->
+            <com.loadtester.el15.BlueprintFrame
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="11dp" android:layout_marginBottom="8dp"
+                android:background="@color/surface" android:padding="14dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <TextView style="@style/SectionHeader" android:text="@string/rt_report" />
+                    <TextView android:id="@+id/reportHint"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp" android:textColor="@color/muted"
+                        android:textSize="12sp" android:text="@string/rt_report_hint" />
+
+                    <com.google.android.material.button.MaterialButton android:id="@+id/pdfButton"
+                        style="@style/BtnPrimary" android:layout_width="match_parent"
+                        android:layout_height="50dp" android:layout_marginTop="12dp"
+                        android:text="@string/rt_save_pdf" android:textSize="15sp"
+                        app:icon="@drawable/ic_download" app:iconGravity="textStart" />
+
+                    <com.google.android.material.button.MaterialButton android:id="@+id/saveButton"
+                        style="@style/BtnSecondary" android:layout_width="match_parent"
+                        android:layout_height="42dp" android:layout_marginTop="8dp"
+                        android:text="@string/rt_save_csv_device"
+                        app:icon="@drawable/ic_save" app:iconGravity="textStart" />
+
+                    <com.google.android.material.button.MaterialButton android:id="@+id/shareButton"
+                        style="@style/BtnSecondary" android:layout_width="match_parent"
+                        android:layout_height="42dp" android:layout_marginTop="8dp"
+                        android:text="@string/rt_share" />
+                </LinearLayout>
+            </com.loadtester.el15.BlueprintFrame>
+        </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
+</LinearLayout>
