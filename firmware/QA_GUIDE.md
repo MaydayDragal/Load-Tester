@@ -7,11 +7,13 @@ the wire protocol, safety-critical behavior, and known gaps/risks.
 
 > Scope: the **`firmware/` ESP32-C6 target** (env `esp32-c6-amoled`) running the
 > v2 "Focus" touchscreen UI. Everything verified in this guide was verified on
-> that board. A second target exists — `esp32-s3-lcd35`, the
-> ESP32-S3-Touch-LCD-3.5 — which compiles but has never run on hardware; the
-> feature *behaviour* described here should be identical, but its board bring-up
-> has its own checklist in [`S3_BRINGUP.md`](S3_BRINGUP.md). Do not read a ✅ in
-> this guide as covering that board.
+> that board. A second target exists — `esp32-s3-lcd35b`, the
+> ESP32-S3-Touch-LCD-3.5**B** — whose board bring-up is under way but incomplete:
+> its panel, touch-taps, PSRAM and I²C bus are hardware-verified, while audio, SD
+> and touch scrolling are not. The feature *behaviour* described here should be
+> identical on it, but none of it has been re-run there. Its bring-up state is
+> tracked in [`S3_BRINGUP.md`](S3_BRINGUP.md). **Do not read a ✅ in this guide as
+> covering that board.**
 >
 > The Android app and the phone-based BLE load simulator this guide once
 > referenced as test tools were removed from the repo on 2026-08-03 (last

@@ -1,145 +1,253 @@
-# ESP32-S3-Touch-LCD-3.5 — bring-up checklist
+# ESP32-S3-Touch-LCD-3.5B — bring-up
 
-The port to the Waveshare **ESP32-S3-Touch-LCD-3.5** compiles and is complete in
-the sense that every subsystem has a code path for this board. **Nothing below
-has ever run on the hardware** — the board was not in hand when the port was
-written, and every pin came from reading Waveshare's demo sources, not a
-schematic and not a running device.
+The board arrived on **2026-08-10** and is a Waveshare **ESP32-S3-Touch-LCD-3.5B-C**.
 
-So treat this as a list of *predictions to falsify*, in an order chosen so each
-step depends only on the ones before it. Work down it with the board on the
-bench; anything that fails tells you which assumption in `src/board_s3_lcd35.h`
-was wrong, and the "if it fails" column says where to look first.
+That matters more than the "B" suggests. This port was originally written for the
+**ESP32-S3-Touch-LCD-3.5** (no B) from vendor sources with no hardware in hand.
+The two are different products: the 3.5B drives its panel with an **AXS15231B
+over QSPI**, the 3.5 with an **ST7796 over 4-wire SPI**. The first image flashed
+to this board rendered multi-coloured static. The target has been repointed at
+the 3.5B; the plain 3.5 is no longer supported, and `git log` has the old
+`board_s3_lcd35.h` if one ever appears.
+
+This document is now a record of what was actually falsified and what remains
+open, rather than the list of predictions it started as.
 
 **Related docs:** [`S3_UI_HANDOVER.md`](S3_UI_HANDOVER.md) for the UI designer's
-view of this panel (geometry, performance budget, what IPS changes),
-[`HANDOVER.md`](HANDOVER.md) §0 for where the project stands,
+view of this panel, [`HANDOVER.md`](HANDOVER.md) §0 for where the project stands,
 [`QA_GUIDE.md`](QA_GUIDE.md) for the per-feature test matrix (written against the
-C6 board — the *behaviour* it describes should be identical here),
+C6 — the *behaviour* it describes should be identical here),
 [`FIRST_CONTACT.md`](FIRST_CONTACT.md) for the safe order of approaching a real
 EL15, which is unchanged by the board swap.
 
 ---
 
-## 0. Before you plug anything in
+## Status
 
-```bash
-PIO=~/.platformio/penv/Scripts/pio.exe
-"$PIO" run -d firmware -e esp32-s3-lcd35                       # build
-"$PIO" device list                                             # find the port
-"$PIO" run -d firmware -e esp32-s3-lcd35 -t upload --upload-port COMx
-"$PIO" device monitor -p COMx -b 115200
-```
-
-The C6 board is still a first-class target — `-e esp32-c6-amoled` builds the
-hardware-verified image, and `pio run` with no `-e` builds both. Nothing in this
-port changed C6 behaviour (its image is the same size to within a few bytes).
-
-**Do not attach the EL15 or any load for steps 1–8.** None of them need it, and
-a board whose pin map is still unproven has no business commanding a load.
+| # | Subsystem | State |
+|---|---|---|
+| 1 | Boots, no bootloop | ✅ verified |
+| 2 | PSRAM | ✅ verified — 8 MB up |
+| 3 | Panel | ✅ verified — renders the UI correctly |
+| 4 | Touch — taps | ✅ verified — accurate |
+| 4b | Touch — **scrolling** | ❌ **open** — swipes fire the item under the finger |
+| 5 | PMIC / RTC / IMU / expander / codec | ✅ present on I²C; PMIC read verified |
+| 5b | Buttons (BOOT, PWR key) | ⬜ not yet exercised |
+| 6 | Audio | ❌ **open** — I²S init fails |
+| 6b | Backlight brightness | ⚠️ dim at full duty; cause not established |
+| 7 | SD card | ⬜ not yet exercised |
+| 8 | BLE | ◐ scanning works and lists real devices; connect/telemetry untested |
+| 9 | The EL15 itself | ⬜ not yet |
 
 ---
 
-## 1. It boots at all
+## Build and flash
 
-| Check | Expect | If it fails |
+```bash
+PIO=~/.platformio/penv/Scripts/pio.exe
+"$PIO" run -d firmware -e esp32-s3-lcd35b                       # build
+"$PIO" device list                                              # find the port
+"$PIO" run -d firmware -e esp32-s3-lcd35b -t upload --upload-port COMx
+"$PIO" device monitor -p COMx -b 115200
+```
+
+The C6 is still a first-class target — `-e esp32-c6-amoled` builds the
+hardware-verified image, and `pio run` with no `-e` builds both. Nothing in this
+port changes C6 behaviour.
+
+The board enumerates as a native USB CDC port (VID:PID `303A:1001`), and
+`esptool ... chip_id` reports `ESP32-S3 (QFN56) revision v0.2`, `Embedded PSRAM
+8MB (AP_3v3)`, 16 MB flash, `eFuse: quad`.
+
+> Waveshare's factory image was backed up before the first flash. If you need it,
+> `esptool --port COMx write_flash 0 waveshare-s3-lcd35b-factory-flash.bin`.
+
+---
+
+## What the boot log tells you
+
+A healthy boot on this board looks like this — about 18 lines, not thousands:
+
+```
+[prefs] loaded (inFlight=0, ssid=-)
+[i2c] scan: 0x18 0x20 0x34 0x3B 0x51 0x6B  (6 devices)
+[boot] reset reason: ...
+[boot] heap after UI: 57040 B free, largest block 31732 B (...)
+[boot] psram: 8388608 B total, 7769852 B free, largest block 7733236 B
+[pmic] controller battery: ABSENT (running on USB), ...
+```
+
+**The I²C scan is the single most useful line.** Every peripheral except the
+panel hangs off that one bus, so a missing address explains every later failure
+that touches it:
+
+| Address | Part |
+|---|---|
+| 0x18 | ES8311 audio codec |
+| 0x20 | TCA9554 I/O expander (panel reset is bit 1) |
+| 0x34 | AXP2101 PMIC (battery, PWR key) |
+| **0x3B** | **AXS15231B touch** — *not* 0x38 |
+| 0x51 | PCF85063 RTC |
+| 0x6B | QMI8658 IMU (unused) |
+
+**`[boot] psram: ... 0 B total` is the unambiguous PSRAM failure.** It has never
+happened on this board — `board_build.arduino.memory_type = qio_opi` is correct
+and the `flash_mode = dio` fallback this document used to recommend was never
+needed.
+
+---
+
+## What was wrong, and how it was found
+
+Worth reading before debugging anything else here: four of these were silent, and
+none of them failed at build time.
+
+**The panel transport.** Multi-coloured static. The board is a 3.5B, so the
+ST7796-over-SPI path could never have worked. Arduino_GFX 1.6.7 already ships
+`Arduino_AXS15231B` and `Arduino_ESP32QSPI`, so no dependency bump was needed —
+the version pinning `QA_GUIDE` §1 ties to hardware-verified results is intact.
+
+**Touch at the wrong address.** Nothing answers at 0x38. Polling it emitted ~90
+failed I²C transactions per second — 2095 of them in a 25 s capture, burying
+every other line in the log. The part is at 0x3B and is not a register file at
+all: it answers a fixed 11-byte command with a 14-byte report.
+
+**Four GPIOs assigned to other jobs**, none of which fails at build time:
+
+| Pin | Actually | The old header said |
 |---|---|---|
-| Serial comes up at 115200 | `[boot] reset reason:` line | USB CDC: the env sets `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`; if the port enumerates but is silent, try a hard reset while the monitor is attached |
-| No bootloop | one boot banner, then the UI | a panic loop here is almost always PSRAM (step 2) |
+| 12 | panel QSPI CS | I²S MCLK |
+| 4 | panel QSPI D3 | "the ONLY general-purpose pin not spoken for" |
+| 2 | panel QSPI D1 | panel MISO |
+| 3 | panel QSPI D2 | panel DC |
 
-## 2. PSRAM came up — **check this before anything visual**
+The GPIO 12 collision is the dangerous one: it only stayed harmless because
+audio init was failing for an unrelated reason. I²S MCLK is **44** here.
 
-This is the single assumption most likely to be wrong, and it silently degrades
-everything else, so confirm it early.
+**The panel will not accept a partial write.** A flush that does not start at
+row 0 and span the full width walks out of step with the controller's line
+stride, and every line after the first lands offset. Symptom: a recognisable
+first paint with every other line shifted, then outright garbage when a tap
+repainted one widget. Rounding the flush to full *width* alone changed nothing —
+which is what ruled out a column-alignment quirk and pointed at the row start.
+The fix is LVGL `full_refresh = 1` with full-frame buffers, which reproduces what
+Waveshare's demos do: they drive the panel through an `Arduino_Canvas` and push
+the whole framebuffer every time, so there is no partial write anywhere in their
+code.
 
-| Check | Expect | If it fails |
-|---|---|---|
-| Draw buffers allocated in PSRAM | **absence** of `[display] PSRAM draw-buffer alloc FAILED` | that message means `board_build.arduino.memory_type` is wrong. It is `qio_opi` (quad flash + octal PSRAM, the N16R8 layout). Try `board_build.flash_mode = dio` in the `esp32-s3-lcd35` env — Waveshare's own ESP-IDF build ends up flashing DIO because octal PSRAM crowds the QIO flash pins |
-| `ESP.getPsramSize()` if you add a print | ~8 MB | if 0, as above |
+**The panel bus was over-clocked.** After the above, roughly every fourth row of
+pixels was still displaced 2–3 px right. `LCD_SPI_HZ` had been set to 80 MHz by
+analogy with the C6. Waveshare call `gfx->begin()` with no argument, taking
+Arduino_GFX's `ESP32QSPI_FREQUENCY` default of **40 MHz** — half. At 40 MHz the
+artifact is gone. This is exactly the failure mode predicted for this bus:
+corruption rather than a clean error is what "too fast" looks like.
 
-The firmware deliberately **falls back** to a smaller internal-RAM buffer rather
-than refusing to boot, so a UI that works but feels sluggish, with that message
-in the log, means PSRAM is absent — not that the panel is slow.
+---
 
-## 3. Panel
+## Open: touch scrolling
 
-| Check | Expect | If it fails |
-|---|---|---|
-| Backlight lights | screen visibly lit after boot | `LCD_BL_GPIO` (6) or the LEDC attach. A dark-but-working panel (you can see content at an angle) is a backlight problem, not a panel problem |
-| Something renders | the v2 UI, not noise | `LCD_SPI_MOSI/SCK/DC` (1/5/3), and the TCA9554 **bit 1** reset pulse — this board pulses reset LOW then releases, unlike the C6 which holds two bits high |
-| Colours are right | dark UI, steel-blue accent `#7ba1c9`, **not** inverted, **not** red/blue swapped | inversion → the `ips = true` argument to `Arduino_ST7796`; red/blue swapped → `LV_COLOR_16_SWAP` in `include/lv_conf.h` (currently 0, paired with `draw16bitRGBBitmap`) |
-| Geometry | 320×480 portrait, nothing clipped at the right edge | `LCD_WIDTH/HEIGHT`; the menu tiles size themselves from `UI_MENU_TILE_W` so they should fit automatically |
-| Speed | screen transitions feel immediate | try raising `LCD_SPI_HZ` from 40 MHz to 80 MHz (Waveshare's ESP-IDF port uses 80). Corruption rather than a clean failure is the symptom of going too fast |
+Taps land accurately. **Swipes do not scroll** — a drag fires the item under the
+finger the moment it lands.
 
-## 4. Touch
+The first attempt at this was to stop reporting malformed frames as releases. The
+AXS15231B emits partial frames mid-gesture, and the vendor's `bsp_touch_read()`
+returns early *without* modifying its stored touch data, so the last point and
+the finger-down state both persist. This port was translating those rejections
+into "no touch", which reads to LVGL as press-then-release — a click, and never
+enough accumulated movement to become a scroll. `readTouch()` now routes
+malformed frames to its `-1` ("transient, hold previous state") return instead,
+with a 400 ms watchdog so a missed release frame cannot strand a press.
 
-| Check | Expect | If it fails |
-|---|---|---|
-| Taps register | buttons respond, touch-snap feels like the C6 | `TOUCH_I2C_ADDR` 0x38. The FT6336 is the same FocalTech family as the C6's part, so `touchInit()` should need no change |
-| Coordinates map correctly | tap lands where you touched, not mirrored or rotated | the vendor's LVGL config uses `mirror_x = 1` at rotation 0. **This is the most likely touch defect.** If X is mirrored, invert it in `readTouch()` (`x = LCD_WIDTH - 1 - x`) |
-| No dead first-tap after idle | first tap after 30 s idle registers | the auto-sleep disable writes in `touchInit()` |
+**That did not fix it.** So the next step is to stop reasoning about the frames
+and read them: log the raw 14 bytes during a slow drag and see what the part
+actually sends between touch-down and lift. Until that is done, treat the
+paragraph above as a plausible but unconfirmed model of this controller.
 
-## 5. Buttons, PMIC, RTC
+Note the touch-target snapping in `display.cpp` shifts a whole gesture by the
+offset computed at press time; it was tuned for the C6's ~320 DPI 1.8" panel and
+is a second thing worth suspecting on a 3.5" one.
 
-| Check | Expect | If it fails |
-|---|---|---|
-| BOOT button | short press acts as e-stop; long press per `QA_GUIDE` | `BOOT_BTN_GPIO` is **0** on this board. If it reads as permanently pressed, you may have inherited the C6's GPIO 9 — which here is the SD card's DAT0 |
-| PWR key | short/long press events arrive | AXP2101 IRQ bits at 0x34; the key is on the PMIC, not a GPIO, on both boards |
-| Battery readout | plausible % and mV in Settings | AXP2101 register map is shared with the C6 and should need nothing |
-| RTC | set the clock, reboot, time survives | PCF85063 at 0x51, same as the C6 |
+## Open: audio
 
-## 6. Audio
+I²S init fails:
 
-| Check | Expect | If it fails |
-|---|---|---|
-| `[audio] ready (ES8311)` | present in the boot log | `ES8311_I2C_ADDR` 0x18 |
-| Tap click audible | clean tone, no glitching | I2S pins 12/13/15/16. **If tones are silent but init succeeded, suspect DOUT/DIN are swapped** — Waveshare's own comments on those two pins contradict their code, and this port follows the code (16 = to codec/speaker) |
-| No amp-enable needed | sound works with no expander write | this board hardwires the amp on; `ampEnable()` is a deliberate no-op here |
+```
+gdma: gdma_register_tx_event_callbacks(): user context not in internal RAM
+i2s_common: i2s_init_dma_intr(): Register tx callback failed
+ESP_I2S.cpp initSTD(): ERROR: ESP_ERR_INVALID_ARG
+```
 
-## 7. SD card — **the biggest behavioural change**
+This is **not our bug and not a pin problem** — it is an incompatibility inside
+arduino-esp32's own prebuilt S3 config:
 
-The C6 bit-bangs SPI at a few hundred kHz. This board uses the hardware SDMMC
-host in 1-bit mode, which should be roughly a hundred times faster.
+```
+# CONFIG_I2S_ISR_IRAM_SAFE is not set   -> I2S allocates its channel object with
+                                           MALLOC_CAP_DEFAULT, which on a PSRAM
+                                           board can land in external RAM
+CONFIG_GDMA_ISR_IRAM_SAFE=y             -> GDMA rejects a callback user context
+                                           that is not in internal RAM
+```
 
-| Check | Expect | If it fails |
-|---|---|---|
-| Settings ▸ SD card check | `SDHC nn.n GB` | `SD_MMC_CLK/CMD/D0` (11/10/9). Only those three lines are wired — 1-bit mode is mandatory, and SPI-mode SD is impossible here (no D3) |
-| Save a report | writes **and verifies** in well under a second | the verified-save path (CRC-32 read-back) is unchanged; only the transport differs |
-| `[sd] verify OK: … read back and matched` | present on every save | if verification fails on a good card, suspect the `fsSync`/`fsClose` shim — the VFS reports write errors through the Print error flag rather than a return code |
-| FAT timestamp | file's modified date in a PC listing matches the RTC | this board has **no SdFat callback**; it pushes the RTC into the system clock at mount (`syncSystemClockFromRtc`). A 1970 date means the RTC was unset or that call did not run |
-| Eject / re-insert | next save re-inits and works | `cardResponds()` uses `cardType()` here rather than a CID round-trip — a weaker check than the C6's, and worth a deliberate test |
+Those two are mutually exclusive on any PSRAM board using I²S. Pinning the
+allocator with `heap_caps_malloc_extmem_enable(SIZE_MAX)` around the init was
+tried and does **not** work, because the driver calls
+`heap_caps_calloc(..., MALLOC_CAP_DEFAULT)` directly and that bypasses the
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` split which that knob controls. That
+attempt was reverted rather than left in place looking like a fix.
 
-## 8. BLE
+The C6 has no PSRAM and so never hits this.
 
-| Check | Expect | If it fails |
-|---|---|---|
-| Scan finds devices | named peers listed | nothing board-specific; NimBLE config is shared |
-| Connect + telemetry | ~17–19 fresh samples/s | the C6's contiguous-heap pressure that forced the tiny draw buffer **does not exist here** — if BLE connects fail with HCI 0x3e on this board, that is a new bug, not the old memory one |
+## Open: brightness
 
-## 9. Only now: the EL15
+The panel reads dim. `ledcAttach()` succeeds (it is checked and logged now), and
+the default is full duty, so the obvious explanations are already excluded. Note
+`prefs::change()` writes *all* keys, so any device that has ever had a setting
+changed already has the old 200 in NVS and keeps it until the slider is moved —
+check the slider position before concluding the hardware is at fault.
 
-Everything above is bench-safe. From here follow
-[`FIRST_CONTACT.md`](FIRST_CONTACT.md) unchanged — connect, telemetry, mode and
-setpoint at zero load, then LOAD ON at a small current, then the R-test and
-capacity engines. The engines themselves are board-independent code that has
-been exercised on real hardware from the C6; what you are re-proving is that the
-new board drives them identically.
+---
+
+## Still to do
+
+**Buttons, PMIC, RTC (step 5b).** BOOT is GPIO **0** here, not the C6's GPIO 9 —
+on this board GPIO 9 is the SD card's DAT0, so the old pin would have read the SD
+bus as a button. The PWR key is on the PMIC, not a GPIO, on both boards. Set the
+clock, reboot, confirm the time survives.
+
+**SD card (step 7)** — the biggest behavioural change. The C6 bit-bangs SPI at a
+few hundred kHz; this board uses the hardware SDMMC host in 1-bit mode, which
+should be ~100× faster. Only CLK/CMD/D0 are wired (11/10/9), so 1-bit is
+mandatory and SPI-mode SD is impossible (no D3). Check: Settings ▸ SD card check
+reports a size; a report saves *and verifies* in well under a second; `[sd]
+verify OK` appears on every save; the FAT timestamp matches the RTC (this board
+has no SdFat callback and instead pushes the RTC into the system clock at mount —
+a 1970 date means that did not run); eject/re-insert re-inits.
+
+**BLE (step 8).** Scanning already works and lists real devices. Connect and
+telemetry are untested. The C6's contiguous-heap pressure does not exist here, so
+an HCI 0x3e connect failure on this board would be a new bug, not the old memory
+one — though note internal heap still reports only ~57 KB free / ~31 KB largest
+block, because the draw buffers are in PSRAM but much else is not.
+
+**Only then, the EL15 (step 9).** Follow [`FIRST_CONTACT.md`](FIRST_CONTACT.md)
+unchanged. The test engines are board-independent and have been exercised on real
+hardware from the C6; what you are re-proving is that this board drives them
+identically.
 
 ---
 
 ## What this port did NOT change
 
-Worth knowing so you do not go looking for board causes for these:
+So you do not go looking for board causes for these:
 
 - **Every test engine** (`capacity_test.h`, `resistance_test.h`,
   `battery_model.h`, `report.h`) is untouched and board-independent.
 - **The BLE client and protocol** are untouched.
-- **The UI** changed in exactly one respect: the 2-column menu tiles derive
-  their width from the panel instead of a hard-coded 164 px. Everything else was
-  already flex-laid-out and resolution-agnostic.
-- **Screen care**: pixel-shift burn-in mitigation now defaults **off** on this
-  board (an IPS LCD does not burn in). Idle dim/blank still applies and matters
-  more here, since the backlight is where the display power goes.
-- **Low-memory mode** (the Wi-Fi RAM window) is a no-op on this board. With
-  PSRAM there is nothing to free, and doing it anyway would have moved the draw
-  buffer out of PSRAM into the internal RAM Wi-Fi wants.
+- **The UI** changed in one respect: the 2-column menu tiles derive their width
+  from the panel instead of a hard-coded 164 px.
+- **Screen care**: pixel-shift burn-in mitigation defaults **off** here (an IPS
+  LCD does not burn in). Idle dim/blank still applies and matters more, since the
+  backlight is where the display power goes.
+- **Low-memory mode** (the Wi-Fi RAM window) is a no-op on this board. With PSRAM
+  there is nothing to free, and doing it anyway would move the draw buffer out of
+  PSRAM into the internal RAM Wi-Fi wants.

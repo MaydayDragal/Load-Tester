@@ -1,7 +1,14 @@
 # UI handover — the 3.5″ (ESP32-S3) controller
 
-For the designer taking on the interface of the **ESP32-S3-Touch-LCD-3.5** build
+For the designer taking on the interface of the **ESP32-S3-Touch-LCD-3.5B** build
 of the EL15 load controller.
+
+> This document was written for the plain 3.5 before the hardware arrived. The
+> board turned out to be the **3.5B** — same 320×480 IPS panel and the same
+> everything below, but driven by an AXS15231B over QSPI rather than an ST7796
+> over SPI. **Nothing in this document changes** as a result: the panel size,
+> geometry, DPI and colour behaviour are identical, and those are what design
+> decisions rest on. The one addition is under "Performance budget" below.
 
 You do not need to read code. You do need [`UI_DESIGN_BRIEF.md`](UI_DESIGN_BRIEF.md)
 first — it explains what the device *is*, who uses it, and the visual language
@@ -15,11 +22,14 @@ Two warnings before you start:
    constraint: this screen is TINY" — **no longer holds**. That constraint is
    what shaped most of the current layout. It is gone. Read §1 below before you
    take any of that brief's sizing advice literally.
-2. **Nobody has seen this UI on the new panel.** The firmware compiles for the
-   S3 board and every subsystem has a code path, but the hardware was not in
-   hand when the port was written and has never been powered on. Anything below
-   marked *unverified* is an inference from the vendor's documentation, not an
-   observation. See [`S3_BRINGUP.md`](S3_BRINGUP.md).
+2. **The UI has now been seen on the real panel** (2026-08-10) and renders
+   correctly — header, mode card, the voltage and current cards and the LOAD OFF
+   button all land where they should, at the right size and colours. So §1's
+   geometry is observation, not inference. What is *not* yet settled: touch
+   scrolling does not work, audio is dead, and SD is untested — none of which
+   should affect layout decisions, but do not design a gesture-heavy interface
+   until scrolling is fixed. See [`S3_BRINGUP.md`](S3_BRINGUP.md) for the
+   current state.
 
 ---
 
@@ -151,28 +161,44 @@ through failure analysis. Treat them as fixed requirements, not suggestions.
 
 ## 4. The performance budget — please read this one
 
-The new board has a faster processor and 8 MB of PSRAM, so the natural
-assumption is that the UI got faster. **For pixel-pushing, it got slower.** The
-old panel used a 4-lane bus; this one uses a single-lane SPI.
+**Corrected 2026-08-10, on real hardware.** This section previously said the new
+panel was a single-lane SPI and roughly 8× slower to redraw. That was written for
+the plain 3.5. The 3.5B is **QSPI, 4 lanes, at 40 MHz**, so the gap is far
+smaller — but a different constraint replaced it, and this one shapes design
+much more.
 
-| | Old (QSPI ×4 @ 80 MHz) | New (SPI ×1 @ 40 MHz) |
+| | Old C6 (QSPI ×4 @ 80 MHz) | New 3.5B (QSPI ×4 @ 40 MHz) |
 |---|---|---|
-| Full-screen redraw | **~8 ms** | **~61 ms** |
+| Bus bandwidth | ~40 MB/s | ~20 MB/s |
+| Bytes per full frame | 368×448×2 = 330 KB | 320×480×2 = 307 KB |
+| Full-screen redraw | ~8 ms | **~15 ms** |
 
-That is roughly **8× slower**, and it is a hard bandwidth limit, not something
-optimisation can remove. (Raising the bus to 80 MHz — which the vendor's own
-code does — would halve it to ~31 ms. That is an early bring-up experiment, not
-something to design around yet.)
+Those are bandwidth calculations, not stopwatch measurements — treat them as the
+right order of magnitude. 40 MHz is not a conservative setting to be optimised
+away later: it is the speed Waveshare's own code runs, and 80 MHz was tried on
+this board and produced visible corruption.
+
+**The constraint that actually matters: every repaint is a full-frame repaint.**
+
+This panel does not render a partial write correctly, so the firmware hands LVGL
+the whole screen on every flush (`full_refresh`). There is no such thing as a
+cheap small update here. Repainting one digit costs the same ~15 ms as repainting
+everything.
 
 What this means for you:
 
-- **Avoid full-screen transitions.** A slide or cross-fade between screens
-  repaints everything, repeatedly. At ~61 ms a frame it will look like a stutter,
-  not a transition. Prefer instant screen changes, or animate a small region.
-- **Partial updates are cheap; full repaints are not.** A design where a live
-  value updates inside a small fixed box costs almost nothing. A design where a
-  changing value reflows its neighbours forces a wide repaint several times a
-  second.
+- **The old advice is inverted.** On the C6, "keep live values in small fixed
+  boxes so only a small region repaints" was the rule. Here it buys nothing.
+  Design for whatever reads best; you are not paying for area.
+- **Do budget by frame RATE instead.** ~15 ms per frame is a ceiling around
+  60 fps in the abstract, but the redraw shares a core with BLE and the test
+  engines, so treat **anything that repaints faster than ~10 Hz as expensive**
+  regardless of how small it is.
+- **Avoid continuous animation.** A spinner or a cross-fade is now a sustained
+  full-frame redraw for its whole duration. A brief transition is fine; a
+  permanently animating element on a screen that also streams telemetry is not.
+- **Static-but-dense is free.** A busy layout that rarely changes costs nothing
+  extra, because the cost is per frame, not per pixel changed.
 - **Give live readouts fixed-width space.** If a number's width changes with its
   value, its container reflows and the repaint spreads outward. This matters
   more here than it did before.

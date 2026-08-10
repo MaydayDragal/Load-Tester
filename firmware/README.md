@@ -11,7 +11,12 @@ pin map):
 | Env | Board | Panel | State |
 |---|---|---|---|
 | `esp32-c6-amoled` | ESP32-C6-Touch-AMOLED-1.8 | 368×448 QSPI AMOLED | **hardware-verified** — every bench result in the docs is from this board |
-| `esp32-s3-lcd35` | ESP32-S3-Touch-LCD-3.5 | 320×480 ST7796 SPI IPS | compiles; **never run on hardware** — see [`S3_BRINGUP.md`](S3_BRINGUP.md) |
+| `esp32-s3-lcd35b` | ESP32-S3-Touch-LCD-3.5**B** | 320×480 QSPI AXS15231B IPS | bring-up in progress — panel, touch-taps, PSRAM and the I²C bus verified on hardware; audio and SD not yet. See [`S3_BRINGUP.md`](S3_BRINGUP.md) |
+
+> The S3 target is the **3.5B**, which is a different product from the plain
+> 3.5 — QSPI AXS15231B rather than SPI ST7796, and four GPIOs assigned
+> differently. Firmware for one renders as static on the other. The plain 3.5 is
+> not supported.
 
 The S3 board brings 8 MB of PSRAM and a hardware SDMMC host, which lifts the two
 constraints that shape the C6 build (a 1/7-frame draw buffer fighting BLE for
@@ -121,7 +126,7 @@ hop between resets, so discover it rather than hard-coding it.
 ```bash
 PIO=~/.platformio/penv/Scripts/pio.exe
 PORT=$("$PIO" device list | grep -oE 'COM[0-9]+' | head -1)
-E=esp32-c6-amoled          # or esp32-s3-lcd35
+E=esp32-c6-amoled          # or esp32-s3-lcd35b
 "$PIO" run -d firmware -e $E                                  # build (-Wall -Wextra on)
 "$PIO" run -d firmware -e $E -t upload --upload-port "$PORT"  # flash
 "$PIO" device monitor -p "$PORT" -b 115200                    # serial log
