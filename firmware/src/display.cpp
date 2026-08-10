@@ -74,10 +74,10 @@ namespace display {
 // chunks = faster. How tall it can be is entirely a question of what memory the
 // board has.
 #if BOARD_PANEL_QSPI_TFT
-// FULL frame per bank — this panel is not merely faster with a big buffer, it
-// requires whole-frame writes to render correctly. See the full_refresh comment
-// where the driver is registered. Two banks of 320*480*2 = 300 KB each, 600 KB
-// total, which is 7 % of the 8 MB PSRAM.
+// FULL frame — this panel is not merely faster with a big buffer, it requires
+// whole-frame writes to render correctly. See the direct_mode comment where the
+// driver is registered. ONE bank of 320*480*2 = 300 KB, under 4 % of the 8 MB
+// PSRAM; the second bank is deliberately not allocated (see the allocation).
 static const uint32_t BUF_LINES = LCD_HEIGHT;
 #elif BOARD_HAS_PSRAM
 // 8 MB of PSRAM: take a third of the frame per bank, TWO banks (~300 KB total,
@@ -176,6 +176,7 @@ static const uint8_t AXS_READ_CMD[11] = {
 #define S3_TOUCH_POLL_MS 20
 #endif
 
+
 static int readTouch(uint16_t &x, uint16_t &y) {
   uint8_t d[14];
   Wire.beginTransmission(TOUCH_I2C_ADDR);
@@ -187,28 +188,44 @@ static int readTouch(uint16_t &x, uint16_t &y) {
   if (Wire.requestFrom((int)TOUCH_I2C_ADDR, (int)sizeof(d)) < (int)sizeof(d)) return -1;
   for (size_t i = 0; i < sizeof(d); i++) d[i] = Wire.read();
 
-  // Frame-quality census, printed every 2 s when the debug flag is on. The
-  // garbage rate is measurable with nobody touching the panel, which makes the
-  // poll rate and settle time tunable without a human in the loop.
+  // Frame-quality census. Counters are CUMULATIVE since boot and are never
+  // reset, so a capture taken at any later moment still shows every touch that
+  // has happened. That matters more than it sounds: an interval-reset census has
+  // to be running at the same instant somebody is touching the panel, and
+  // coordinating that over a serial link wasted several bench runs. Cumulative
+  // counters remove the coordination entirely — touch whenever, read whenever.
 #if S3_TOUCH_FRAME_DEBUG
   {
     static uint32_t nIdle = 0, nGood = 0, nBad = 0, lastRep = 0;
+    static uint16_t lastX = 0, lastY = 0, maxStepPx = 0;
     bool allZero = true;
     for (size_t i = 0; i < sizeof(d); i++) {
       if (d[i] != 0) { allZero = false; break; }
     }
-    if (allZero || d[0] == 0xff) nIdle++;
-    else if (d[1] > 2) nBad++;
-    else nGood++;
+    if (allZero || d[0] == 0xff) {
+      nIdle++;
+    } else if (d[1] > 2) {
+      nBad++;
+    } else {
+      nGood++;
+      // Largest jump between consecutive good frames. If a finger really is
+      // being tracked across the glass this grows; if the coordinates are pinned
+      // it stays ~0, which is precisely the difference between "the drag is
+      // being seen" and "the drag is frozen".
+      uint16_t gx = (uint16_t)(((d[2] & 0x0F) << 8) | d[3]);
+      uint16_t gy = (uint16_t)(((d[4] & 0x0F) << 8) | d[5]);
+      int dx = (int)gx - (int)lastX, dy = (int)gy - (int)lastY;
+      uint16_t step = (uint16_t)((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy));
+      if (nGood > 1 && step < 200 && step > maxStepPx) maxStepPx = step;
+      lastX = gx; lastY = gy;
+    }
     uint32_t now = millis();
     if (now - lastRep >= 2000) {
       lastRep = now;
-      uint32_t tot = nIdle + nGood + nBad;
-      Serial.printf("[tp] %lums/%luus  total=%lu idle=%lu good=%lu garbage=%lu (%lu%%)\n",
-                    (unsigned long)S3_TOUCH_POLL_MS, (unsigned long)S3_TOUCH_SETTLE_US,
-                    (unsigned long)tot, (unsigned long)nIdle, (unsigned long)nGood,
-                    (unsigned long)nBad, (unsigned long)(tot ? nBad * 100 / tot : 0));
-      nIdle = nGood = nBad = 0;
+      Serial.printf("[tp] %lums CUMULATIVE idle=%lu good=%lu garbage=%lu maxStep=%upx\n",
+                    (unsigned long)S3_TOUCH_POLL_MS,
+                    (unsigned long)nIdle, (unsigned long)nGood,
+                    (unsigned long)nBad, (unsigned)maxStepPx);
     }
   }
 #endif
@@ -219,14 +236,10 @@ static int readTouch(uint16_t &x, uint16_t &y) {
   // controller actually sends. This is how the frame layout documented below was
   // established, and how the 10 ms poll rate was caught starving it — worth
   // keeping, because nothing else here is observable from the outside.
-#if S3_TOUCH_FRAME_DEBUG
-  if (d[0] != 0xff) {
-    Serial.printf("[tp] %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                  d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
-                  d[8], d[9], d[10], d[11], d[12], d[13]);
-  } else {
-    Serial.println("[tp] idle (ff)");
-  }
+#if S3_TOUCH_FRAME_DUMP
+  Serial.printf("[tp] %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+                d[8], d[9], d[10], d[11], d[12], d[13]);
 #endif
 
   // Frame layout, confirmed by logging real reports off this board 2026-08-10:
@@ -367,6 +380,133 @@ static lv_point_t snapOffset(lv_point_t p) {
 // Defined fully in the Display-sleep section below; declared here because the
 // touch callback (above that section) must know when the panel is blanked.
 static bool g_asleep = false;
+
+#if S3_UI_SCROLL_DEBUG
+// Bring-up aid: report every visible SCROLLABLE container and what LVGL thinks
+// it can do. scrollBottom == 0 means LVGL sees no overflow, so a drag correctly
+// does nothing — which distinguishes "the gesture is being eaten" from "there is
+// genuinely nothing to scroll", the two explanations that look identical from
+// the front of the glass.
+// Find the first label anywhere under `o`, to name the container in the dump.
+// Screen pointers live in ui.cpp and are not reachable from here, but every
+// screen starts with a title label, so its text identifies it.
+static const char *firstLabelText(lv_obj_t *o, int depth) {
+  if (depth > 4) return nullptr;
+  for (uint32_t i = 0; i < lv_obj_get_child_cnt(o); i++) {
+    lv_obj_t *c = lv_obj_get_child(o, i);
+    if (lv_obj_check_type(c, &lv_label_class)) {
+      const char *t = lv_label_get_text(c);
+      if (t && t[0] && (uint8_t)t[0] >= 0x20) return t;   // skip symbol glyphs
+    }
+    const char *t = firstLabelText(c, depth + 1);
+    if (t) return t;
+  }
+  return nullptr;
+}
+
+// Only the screen-level containers are interesting, so report the ones somebody
+// deliberately made both SCROLLABLE and CLICKABLE ("so background drags
+// scroll"). Hidden ones are included: LVGL still lays them out, so their scroll
+// geometry is readable without navigating there, which keeps this a
+// firmware-side measurement rather than a request to the person at the bench.
+static void dumpScrollables(lv_obj_t *o, int depth) {
+  if (lv_obj_has_flag(o, LV_OBJ_FLAG_SCROLLABLE) &&
+      lv_obj_has_flag(o, LV_OBJ_FLAG_CLICKABLE)) {
+    const char *name = firstLabelText(o, 0);
+    Serial.printf("[ui] %-14s h=%4d down=%5d up=%4d childCnt=%2lu %s\n",
+                  name ? name : "(unnamed)",
+                  (int)lv_obj_get_height(o), (int)lv_obj_get_scroll_bottom(o),
+                  (int)lv_obj_get_scroll_top(o),
+                  (unsigned long)lv_obj_get_child_cnt(o),
+                  lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN) ? "[hidden]" : "[VISIBLE]");
+  }
+  for (uint32_t i = 0; i < lv_obj_get_child_cnt(o); i++) {
+    dumpScrollables(lv_obj_get_child(o, i), depth + 1);
+  }
+}
+
+static void scrollDebugTimer(lv_timer_t *) {
+  Serial.println("[ui] --- active screen ---");
+  dumpScrollables(lv_scr_act(), 0);
+  Serial.println("[ui] --- top layer (overlays) ---");
+  dumpScrollables(lv_layer_top(), 0);
+}
+
+// What is actually under the finger, and can a drag on it ever reach a
+// scrollable ancestor? LVGL walks up from the pressed object looking for one,
+// but stops at any object with SCROLL_CHAIN cleared — which sliders and switches
+// clear in their own constructors precisely so dragging them does not scroll the
+// page. So "chainBlocked=1" on the pressed object is a complete explanation for
+// a page that will not scroll, and it is not visible from the front of the glass.
+static void pressProbeTimer(lv_timer_t *) {
+  static lv_obj_t *last = nullptr;
+  lv_indev_t *in = lv_indev_get_next(nullptr);
+  if (!in) return;
+  // NOT lv_indev_get_obj_act(): that is only meaningful inside an event
+  // callback and reads NULL when polled from a timer. The live press state is
+  // on the indev itself.
+  lv_obj_t *act = in->proc.types.pointer.act_obj;
+  lv_obj_t *scrollObj = in->proc.types.pointer.scroll_obj;
+
+  // Sample THROUGHOUT the gesture, not just at the press. scroll_sum is what
+  // LVGL accumulates as the finger travels, and it is compared against
+  // LV_INDEV_DEF_SCROLL_LIMIT to decide a drag is a scroll. Watching it grow (or
+  // fail to) separates the two candidate faults cleanly:
+  //   point moves, scroll_sum stays ~0  -> the chain is blocked, LVGL will not scroll
+  //   point does NOT move               -> the touch stream is not tracking the finger
+  // Cumulative, for the same reason as the frame census: no need for anyone to
+  // be touching while a capture happens.
+  static int maxSumY = 0, maxTravelY = 0, scrollObjSeen = 0, pressCount = 0;
+  static int pressStartY = 0;
+  static uint32_t lastLog = 0;
+  if (act) {
+    int sy = in->proc.types.pointer.scroll_sum.y;
+    if (sy < 0) sy = -sy;
+    if (sy > maxSumY) maxSumY = sy;
+    if (scrollObj) scrollObjSeen++;
+    if (!last) { pressStartY = in->proc.types.pointer.act_point.y; pressCount++; }
+    int travel = in->proc.types.pointer.act_point.y - pressStartY;
+    if (travel < 0) travel = -travel;
+    if (travel > maxTravelY) maxTravelY = travel;
+  }
+  uint32_t now = millis();
+  if (now - lastLog >= 2000) {
+    lastLog = now;
+    // maxTravel is how far the finger was actually reported to move within one
+    // press; maxSumY is how much of that LVGL accumulated toward a scroll.
+    // travel large + sum ~0 means the gesture reaches LVGL but never converts.
+    // travel ~0 means the touch layer never reported the finger moving at all.
+    Serial.printf("[drag] CUMULATIVE presses=%d maxTravelY=%dpx maxScrollSumY=%dpx scrollObjTicks=%d\n",
+                  pressCount, maxTravelY, maxSumY, scrollObjSeen);
+  }
+
+  if (act == last) return;
+  last = act;
+  if (!act) { Serial.println("[press] released"); return; }
+
+  bool chainBlocked = !lv_obj_has_flag(act, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+  const char *kind = "obj";
+  if (lv_obj_check_type(act, &lv_slider_class))      kind = "SLIDER";
+  else if (lv_obj_check_type(act, &lv_switch_class)) kind = "SWITCH";
+  else if (lv_obj_check_type(act, &lv_btn_class))    kind = "btn";
+  else if (lv_obj_check_type(act, &lv_label_class))  kind = "label";
+
+  // Walk up to the first scrollable ancestor a drag could actually reach.
+  lv_obj_t *p = act;
+  int hops = 0;
+  bool blockedOnWay = false;
+  while (p && hops < 12) {
+    if (lv_obj_has_flag(p, LV_OBJ_FLAG_SCROLLABLE) && lv_obj_get_scroll_bottom(p) > 0) break;
+    if (!lv_obj_has_flag(p, LV_OBJ_FLAG_SCROLL_CHAIN_VER)) { blockedOnWay = true; break; }
+    p = lv_obj_get_parent(p);
+    hops++;
+  }
+  Serial.printf("[press] %-6s chainBlocked=%d -> %s after %d hops%s\n",
+                kind, chainBlocked ? 1 : 0,
+                (p && !blockedOnWay) ? "SCROLLABLE found" : "no scrollable",
+                hops, blockedOnWay ? "  (CHAIN BROKEN on the way up)" : "");
+}
+#endif
 
 static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
   // Hold the last reported state on a transient I2C failure: reporting a spurious
@@ -710,7 +850,7 @@ void begin() {
   // I2C first: the panel reset/enable is on the TCA9554 expander, so the panel
   // must be released from reset over I2C *before* the SH8601 bring-up.
   Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL);
-  Wire.setClock(400000);
+  Wire.setClock(I2C_BUS_HZ);   // per-board — see the note in the board header
   // Scan BEFORE the expander/touch writes below, so what prints is the bus as
   // found rather than the bus as this function has already poked it.
   i2cScan();
@@ -785,7 +925,25 @@ void begin() {
   // written once and read once per flush, which is exactly the access pattern it
   // handles well.
   g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+#if BOARD_PANEL_QSPI_TFT
+  // ONE buffer, deliberately, even though there is PSRAM to spare for two.
+  //
+  // In direct_mode LVGL renders into a full-screen buffer and keeps it as the
+  // live image of the panel. With TWO buffers it alternates between them, and
+  // because each buffer is missing whatever was drawn into the other, it has to
+  // redraw the dirty areas of the LAST TWO frames on every refresh — roughly
+  // double the drawing work for no benefit here. There is no benefit because the
+  // flush is synchronous: draw16bitRGBBitmap returns when the frame has been
+  // pushed, so there is never a moment where LVGL could usefully be rendering
+  // into a second buffer while the first is in flight.
+  //
+  // The cost of that doubled work is paid at the worst possible price, because
+  // these buffers live in PSRAM, which is markedly slower to draw into than
+  // internal SRAM and cannot hold a 300 KB frame anywhere else.
+  g_buf2 = nullptr;
+#else
   g_buf2 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+#endif
   if (!g_buf1) {
     // Falling back rather than dying: a board whose PSRAM did not come up (wrong
     // memory_type in platformio.ini is the usual cause) still boots to a usable
@@ -881,6 +1039,11 @@ void begin() {
   }
 #else
   (void)indev;
+#endif
+
+#if S3_UI_SCROLL_DEBUG
+  lv_timer_create(scrollDebugTimer, 5000, nullptr);
+  lv_timer_create(pressProbeTimer, 30, nullptr);
 #endif
 }
 

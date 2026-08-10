@@ -69,6 +69,10 @@
 // Shared I2C bus (touch + TCA9554 + QMI8658 + PCF85063 + AXP2101): SDA=8, SCL=7.
 #define TOUCH_I2C_SDA  8
 #define TOUCH_I2C_SCL  7
+// 400 kHz. Unchanged and hardware-verified on this board — every bench result in
+// the docs was produced with the bus at this rate. (The S3 board runs 100 kHz;
+// see the note in its header.)
+#define I2C_BUS_HZ     400000
 #define TOUCH_I2C_ADDR 0x38
 #define TOUCH_RST_GPIO -1
 #define TOUCH_INT_GPIO 15

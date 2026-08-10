@@ -109,6 +109,17 @@
 // the camera's SCCB on the -C SKU): SDA=8, SCL=7. Confirmed by the boot scan.
 #define TOUCH_I2C_SDA  8
 #define TOUCH_I2C_SCL  7
+// 100 kHz, the Wire default and therefore what every Waveshare example for this
+// board actually runs at — none of them call setClock(). The C6 runs this bus at
+// 400 kHz and is verified there, but on this board the touch controller returns
+// a large fraction of malformed frames: every byte identical, or the whole
+// 14-byte frame shifted two bytes out of alignment. That is the signature of I2C
+// framing trouble rather than a slow peripheral, and it did not respond to
+// giving the part more thinking time (a settle sweep from 200 us to 3000 us
+// moved the good-frame rate only from ~36 % to ~47 %). This bus carries six
+// devices plus a panel flex; 400 kHz is the same kind of unproven overclock the
+// panel bus turned out to be at 80 MHz.
+#define I2C_BUS_HZ     100000
 // 0x3B, NOT the 0x38 a FocalTech part would answer on. Nothing responds at 0x38
 // on this board; polling it emitted ~90 failed transactions a second and buried
 // every other line in the serial log.
