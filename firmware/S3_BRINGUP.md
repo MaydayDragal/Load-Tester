@@ -36,7 +36,7 @@ EL15, which is unchanged by the board swap.
 | 6 | Audio | ❌ **open** — I²S init fails |
 | 6b | Backlight brightness | ⚠️ dim at full duty; cause not established |
 | 7 | SD card | ⬜ not yet exercised |
-| 8 | BLE | ◐ scanning works and lists real devices; connect/telemetry untested |
+| 8 | BLE | ✅ verified — scan, connect, and streaming telemetry |
 | 9 | The EL15 itself | ⬜ not yet |
 
 ---
@@ -223,11 +223,41 @@ verify OK` appears on every save; the FAT timestamp matches the RTC (this board
 has no SdFat callback and instead pushes the RTC into the system clock at mount —
 a 1970 date means that did not run); eject/re-insert re-inits.
 
-**BLE (step 8).** Scanning already works and lists real devices. Connect and
-telemetry are untested. The C6's contiguous-heap pressure does not exist here, so
-an HCI 0x3e connect failure on this board would be a new bug, not the old memory
-one — though note internal heap still reports only ~57 KB free / ~31 KB largest
-block, because the draw buffers are in PSRAM but much else is not.
+**BLE (step 8) — done.** Scan, connect and streaming telemetry all verified. The
+status line in the log appears once a second, but that is a deliberate
+rate-limited proof-of-life print; the actual poll rate is `pollMs = 50`, i.e.
+20 Hz.
+
+Getting there needed a real fix, and it is the one worth knowing about on any
+PSRAM board. Connecting used to **panic and reboot**:
+
+```
+ESP_ERROR_CHECK failed: esp_err_t 0x101 (ESP_ERR_NO_MEM)
+  npl_os_freertos.c line 445, npl_freertos_callout_init
+  expression: esp_timer_create(&create_args, &co->handle)
+```
+
+NimBLE creates an `esp_timer` while establishing a connection and wraps it in
+`ESP_ERROR_CHECK`, so a failed allocation is an `abort()`, not a returned error.
+Scanning never allocates one, which is why scanning looked fine.
+
+The board had 8 MB of PSRAM free and 57 KB of internal heap, because **LVGL was
+building the entire widget tree in internal SRAM**: it allocates every object and
+style from the C heap, they are all small, and
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` in the prebuilt libs serves anything
+under 4 KB from internal RAM even when PSRAM is empty. Pointing `LV_MEM_CUSTOM_*`
+at a PSRAM-preferring allocator (`include/lv_mem_psram.h`) moved it:
+
+| | before | after |
+|---|---|---|
+| internal free | 57 012 B | **255 896 B** |
+| largest free block | 31 732 B | **188 404 B** |
+
+So the old `[boot] heap after UI` warning about needing ~30 KB contiguous was
+genuinely marginal on this board, not comfortably clear as the port assumed.
+Internal SRAM is the scarce resource here and the only place the BLE stack, DMA
+buffers and ISR-context allocations can live — keep large, non-DMA things out of
+it.
 
 **Only then, the EL15 (step 9).** Follow [`FIRST_CONTACT.md`](FIRST_CONTACT.md)
 unchanged. The test engines are board-independent and have been exercised on real
