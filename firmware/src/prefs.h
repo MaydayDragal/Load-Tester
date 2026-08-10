@@ -11,12 +11,19 @@
 
 #include <stdint.h>
 
+#include "board_config.h"   // LCD_DEFAULT_BRIGHTNESS
+
 namespace prefs {
 
 // Everything persisted, with the defaults used on a blank device.
 struct Data {
   // Display / sound
-  uint8_t brightness = 200;
+  // Follow the board's own default rather than a second hardcoded number. This
+  // is the value that actually reaches the panel: display::begin() applies
+  // LCD_DEFAULT_BRIGHTNESS, but main() immediately overrides it with this pref,
+  // so a board header raising its default had no effect until this stopped
+  // being a fixed 200. Unchanged for the C6, whose default is also 200.
+  uint8_t brightness = LCD_DEFAULT_BRIGHTNESS;
   uint8_t volume = 60;
   bool muted = false;
   uint16_t idleDimS = 120;   // 0 = never; auto-dim after this much idle time

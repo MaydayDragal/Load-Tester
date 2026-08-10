@@ -74,11 +74,14 @@
 // pulsed over I2C before the controller is initialised (see below).
 #define LCD_RST_GPIO   -1
 #define LCD_TE_GPIO    -1
-// The vendor calls gfx->begin() with no argument, taking Arduino_GFX's QSPI
-// default. That default is 80 MHz, which is also what the C6 board's QSPI panel
-// runs at. If the panel shows tearing or corrupted bands rather than a clean
-// failure, this is the first thing to lower.
-#define LCD_SPI_HZ     80000000
+// 40 MHz, which is Arduino_GFX's ESP32QSPI_FREQUENCY default and therefore the
+// speed Waveshare's demos actually run at — they call gfx->begin() with no
+// argument. Do NOT raise this to the C6's 80 MHz by analogy: that was tried on
+// hardware 2026-08-10 and the panel rendered with roughly every fourth row of
+// pixels displaced 2-3 px to the right. An over-clocked panel bus fails as
+// progressive visual corruption rather than as a clean error, so a shift or
+// tearing pattern like that means "too fast", not "wrong pins".
+#define LCD_SPI_HZ     40000000
 
 // The panel's reset line is TCA9554 bit 1, ACTIVE LOW. The vendor sequence is
 // write high, then low, then high, then wait 200 ms — i.e. an ordinary
