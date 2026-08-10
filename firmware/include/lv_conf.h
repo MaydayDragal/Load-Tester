@@ -17,7 +17,24 @@
 // uses draw16bitRGBBitmap in its flush). SWAP 1 with that draw call byte-swaps
 // every pixel → garbled colours. If you ever switch flushCb to the big-endian
 // draw16bitBeRGBBitmap variant, set this back to 1.
+// Byte order of the 16-bit pixels LVGL produces.
+//
+// On the QSPI TFT board this is 1, so LVGL writes big-endian RGB565 and the
+// flush can use Arduino_GFX's draw16bitBeRGBBitmap(). That matters a great deal
+// on this panel, which needs a whole 300 KB frame pushed on every repaint:
+// the little-endian path (writePixels) byte-swaps every one of 153 600 pixels
+// on the CPU into an internal staging buffer before transmitting, whereas the
+// big-endian path (writeBytes) hands the SPI peripheral our buffer address
+// directly. Same pixels, same bus, but one of them reads all 300 KB out of PSRAM
+// through the CPU first.
+//
+// The two settings must stay paired with the matching draw call in display.cpp's
+// flushCb, or the red and blue channels swap.
+#if defined(BOARD_S3_LCD35B)
+#define LV_COLOR_16_SWAP 1
+#else
 #define LV_COLOR_16_SWAP 0
+#endif
 
 // ---- Memory ---------------------------------------------------------------
 // Use the system heap instead of a fixed LVGL pool. The redesigned UI builds
@@ -54,7 +71,28 @@
 #define LV_INDEV_DEF_READ_PERIOD 10
 // Start redrawing sooner after a change (default 30 ms) so press-dim and scroll
 // feel more immediate. Redraws are still bounded by their own cost.
+// How often LVGL looks for dirty areas and renders a frame.
+//
+// 16 ms (~60 Hz) suits the C6, whose partial flushes are cheap. It is actively
+// harmful on the QSPI TFT board, where the panel demands a whole 300 KB frame per
+// repaint and that push measures ~24 ms: asking for a frame every 16 ms requests
+// more than the panel can physically accept, so the render loop saturates,
+// every refresh blocks for longer than the period, and nothing else gets a look
+// in. That does not produce more frames than 33 ms does — it produces the same
+// frames plus stutter.
+//
+// It also starves touch. The touch controller is polled by an LVGL timer on a
+// 20 ms period, and a 24 ms blocking flush delays every poll that lands during
+// it, which is a good way to make a gesture look jerky.
+//
+// 33 ms (~30 Hz) is comfortably above the 20 Hz telemetry rate the UI displays,
+// so no reading is shown late, and it leaves roughly a quarter of the time free
+// for touch, BLE and the test engines.
+#if defined(BOARD_S3_LCD35B)
+#define LV_DISP_DEF_REFR_PERIOD 33
+#else
 #define LV_DISP_DEF_REFR_PERIOD 16
+#endif
 
 // ---- Feature switches -----------------------------------------------------
 #define LV_USE_LOG 0

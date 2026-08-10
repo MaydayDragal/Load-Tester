@@ -74,11 +74,28 @@ namespace display {
 // chunks = faster. How tall it can be is entirely a question of what memory the
 // board has.
 #if BOARD_PANEL_QSPI_TFT
-// FULL frame — this panel is not merely faster with a big buffer, it requires
-// whole-frame writes to render correctly. See the direct_mode comment where the
-// driver is registered. ONE bank of 320*480*2 = 300 KB, under 4 % of the 8 MB
-// PSRAM; the second bank is deliberately not allocated (see the allocation).
+// Whole-frame vs partial flushing. The whole-frame path pushes 300 KB on EVERY
+// repaint — ~15 ms of bus time to update one telemetry digit — so partial
+// flushing is worth a great deal if this panel tolerates it.
+//
+// This WAS re-tested properly, because the original conclusion was reached while
+// the bus was still overclocked to 80 MHz and every symptom behind it was
+// equally explained by the overclock found afterwards. Retested at 40 MHz on
+// 2026-08-10 with -D S3_WHOLE_FRAME=0: the panel garbles partial writes exactly
+// as before. So the requirement is real and independent of clock speed, and the
+// switch stays only so nobody has to wonder again.
+#ifndef S3_WHOLE_FRAME
+#define S3_WHOLE_FRAME 1
+#endif
+#if S3_WHOLE_FRAME
+// ONE bank of 320*480*2 = 300 KB, under 4 % of the 8 MB PSRAM; the second bank
+// is deliberately not allocated (see the allocation).
 static const uint32_t BUF_LINES = LCD_HEIGHT;
+#else
+// A third of the frame per bank, as the C6 does — LVGL then renders only the
+// dirty rows and each flush pushes only those.
+static const uint32_t BUF_LINES = LCD_HEIGHT / 3;
+#endif
 #elif BOARD_HAS_PSRAM
 // 8 MB of PSRAM: take a third of the frame per bank, TWO banks (~300 KB total,
 // under 4 % of PSRAM). LVGL then renders into one bank while the other is being
@@ -104,8 +121,30 @@ static lv_disp_draw_buf_t g_drawBuf;
 static lv_disp_drv_t g_dispDrv;
 static lv_indev_drv_t g_indevDrv;
 
+// Flush/FPS census. Separates the two costs that make a UI feel slow — the bus
+// time spent pushing pixels, and everything else (LVGL rendering) — so a change
+// can be judged on numbers instead of impressions. Build with -D S3_FPS_DEBUG=1.
+#if S3_FPS_DEBUG
+static uint32_t g_fpsFlushes = 0, g_fpsPixels = 0, g_fpsPushUs = 0, g_fpsLastRep = 0;
+static void fpsReport() {
+  uint32_t now = millis();
+  if (now - g_fpsLastRep < 2000) return;
+  uint32_t dtMs = now - g_fpsLastRep;
+  g_fpsLastRep = now;
+  // pushUs is time inside draw16bitRGBBitmap, i.e. pure bus/DMA cost. The
+  // difference between that and the wall clock is LVGL rendering plus the rest
+  // of the system.
+  Serial.printf("[fps] %lu flush/s  %lu kpx/s  bus=%lu%% (%lu us/flush)\n",
+                (unsigned long)(g_fpsFlushes * 1000 / dtMs),
+                (unsigned long)((uint64_t)g_fpsPixels * 1000 / dtMs / 1000),
+                (unsigned long)((uint64_t)g_fpsPushUs / 10 / dtMs),
+                (unsigned long)(g_fpsFlushes ? g_fpsPushUs / g_fpsFlushes : 0));
+  g_fpsFlushes = g_fpsPixels = g_fpsPushUs = 0;
+}
+#endif
+
 static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
-#if BOARD_PANEL_QSPI_TFT
+#if BOARD_PANEL_QSPI_TFT && S3_WHOLE_FRAME
   // This panel only renders a write that covers the whole frame (see direct_mode
   // where the driver is registered), so the dirty `area` is deliberately ignored
   // and the entire buffer is pushed. In direct_mode `px` is the start of a
@@ -116,14 +155,43 @@ static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
   // acknowledge the rest immediately. Without that check the same frame would be
   // sent two or three times and the UI would run at a fraction of its rate.
   if (lv_disp_flush_is_last(drv)) {
+#if S3_FPS_DEBUG
+    uint32_t t0 = micros();
+#endif
+    // Big-endian variant, paired with LV_COLOR_16_SWAP 1 in lv_conf.h. This is
+    // the whole point of that setting: draw16bitBeRGBBitmap reaches
+    // Arduino_ESP32QSPI::writeBytes, which sets the SPI transaction's tx_buffer
+    // to our buffer directly. The little-endian draw16bitRGBBitmap instead
+    // reaches writePixels, which walks all 153 600 pixels on the CPU — reading
+    // each one out of PSRAM — to byte-swap them into a 1024-pixel staging buffer
+    // before every one of its 150 transactions per frame.
+#if LV_COLOR_16_SWAP
+    g_gfx->draw16bitBeRGBBitmap(0, 0, (uint16_t *)px, LCD_WIDTH, LCD_HEIGHT);
+#else
     g_gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)px, LCD_WIDTH, LCD_HEIGHT);
+#endif
+#if S3_FPS_DEBUG
+    g_fpsPushUs += micros() - t0;
+    g_fpsFlushes++;
+    g_fpsPixels += (uint32_t)LCD_WIDTH * LCD_HEIGHT;
+    fpsReport();
+#endif
   }
   lv_disp_flush_ready(drv);
   return;
 #else
   int32_t w = area->x2 - area->x1 + 1;
   int32_t h = area->y2 - area->y1 + 1;
+#if S3_FPS_DEBUG
+  uint32_t t0 = micros();
+#endif
   g_gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px, w, h);
+#if S3_FPS_DEBUG
+  g_fpsPushUs += micros() - t0;
+  g_fpsFlushes++;
+  g_fpsPixels += (uint32_t)w * h;
+  fpsReport();
+#endif
   lv_disp_flush_ready(drv);
 #endif
 }
@@ -967,8 +1035,48 @@ void begin() {
   // rest of the system. PSRAM is slower than internal SRAM, but these buffers are
   // written once and read once per flush, which is exactly the access pattern it
   // handles well.
+#if BOARD_PANEL_QSPI_TFT && !S3_WHOLE_FRAME
+  // Partial-flush mode: put the draw buffers in INTERNAL, DMA-capable RAM.
+  //
+  // Where the buffer lives dominates flush cost, because the SPI DMA has to read
+  // it. Measured on this board: pushing a 300 KB frame sourced from PSRAM took
+  // 27.8 ms, roughly double what the 40 MHz quad-lane bus alone should cost —
+  // the difference is PSRAM read latency. Internal SRAM has no such penalty.
+  //
+  // A third-frame buffer is 320*160*2 = 100 KB, which only fits because LVGL's
+  // widget tree was moved out to PSRAM and freed ~200 KB of internal heap. Two of
+  // them would not fit, so this is a single buffer with an ordinary partial
+  // flush; LVGL renders the dirty rows and each flush pushes only those.
+  g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t),
+                                          MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  g_buf2 = nullptr;
+  if (!g_buf1) {
+    // Not fatal: fall back to PSRAM, which is slower to push but still correct.
+    Serial.println("[display] internal draw-buffer alloc failed — falling back to PSRAM");
+    g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  } else {
+    Serial.printf("[display] draw buffer: %u KB internal DMA\n",
+                  (unsigned)(bufPx * sizeof(lv_color_t) / 1024));
+  }
+#elif BOARD_PANEL_QSPI_TFT
+  // MALLOC_CAP_DMA as well as SPIRAM. A 300 KB frame has to live in PSRAM, but
+  // asking for a DMA-capable PSRAM region lets the SPI peripheral read it
+  // directly instead of the driver staging every chunk through an internal
+  // bounce buffer. The push was measured at 11.05 MB/s against the 20 MB/s a
+  // 40 MHz quad-lane bus should give, and bounce-copying is the obvious
+  // candidate for losing nearly half of it.
+  g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+  if (!g_buf1) {
+    // Not every build exposes DMA-capable PSRAM; plain PSRAM still works, just
+    // slower, so fall back rather than refusing to boot.
+    g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    Serial.println("[display] no DMA-capable PSRAM — draw buffer is plain PSRAM");
+  }
+#else
   g_buf1 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-#if BOARD_PANEL_QSPI_TFT
+#endif
+#if BOARD_PANEL_QSPI_TFT && S3_WHOLE_FRAME
   // ONE buffer, deliberately, even though there is PSRAM to spare for two.
   //
   // In direct_mode LVGL renders into a full-screen buffer and keeps it as the
@@ -984,7 +1092,7 @@ void begin() {
   // these buffers live in PSRAM, which is markedly slower to draw into than
   // internal SRAM and cannot hold a 300 KB frame anywhere else.
   g_buf2 = nullptr;
-#else
+#elif !BOARD_PANEL_QSPI_TFT
   g_buf2 = (lv_color_t *)heap_caps_malloc(bufPx * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
 #endif
   if (!g_buf1) {
@@ -1047,7 +1155,9 @@ void begin() {
   // quad-lane bus is ~15 ms. The two full-frame banks are 600 KB of an 8 MB
   // PSRAM, and there is none of the contiguous-internal-heap pressure that
   // shapes the C6 build.
+#if S3_WHOLE_FRAME
   g_dispDrv.direct_mode = 1;
+#endif
 #endif
   lv_disp_drv_register(&g_dispDrv);
 
