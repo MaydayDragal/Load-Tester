@@ -151,20 +151,48 @@ static int readTouch(uint16_t &x, uint16_t &y) {
   if (Wire.requestFrom((int)TOUCH_I2C_ADDR, (int)sizeof(d)) < (int)sizeof(d)) return -1;
   for (size_t i = 0; i < sizeof(d); i++) d[i] = Wire.read();
 
-  // 0xff in the first byte, or an implausible contact count, means "nothing to
-  // report" rather than a bus failure — return 0 (no touch), not -1, so the
-  // caller does not treat an idle panel as a transient I2C error and hold the
-  // last state forever.
-  if (d[0] == 0xff || d[1] > 2) return 0;
-  if (d[1] == 0) return 0;
+  // A DEFINITE release: 0xff in the first byte is this part's "nothing is
+  // touching" report, and a contact count above the two points it can track is
+  // a frame we should not believe. Both end the gesture.
+  static uint32_t holdingSinceMs = 0;
+  if (d[0] == 0xff || d[1] > 2) {
+    holdingSinceMs = 0;
+    return 0;
+  }
+
+  // Anything else malformed is a TRANSIENT, and must hold the previous state
+  // rather than report a release.
+  //
+  // This part emits partial frames mid-gesture, and the vendor driver's response
+  // is to return early WITHOUT touching its stored touch_data — i.e. keep the
+  // last point and keep the finger down. Reporting these as "no touch" instead
+  // is what broke scrolling on the bench 2026-08-10: one rejected frame during a
+  // drag looked to LVGL like press-then-release, so the gesture fired as a click
+  // on whatever was under the finger the instant it landed, and a swipe could
+  // never accumulate enough movement to become a scroll.
+  //
+  // Note d[2] carries the event flag in its upper nibble and x's high nibble in
+  // its lower one, so d[2] == 0 is specifically a touch-DOWN at x < 256 — common
+  // on a 320 px-wide panel, which is why this filter fires often enough to
+  // matter.
+  //
+  // The watchdog is the safety net the vendor lacks: holding forever would
+  // strand a press if the release frame were ever missed, so after this long
+  // with nothing believable we give up and report the release.
+  const uint32_t HOLD_LIMIT_MS = 400;
+  if (d[1] == 0 || d[2] == 0 || d[3] < 2 || d[5] < 2) {
+    uint32_t now = millis();
+    if (holdingSinceMs == 0) holdingSinceMs = now;
+    if (now - holdingSinceMs > HOLD_LIMIT_MS) {
+      holdingSinceMs = 0;
+      return 0;
+    }
+    return -1;
+  }
+  holdingSinceMs = 0;
 
   x = (uint16_t)(((d[2] & 0x0F) << 8) | d[3]);
   y = (uint16_t)(((d[4] & 0x0F) << 8) | d[5]);
-  // The vendor additionally discards reports whose raw x/y high bytes are zero
-  // or whose low bytes are < 2. That filter is what keeps this part from
-  // emitting a spurious (0,0) press on release, so it is kept — but as a
-  // no-touch result rather than the vendor's silent "keep the previous point".
-  if (d[2] == 0 || d[3] < 2 || d[5] < 2) return 0;
 
   // 12-bit fields; clamp so a glitched read cannot feed LVGL an off-screen point.
   if (x >= LCD_WIDTH) x = LCD_WIDTH - 1;
