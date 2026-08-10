@@ -128,6 +128,24 @@ static const uint32_t BUF_LINES = LCD_HEIGHT / 7;
 // concurrent, so the lock is never contended and costs a couple of instructions.
 static SemaphoreHandle_t g_i2cMux = nullptr;
 
+// ---- Panel-transfer lock ---------------------------------------------------
+// The AXS15231B is ONE chip doing both jobs: it drives the panel over QSPI and
+// answers touch over I2C. Those are not independent. While a 300 KB frame is
+// being clocked into it, its I2C side returns malformed frames — every byte
+// identical, or the response shifted two bytes out of alignment.
+//
+// That is what the frame census had been showing all along, misattributed: the
+// corruption is ~0 % at rest and ~50 % "while touching", but touching is also
+// what causes continuous repainting. The correlation is with PANEL TRAFFIC, not
+// with a finger being down. It also explains why more settle time barely helped
+// (the panel was still transferring) and why an immediate retry made things
+// dramatically worse rather than better (it retried into the same transfer).
+//
+// So touch reads and frame pushes are made mutually exclusive. A touch sample
+// may wait for a frame to finish, which costs latency, but every sample it does
+// take is valid — better than sampling twice as often and discarding half.
+static SemaphoreHandle_t g_panelMux = nullptr;
+
 static inline void i2cLock() {
   if (g_i2cMux) xSemaphoreTakeRecursive(g_i2cMux, portMAX_DELAY);
 }
@@ -192,11 +210,14 @@ static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     // reaches writePixels, which walks all 153 600 pixels on the CPU — reading
     // each one out of PSRAM — to byte-swap them into a 1024-pixel staging buffer
     // before every one of its 150 transactions per frame.
+    // Exclude touch reads for the duration — same chip, see g_panelMux.
+    if (g_panelMux) xSemaphoreTake(g_panelMux, portMAX_DELAY);
 #if LV_COLOR_16_SWAP
     g_gfx->draw16bitBeRGBBitmap(0, 0, (uint16_t *)px, LCD_WIDTH, LCD_HEIGHT);
 #else
     g_gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)px, LCD_WIDTH, LCD_HEIGHT);
 #endif
+    if (g_panelMux) xSemaphoreGive(g_panelMux);
 #if S3_FPS_DEBUG
     g_fpsPushUs += micros() - t0;
     g_fpsFlushes++;
@@ -669,10 +690,12 @@ static volatile int16_t g_tX = 0, g_tY = 0;
 
 static void touchTask(void *) {
   const TickType_t period = pdMS_TO_TICKS(S3_TOUCH_POLL_MS);
-  TickType_t last = xTaskGetTickCount();
   for (;;) {
     uint16_t x = 0, y = 0;
+    // Wait for any frame in flight to finish before talking to the chip.
+    if (g_panelMux) xSemaphoreTake(g_panelMux, portMAX_DELAY);
     int r = readTouch(x, y);
+    if (g_panelMux) xSemaphoreGive(g_panelMux);
     if (r == 1) {
       g_tX = (int16_t)x;
       g_tY = (int16_t)y;
@@ -681,7 +704,21 @@ static void touchTask(void *) {
       g_tPressed = false;
     }
     // r == -1: transient, keep the previous state.
-    vTaskDelayUntil(&last, period);   // absolute pacing: no drift from I2C time
+
+    // RELATIVE delay, not vTaskDelayUntil. Absolute pacing looks tidier, but it
+    // catches up after a missed deadline by running immediately — and this task
+    // can miss its deadline routinely, since it may block up to 24 ms waiting
+    // for a frame push to finish. The catch-up then issues commands back-to-back
+    // with no gap, which is exactly the hammering that puts this controller into
+    // a state where it returns junk continuously (see the retry note in
+    // readTouch — same failure, arrived at from a different direction, and
+    // measured the same way: garbage climbing at the full poll rate with the
+    // idle and good counters frozen).
+    //
+    // A relative delay guarantees a full gap between the END of one transaction
+    // and the start of the next, whatever happened in between. Sampling is then
+    // slightly slower than the nominal period, which is the correct trade.
+    vTaskDelay(period);
   }
 }
 #endif
@@ -1050,6 +1087,7 @@ void begin() {
   // helpers below take it. The touch task that makes it necessary is not started
   // until the end of this function, so everything in between is single-threaded.
   g_i2cMux = xSemaphoreCreateRecursiveMutex();
+  g_panelMux = xSemaphoreCreateMutex();   // see g_panelMux: one chip, two buses
 
   Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL);
   Wire.setClock(I2C_BUS_HZ);   // per-board — see the note in the board header
