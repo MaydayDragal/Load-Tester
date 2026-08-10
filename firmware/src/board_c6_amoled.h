@@ -29,6 +29,9 @@
 #define BOARD_BACKLIGHT_PWM     0   // brightness is a panel command (0x51)
 #define BOARD_TOUCH_FOCALTECH   1   // FT3168/FT6x36 register file at 0x38
 #define BOARD_TOUCH_AXS15231B   0
+// ~322 DPI (368x448 across 1.8"), so a 40 px control is barely 3 mm and a
+// fingertip covers several. Touch-target snapping earns its keep here.
+#define BOARD_TOUCH_SNAP        1
 #define BOARD_SD_SDMMC          0   // bit-banged software SPI (see sd_card.cpp)
 #define BOARD_SD_SOFT_SPI       1
 #define BOARD_HAS_PSRAM         0

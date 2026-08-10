@@ -45,6 +45,14 @@
 #define BOARD_BACKLIGHT_PWM     1   // real backlight GPIO, driven by LEDC
 #define BOARD_TOUCH_AXS15231B   1   // command/response touch, not FocalTech regs
 #define BOARD_TOUCH_FOCALTECH   0
+// Touch-target snapping OFF. It exists because the C6's 1.8" panel is ~322 DPI,
+// where a 40 px control is about 3 mm. This panel is ~165 DPI (320x480 across
+// 3.5"), so the same control is physically twice the size and presses do not
+// need guessing at. Leaving it on actively broke the Settings screen: snapping
+// pulled a press that landed on empty space onto the nearest switch or slider,
+// which then consumed the drag, so the list could not be scrolled while every
+// other screen could. Verified on hardware 2026-08-10.
+#define BOARD_TOUCH_SNAP        0
 #define BOARD_SD_SDMMC          1   // hardware SDMMC host, 1-bit
 #define BOARD_SD_SOFT_SPI       0
 #ifndef BOARD_HAS_PSRAM

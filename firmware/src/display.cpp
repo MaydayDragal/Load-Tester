@@ -143,13 +143,58 @@ static int readTouch(uint16_t &x, uint16_t &y) {
 static const uint8_t AXS_READ_CMD[11] = {
     0xb5, 0xab, 0xa5, 0x5a, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00};
 
+// How long to wait between handing the controller its command and reading the
+// answer back. The vendor reads immediately, but their bus runs slower, which
+// gives the part the same thinking time by accident. A settle here buys that
+// time explicitly without slowing the shared bus for the PMIC, RTC and codec.
+#ifndef S3_TOUCH_SETTLE_US
+#define S3_TOUCH_SETTLE_US 600
+#endif
+
+// Touch poll period, ms. 10 ms (the project default for the C6's register-file
+// part) starves this one; see the note where the indev timer is set. Overridable
+// from the build so the rate can be swept against the garbage-frame statistics
+// below without editing code.
+#ifndef S3_TOUCH_POLL_MS
+#define S3_TOUCH_POLL_MS 20
+#endif
+
 static int readTouch(uint16_t &x, uint16_t &y) {
   uint8_t d[14];
   Wire.beginTransmission(TOUCH_I2C_ADDR);
   Wire.write(AXS_READ_CMD, sizeof(AXS_READ_CMD));
   if (Wire.endTransmission() != 0) return -1;
+#if S3_TOUCH_SETTLE_US > 0
+  delayMicroseconds(S3_TOUCH_SETTLE_US);
+#endif
   if (Wire.requestFrom((int)TOUCH_I2C_ADDR, (int)sizeof(d)) < (int)sizeof(d)) return -1;
   for (size_t i = 0; i < sizeof(d); i++) d[i] = Wire.read();
+
+  // Frame-quality census, printed every 2 s when the debug flag is on. The
+  // garbage rate is measurable with nobody touching the panel, which makes the
+  // poll rate and settle time tunable without a human in the loop.
+#if S3_TOUCH_FRAME_DEBUG
+  {
+    static uint32_t nIdle = 0, nGood = 0, nBad = 0, lastRep = 0;
+    bool allZero = true;
+    for (size_t i = 0; i < sizeof(d); i++) {
+      if (d[i] != 0) { allZero = false; break; }
+    }
+    if (allZero || d[0] == 0xff) nIdle++;
+    else if (d[1] > 2) nBad++;
+    else nGood++;
+    uint32_t now = millis();
+    if (now - lastRep >= 2000) {
+      lastRep = now;
+      uint32_t tot = nIdle + nGood + nBad;
+      Serial.printf("[tp] %lums/%luus  total=%lu idle=%lu good=%lu garbage=%lu (%lu%%)\n",
+                    (unsigned long)S3_TOUCH_POLL_MS, (unsigned long)S3_TOUCH_SETTLE_US,
+                    (unsigned long)tot, (unsigned long)nIdle, (unsigned long)nGood,
+                    (unsigned long)nBad, (unsigned long)(tot ? nBad * 100 / tot : 0));
+      nIdle = nGood = nBad = 0;
+    }
+  }
+#endif
 
   // Opt-in frame dump. Off unless built with -D S3_TOUCH_FRAME_DEBUG=1, e.g.
   //     PLATFORMIO_BUILD_FLAGS="-D S3_TOUCH_FRAME_DEBUG=1" pio run -e ... -t upload
@@ -229,6 +274,11 @@ static int readTouch(uint16_t &x, uint16_t &y) {
 #endif
 
 // ---- Touch-target snapping ("guess what I meant") ---------------------------
+// Compiled in only where the pixel density makes it worth it — see
+// BOARD_TOUCH_SNAP in the board headers. On a low-DPI panel it does more harm
+// than good, because snapping a press onto a slider or switch hands that control
+// the whole drag and the list underneath can no longer be scrolled.
+#if BOARD_TOUCH_SNAP
 // The 1.8" panel is ~320 DPI, so even a 40 px button is barely 3 mm wide and a
 // fingertip contact patch is 2-3x that — raw touch points frequently land just
 // outside the intended control. On each NEW press we find the nearest
@@ -295,6 +345,7 @@ static lv_point_t snapOffset(lv_point_t p) {
   ofs.y = (lv_coord_t)(LV_CLAMP(a.y1 + 3, p.y, a.y2 - 3) - p.y);
   return ofs;
 }
+#endif  // BOARD_TOUCH_SNAP
 
 // Defined fully in the Display-sleep section below; declared here because the
 // touch callback (above that section) must know when the panel is blanked.
@@ -305,7 +356,9 @@ static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
   // RELEASE mid-press makes LVGL drop the click and taps feel unresponsive.
   static lv_indev_state_t lastState = LV_INDEV_STATE_REL;
   static lv_point_t lastPt = {0, 0};
+#if BOARD_TOUCH_SNAP
   static lv_point_t snapOfs = {0, 0};
+#endif
   uint16_t x, y;
   int r = readTouch(x, y);
   // While the panel is blanked, a tap must WAKE rather than act: the UI is
@@ -320,9 +373,13 @@ static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
   if (r == 1) {
     noteActivity();   // also undoes an idle dim before the tap is delivered
     lv_point_t p = {(lv_coord_t)x, (lv_coord_t)y};
+#if BOARD_TOUCH_SNAP
     if (lastState == LV_INDEV_STATE_REL) snapOfs = snapOffset(p);  // new gesture
     lastPt.x = (lv_coord_t)(p.x + snapOfs.x);
     lastPt.y = (lv_coord_t)(p.y + snapOfs.y);
+#else
+    lastPt = p;   // report the finger where it actually is
+#endif
     lastState = LV_INDEV_STATE_PR;
   } else if (r == 0) {
     lastState = LV_INDEV_STATE_REL;
@@ -792,7 +849,7 @@ void begin() {
   // work at. Set per-board here rather than in lv_conf.h so the C6 keeps its
   // 10 ms and the snappier touch feel that goes with it.
   if (indev && indev->driver && indev->driver->read_timer) {
-    lv_timer_set_period(indev->driver->read_timer, 30);
+    lv_timer_set_period(indev->driver->read_timer, S3_TOUCH_POLL_MS);
   }
 #else
   (void)indev;
