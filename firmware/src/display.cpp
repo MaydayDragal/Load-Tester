@@ -73,7 +73,13 @@ namespace display {
 // Each flush chunk pays a CASET/PASET/RAMWR overhead, so a taller buffer = fewer
 // chunks = faster. How tall it can be is entirely a question of what memory the
 // board has.
-#if BOARD_HAS_PSRAM
+#if BOARD_PANEL_QSPI_TFT
+// FULL frame per bank — this panel is not merely faster with a big buffer, it
+// requires whole-frame writes to render correctly. See the full_refresh comment
+// where the driver is registered. Two banks of 320*480*2 = 300 KB each, 600 KB
+// total, which is 7 % of the 8 MB PSRAM.
+static const uint32_t BUF_LINES = LCD_HEIGHT;
+#elif BOARD_HAS_PSRAM
 // 8 MB of PSRAM: take a third of the frame per bank, TWO banks (~300 KB total,
 // under 4 % of PSRAM). LVGL then renders into one bank while the other is being
 // flushed, and internal SRAM stays free for BLE and the rest of the system.
@@ -104,6 +110,7 @@ static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
   g_gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px, w, h);
   lv_disp_flush_ready(drv);
 }
+
 
 // ---- Capacitive touch (minimal I2C driver) ---------------------------------
 // Two very different parts behind one signature.
@@ -617,7 +624,17 @@ void begin() {
 #if BOARD_BACKLIGHT_PWM
   // Bring the backlight up dark and let setBrightness() below raise it, so the
   // panel's first uninitialised frame is never shown.
-  ledcAttach(LCD_BL_GPIO, LCD_BL_PWM_HZ, LCD_BL_PWM_BITS);
+  //
+  // Report the attach result: if LEDC refuses the pin/frequency/resolution
+  // combination, ledcWrite() silently does nothing and the backlight sits at
+  // whatever the pin floats to. That presents as "the panel is too dim", which
+  // is indistinguishable by eye from a genuinely underdriven backlight — so make
+  // the difference readable in the boot log instead of guessable.
+  if (!ledcAttach(LCD_BL_GPIO, LCD_BL_PWM_HZ, LCD_BL_PWM_BITS)) {
+    Serial.printf("[display] backlight LEDC attach FAILED on GPIO %d "
+                  "(%d Hz, %d-bit) — brightness control is dead\n",
+                  (int)LCD_BL_GPIO, (int)LCD_BL_PWM_HZ, (int)LCD_BL_PWM_BITS);
+  }
   ledcWrite(LCD_BL_GPIO, 0);
 #endif
 
@@ -667,6 +684,32 @@ void begin() {
   g_dispDrv.ver_res = LCD_HEIGHT;
   g_dispDrv.flush_cb = flushCb;
   g_dispDrv.draw_buf = &g_drawBuf;
+#if BOARD_PANEL_QSPI_TFT
+  // Whole-frame writes ONLY. The AXS15231B does not render a partial write
+  // correctly on this board: a flush that does not start at row 0 and span the
+  // full width walks out of step with the controller's line stride, and every
+  // line after the first lands offset from the one above.
+  //
+  // Observed on the bench 2026-08-10: with ordinary partial flushes the first
+  // paint was recognisable but every other line was shifted, and tapping a
+  // widget — which repaints a small region — produced garbage. Rounding the
+  // flush out to full WIDTH alone did not help, which is what rules out a
+  // column-alignment quirk and points at the row start.
+  //
+  // Waveshare's own demos never encounter this because they drive the panel
+  // through an Arduino_Canvas and push the entire framebuffer on every flush;
+  // there is no partial write anywhere in their code. full_refresh = 1 is the
+  // LVGL equivalent: LVGL renders the whole screen into one buffer and hands it
+  // over in a single flush spanning (0,0)-(W-1,H-1), so draw16bitRGBBitmap sees
+  // exactly the one full-frame write the vendor issues.
+  //
+  // The cost is redrawing every pixel on every frame instead of just the dirty
+  // region. That is affordable here and nowhere else in this codebase: 300 KB
+  // per frame over an 80 MHz quad-lane bus is ~8 ms, the buffers live in PSRAM
+  // where there is room for two, and there is no contiguous-internal-heap
+  // pressure on this board of the kind that shapes the C6 build.
+  g_dispDrv.full_refresh = 1;
+#endif
   lv_disp_drv_register(&g_dispDrv);
 
   lv_indev_drv_init(&g_indevDrv);

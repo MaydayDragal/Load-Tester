@@ -171,4 +171,10 @@
 #define LCD_BL_GPIO            6
 #define LCD_BL_PWM_HZ          5000
 #define LCD_BL_PWM_BITS        10
-#define LCD_DEFAULT_BRIGHTNESS 200
+// Full brightness by default. The C6's AMOLED is bright enough at 200/255 that
+// the extra was not worth the power, but this panel reads as too dim there —
+// reported on the bench 2026-08-10 — and the vendor's own demos simply drive the
+// backlight pin HIGH with no PWM at all, i.e. 100 %. The idle-dim path still
+// pulls it down when nothing is happening, which is where the power actually
+// gets saved on a backlit LCD.
+#define LCD_DEFAULT_BRIGHTNESS 255
