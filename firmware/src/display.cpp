@@ -105,10 +105,27 @@ static lv_disp_drv_t g_dispDrv;
 static lv_indev_drv_t g_indevDrv;
 
 static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
+#if BOARD_PANEL_QSPI_TFT
+  // This panel only renders a write that covers the whole frame (see direct_mode
+  // where the driver is registered), so the dirty `area` is deliberately ignored
+  // and the entire buffer is pushed. In direct_mode `px` is the start of a
+  // full-screen buffer, so it already IS the frame.
+  //
+  // LVGL can call this several times for one refresh when the dirty region is
+  // split; the panel only needs the finished frame, so push on the last call and
+  // acknowledge the rest immediately. Without that check the same frame would be
+  // sent two or three times and the UI would run at a fraction of its rate.
+  if (lv_disp_flush_is_last(drv)) {
+    g_gfx->draw16bitRGBBitmap(0, 0, (uint16_t *)px, LCD_WIDTH, LCD_HEIGHT);
+  }
+  lv_disp_flush_ready(drv);
+  return;
+#else
   int32_t w = area->x2 - area->x1 + 1;
   int32_t h = area->y2 - area->y1 + 1;
   g_gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)px, w, h);
   lv_disp_flush_ready(drv);
+#endif
 }
 
 
@@ -813,12 +830,23 @@ void begin() {
   // over in a single flush spanning (0,0)-(W-1,H-1), so draw16bitRGBBitmap sees
   // exactly the one full-frame write the vendor issues.
   //
-  // The cost is redrawing every pixel on every frame instead of just the dirty
-  // region. That is affordable here and nowhere else in this codebase: 300 KB
-  // per frame over an 80 MHz quad-lane bus is ~8 ms, the buffers live in PSRAM
-  // where there is room for two, and there is no contiguous-internal-heap
-  // pressure on this board of the kind that shapes the C6 build.
-  g_dispDrv.full_refresh = 1;
+  // direct_mode, NOT full_refresh, is how to pay for that. Both hand the panel a
+  // complete frame, which is what it requires; the difference is what the CPU
+  // does to produce it. full_refresh re-renders every widget on the screen for
+  // every frame, so updating one telemetry digit costs a whole screen of LVGL
+  // drawing — measured as general UI lag on the bench. direct_mode renders only
+  // the widgets that actually changed, straight into a full-screen buffer, and
+  // the buffer is then pushed whole. Same bus cost, far less CPU.
+  //
+  // This is what Waveshare's own demo does — their DIRECT_RENDER_MODE branch
+  // pushes the entire framebuffer with one draw16bitRGBBitmap and ignores the
+  // dirty area, which is exactly what flushCb does above.
+  //
+  // Bus cost is unchanged and unavoidable: 300 KB per frame over a 40 MHz
+  // quad-lane bus is ~15 ms. The two full-frame banks are 600 KB of an 8 MB
+  // PSRAM, and there is none of the contiguous-internal-heap pressure that
+  // shapes the C6 build.
+  g_dispDrv.direct_mode = 1;
 #endif
   lv_disp_drv_register(&g_dispDrv);
 
