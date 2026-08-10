@@ -44,7 +44,18 @@
 // The UI is flex-laid-out and resolution-agnostic almost everywhere; the one
 // place that needs a real number is the 2-column overlay menu grid, whose tiles
 // were sized for a 368 px panel and would overflow a 320 px one. Derive the
-// tile width from the panel instead: full width, less the overlay's 16 px side
+// tile width from the panel instead: full width, less the overlay's side
 // padding, less the 8 px inter-column gap, halved.
-#define UI_MENU_TILE_W ((LCD_WIDTH - 16 - 8) / 2)
+//
+// That padding is `lv_obj_set_style_pad_all(menuOverlay, 16, 0)` — 16 px on EACH
+// side, so 32 must come off, not 16. Subtracting only 16 made each tile 8 px too
+// wide, and since two tiles plus the gap then exceeded the row, LV_FLEX_FLOW_
+// ROW_WRAP silently fell back to ONE tile per row: the 8-item menu became 8 rows
+// instead of 4, ran off the bottom of the overlay, and the items down there
+// (Settings among them) could not be reached at all. Found on the 3.5B
+// 2026-08-10 — 2*148 + 8 = 304 against 288 available.
+//
+// The C6 is the cross-check: this formula yields 164, which is exactly the
+// hard-coded value the panel-derived version replaced.
+#define UI_MENU_TILE_W ((LCD_WIDTH - 32 - 8) / 2)
 #define UI_MENU_TILE_H 84

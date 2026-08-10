@@ -2976,6 +2976,15 @@ static void buildMenu() {
   lv_obj_t *grid = cont(menuOverlay);
   lv_obj_set_size(grid, LV_PCT(100), LV_PCT(100));
   lv_obj_set_flex_grow(grid, 1);
+  // Scrollable, matching the picker overlay's grid below. cont() clears
+  // SCROLLABLE, and this grid was the one place that never put it back — so when
+  // the tiles overflowed, the items past the bottom edge were not merely clipped
+  // but unreachable, with no gesture that could bring them into view. A layout
+  // bug should degrade into "you have to scroll", not "that menu item no longer
+  // exists".
+  lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(grid, LV_OBJ_FLAG_CLICKABLE);  // so background drags scroll
+  lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_OFF);
   lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
   lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
   lv_obj_set_style_pad_row(grid, 8, 0);
