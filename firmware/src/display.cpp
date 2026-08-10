@@ -115,6 +115,33 @@ static const uint32_t BUF_LINES = LCD_HEIGHT / 3;
 // keep a >=~30 KB contiguous margin for the BLE link, or connects break.
 static const uint32_t BUF_LINES = LCD_HEIGHT / 7;
 #endif
+// ---- Shared I2C bus lock ---------------------------------------------------
+// Touch moves to its own task below, so the bus that touch, the PMIC and the RTC
+// all share is now reached from two tasks. Wire is not thread-safe, and two
+// interleaved transactions on one bus corrupt both.
+//
+// RECURSIVE, deliberately: the PMIC and RTC helpers call i2cReadReg/i2cWriteReg,
+// which take the lock themselves, so a plain mutex would deadlock the moment
+// batteryStats() called into one of them.
+//
+// On the C6 this is a no-op — touch stays on the loop task there and nothing is
+// concurrent, so the lock is never contended and costs a couple of instructions.
+static SemaphoreHandle_t g_i2cMux = nullptr;
+
+static inline void i2cLock() {
+  if (g_i2cMux) xSemaphoreTakeRecursive(g_i2cMux, portMAX_DELAY);
+}
+static inline void i2cUnlock() {
+  if (g_i2cMux) xSemaphoreGiveRecursive(g_i2cMux);
+}
+
+// Scope guard so an early `return` in the middle of a transaction cannot leak the
+// lock — several of these helpers bail out on a NACK partway through.
+struct I2cGuard {
+  I2cGuard() { i2cLock(); }
+  ~I2cGuard() { i2cUnlock(); }
+};
+
 static lv_color_t *g_buf1 = nullptr;
 static lv_color_t *g_buf2 = nullptr;
 static lv_disp_draw_buf_t g_drawBuf;
@@ -202,6 +229,7 @@ static void flushCb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
 // Returns: 1 = touch (x,y set), 0 = no touch, -1 = I2C read failed.
 #if BOARD_TOUCH_FOCALTECH
 static int readTouch(uint16_t &x, uint16_t &y) {
+  I2cGuard g;
   // FT3168/FT6x36-family register map: 0x02 = touch count, 0x03.. = point data.
   Wire.beginTransmission(TOUCH_I2C_ADDR);
   Wire.write(0x02);
@@ -246,6 +274,7 @@ static const uint8_t AXS_READ_CMD[11] = {
 
 
 static int readTouch(uint16_t &x, uint16_t &y) {
+  I2cGuard g;   // called from the touch task; the bus is shared with PMIC/RTC
   uint8_t d[14];
 
   // ONE transaction per poll. Do NOT add a retry loop here — it was tried on
@@ -619,6 +648,44 @@ static void pressProbeTimer(lv_timer_t *) {
 }
 #endif
 
+#if BOARD_TOUCH_TASK
+// ---- Touch sampling task ---------------------------------------------------
+// Touch is sampled here rather than from the LVGL read callback, because on this
+// board the read callback runs on the loop task and the loop task spends ~24 ms
+// at a time blocked inside a whole-frame panel push. Every poll that landed
+// inside a flush was simply late, so during scrolling — when repaints are
+// continuous — the finger was tracked coarsely and unevenly no matter how often
+// the poll was nominally scheduled.
+//
+// A separate task at a priority above the loop keeps sampling at a steady
+// interval straight through the flush, so LVGL always reads a point taken within
+// the last poll period instead of one taken before the frame started.
+//
+// This task owns the transient-hold logic too, because it sees EVERY sample: a
+// malformed frame holds the previous state, and only a definite release ends the
+// gesture. The LVGL callback then just reports the latest settled state.
+static volatile bool g_tPressed = false;
+static volatile int16_t g_tX = 0, g_tY = 0;
+
+static void touchTask(void *) {
+  const TickType_t period = pdMS_TO_TICKS(S3_TOUCH_POLL_MS);
+  TickType_t last = xTaskGetTickCount();
+  for (;;) {
+    uint16_t x = 0, y = 0;
+    int r = readTouch(x, y);
+    if (r == 1) {
+      g_tX = (int16_t)x;
+      g_tY = (int16_t)y;
+      g_tPressed = true;
+    } else if (r == 0) {
+      g_tPressed = false;
+    }
+    // r == -1: transient, keep the previous state.
+    vTaskDelayUntil(&last, period);   // absolute pacing: no drift from I2C time
+  }
+}
+#endif
+
 static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
   // Hold the last reported state on a transient I2C failure: reporting a spurious
   // RELEASE mid-press makes LVGL drop the click and taps feel unresponsive.
@@ -628,7 +695,18 @@ static void touchReadCb(lv_indev_drv_t *, lv_indev_data_t *data) {
   static lv_point_t snapOfs = {0, 0};
 #endif
   uint16_t x, y;
+#if BOARD_TOUCH_TASK
+  // Sampled by touchTask, which has already applied the transient-hold rule
+  // across every frame the controller produced since the last refresh. Nothing
+  // here touches I2C, so this callback cannot be delayed by the bus and, more to
+  // the point, the sampling it depends on is not delayed by the panel flush that
+  // this same task is about to perform.
+  int r = g_tPressed ? 1 : 0;
+  x = (uint16_t)g_tX;
+  y = (uint16_t)g_tY;
+#else
   int r = readTouch(x, y);
+#endif
   // While the panel is blanked, a tap must WAKE rather than act: the UI is
   // invisible, so letting the press through would blind-press whatever sits
   // under the finger. Report a release and swallow the gesture.
@@ -732,6 +810,7 @@ uint8_t getBrightness() { return g_brightness; }
 
 // ---- System info (AXP2101 PMIC + PCF85063 RTC on the shared I2C bus) --------
 static int i2cReadReg(uint8_t addr, uint8_t reg) {
+  I2cGuard g;   // this is a write-then-read pair; touch must not slip between
   Wire.beginTransmission(addr);
   Wire.write(reg);
   if (Wire.endTransmission(false) != 0) return -1;
@@ -740,6 +819,7 @@ static int i2cReadReg(uint8_t addr, uint8_t reg) {
 }
 
 static bool i2cWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+  I2cGuard g;
   Wire.beginTransmission(addr);
   Wire.write(reg);
   Wire.write(val);
@@ -747,6 +827,9 @@ static bool i2cWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
 }
 
 bool batteryStats(int &percent, int &milliVolt, int &chargeState, bool &present) {
+  // Hold the bus across all five reads so they describe one moment, rather than
+  // letting touch interleave and mixing registers from different instants.
+  I2cGuard g;
   int st0 = i2cReadReg(PMIC_I2C_ADDR, 0x00);
   if (st0 < 0) return false;
   present = (st0 & 0x08) != 0;               // STATUS1 bit3: battery-present flag
@@ -798,6 +881,7 @@ void setSleep(bool on) {
 
 // ---- Physical buttons ------------------------------------------------------
 ButtonEvent pollButtons() {
+  I2cGuard g;   // PMIC IRQ read + write-1-to-clear must not be split by touch
   uint32_t now = millis();
 
   // Startup settle window: ignore (but keep clearing) button state for the
@@ -851,6 +935,7 @@ ButtonEvent pollButtons() {
 }
 
 bool rtcTime(int &year, int &mon, int &day, int &hour, int &min, int &sec) {
+  I2cGuard g;
   Wire.beginTransmission(RTC_I2C_ADDR);
   Wire.write(0x04);  // seconds register, then min/hour/day/weekday/month/year
   if (Wire.endTransmission(false) != 0) return false;
@@ -869,6 +954,7 @@ bool rtcTime(int &year, int &mon, int &day, int &hour, int &min, int &sec) {
 }
 
 bool setRtcTime(int year, int mon, int day, int hour, int min, int sec) {
+  I2cGuard g;   // stop-bit clear then the 7-byte time write must stay together
   if (year < 2000 || year > 2099) return false;
   auto bcd = [](int v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); };
   // Control_1 bit 5 (STOP) must be clear for the oscillator to run; clear it
@@ -960,6 +1046,11 @@ static void i2cScan() {
 void begin() {
   // I2C first: the panel reset/enable is on the TCA9554 expander, so the panel
   // must be released from reset over I2C *before* the SH8601 bring-up.
+  // The bus lock must exist before ANY I2C happens, because from here on the
+  // helpers below take it. The touch task that makes it necessary is not started
+  // until the end of this function, so everything in between is single-threaded.
+  g_i2cMux = xSemaphoreCreateRecursiveMutex();
+
   Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL);
   Wire.setClock(I2C_BUS_HZ);   // per-board — see the note in the board header
   // Scan BEFORE the expander/touch writes below, so what prints is the bus as
@@ -1197,6 +1288,20 @@ void begin() {
 #if S3_UI_SCROLL_DEBUG
   lv_timer_create(scrollDebugTimer, 5000, nullptr);
   lv_timer_create(pressProbeTimer, 30, nullptr);
+#endif
+
+#if BOARD_TOUCH_TASK
+  // Started last, once the panel, the bus lock and the input device all exist.
+  //
+  // Priority 6: above the Arduino loop task (1) so a poll is not stuck behind a
+  // 24 ms frame push, and below the audio task (8) so it cannot cause an audible
+  // dropout. It runs briefly — one ~1 ms I2C transaction per period — and blocks
+  // on vTaskDelayUntil the rest of the time, so it does not starve anything.
+  //
+  // 3 KB of stack: readTouch's frame buffer is 14 bytes and it calls nothing
+  // deep, but Wire's transaction path is not shallow and this is not worth being
+  // tight about.
+  xTaskCreate(touchTask, "touch", 3072, nullptr, 6, nullptr);
 #endif
 }
 

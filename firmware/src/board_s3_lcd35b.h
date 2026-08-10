@@ -53,6 +53,11 @@
 // which then consumed the drag, so the list could not be scrolled while every
 // other screen could. Verified on hardware 2026-08-10.
 #define BOARD_TOUCH_SNAP        0
+// Sample touch from its own task rather than the LVGL read callback. Needed here
+// because the loop task blocks for ~24 ms at a time pushing a whole frame to the
+// panel, which delayed every touch poll that landed inside a flush. The C6's
+// flushes are partial and short, so it keeps the simpler in-callback polling.
+#define BOARD_TOUCH_TASK        1
 #define BOARD_SD_SDMMC          1   // hardware SDMMC host, 1-bit
 #define BOARD_SD_SOFT_SPI       0
 #ifndef BOARD_HAS_PSRAM
