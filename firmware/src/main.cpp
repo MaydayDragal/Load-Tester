@@ -388,6 +388,17 @@ void setup() {
   // being rediscovered the next time a screen grows.
   Serial.printf("[boot] heap after UI: %u B free, largest block %u B (BLE connect needs ~30 KB contiguous)\n",
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+#if BOARD_HAS_PSRAM
+  // On a PSRAM board the number above is INTERNAL heap only, and the draw
+  // buffers are not in it — so print PSRAM separately rather than leaving a
+  // reader to wonder whether a healthy-looking internal figure means the buffers
+  // landed externally or the allocation quietly fell back. A size of 0 here is
+  // the unambiguous signal that PSRAM did not come up (suspect
+  // board_build.arduino.memory_type — see platformio.ini).
+  Serial.printf("[boot] psram: %u B total, %u B free, largest block %u B\n",
+                (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+#endif
 
   net::onProgress = [](net::State st, const char *text) { ui::onNetProgress((int)st, text); };
   net::onScanDone = [](int n, const char *err) {

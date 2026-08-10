@@ -473,11 +473,39 @@ static void expanderPanelEnable() {
 #endif
 }
 
+// One-shot census of the shared I2C bus, printed at boot before anything is
+// asked to work. Every peripheral on both boards except the panel itself hangs
+// off this one bus, so "which addresses answered" is the first question a
+// bring-up asks and the cheapest one to answer. A part that is missing here
+// explains every later failure that touches it — without having to infer it from
+// a flood of per-transaction errors, which is how the S3 board's touch
+// controller was first found (2026-08-10).
+//
+// endTransmission() with an empty buffer sends the address alone and reports the
+// ACK, and unlike requestFrom() it does not log on NACK, so the scan is quiet
+// for the ~110 addresses that are not populated.
+static void i2cScan() {
+  Serial.print("[i2c] scan:");
+  int found = 0;
+  for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf(" 0x%02X", addr);
+      found++;
+    }
+  }
+  if (found == 0) Serial.print(" nothing responded — check SDA/SCL wiring");
+  Serial.printf("  (%d device%s)\n", found, found == 1 ? "" : "s");
+}
+
 void begin() {
   // I2C first: the panel reset/enable is on the TCA9554 expander, so the panel
   // must be released from reset over I2C *before* the SH8601 bring-up.
   Wire.begin(TOUCH_I2C_SDA, TOUCH_I2C_SCL);
   Wire.setClock(400000);
+  // Scan BEFORE the expander/touch writes below, so what prints is the bus as
+  // found rather than the bus as this function has already poked it.
+  i2cScan();
   expanderPanelEnable();
   touchInit();
 
